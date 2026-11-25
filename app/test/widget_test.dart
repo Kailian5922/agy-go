@@ -1,12 +1,12 @@
+import 'dart:async';
+
 import 'package:acp_client/acp_client.dart';
 import 'package:agy_go/app.dart';
 import 'package:agy_go/ui/chat/permission_card.dart';
-import 'package:agy_go/ui/theme/app_theme.dart';
-import 'package:agy_go/state/settings_state.dart';
-import 'package:material_ui/material_ui.dart';
+import 'package:agy_go/ui/theme/theme.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'dart:async';
+import 'package:material_ui/material_ui.dart';
 
 void main() {
   testWidgets('AgyGoApp renders HomeShell and on-device install CTA', (
@@ -14,10 +14,10 @@ void main() {
   ) async {
     await tester.pumpWidget(const ProviderScope(child: AgyGoApp()));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.text('AGY Go'), findsOneWidget);
-    expect(find.text('一键安装本机引擎'), findsOneWidget);
+    expect(find.text('一键安装官方 agy'), findsOneWidget);
   });
 
   testWidgets('PermissionCard renders options and dispatches selected optionId', (
@@ -52,11 +52,7 @@ void main() {
     String? picked;
     await tester.pumpWidget(
       MaterialApp(
-        theme: buildAgyTheme(
-          brightness: Brightness.dark,
-          accentId: AppAccentId.nebula,
-          glassBlur: false,
-        ),
+        theme: buildDarkTheme(accent: AppAccent.mist, glassBlur: false),
         home: Scaffold(
           body: PermissionCard(
             pending: pending,
@@ -70,7 +66,7 @@ void main() {
       ),
     );
 
-    expect(find.text('Run flutter test'), findsOneWidget);
+    expect(find.text('\$ Run flutter test'), findsOneWidget);
     await tester.tap(find.text('允许一次'));
     await tester.pump();
 

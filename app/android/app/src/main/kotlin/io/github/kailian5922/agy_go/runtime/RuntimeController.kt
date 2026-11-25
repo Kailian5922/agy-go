@@ -21,6 +21,7 @@ class RuntimeController private constructor(private val context: Context) {
     }
 
     private val installer = AgyInstaller(context)
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "agy-runtime-ctrl") }
     private val listeners = CopyOnWriteArraySet<EventListener>()
     private val logRing = ArrayDeque<String>(MAX_LOG_LINES)
@@ -33,7 +34,10 @@ class RuntimeController private constructor(private val context: Context) {
     @Volatile private var token: String? = null
     @Volatile private var lastError: String? = null
     @Volatile private var authConfig: AgyAuthHelper.AuthConfig = AgyAuthHelper.AuthConfig()
-    @Volatile private var preferProot: Boolean = false
+    @Volatile private var preferProot: Boolean = prefs.getBoolean(K_PREFER_PROOT, false)
+    @Volatile private var phoneStorageEnabled: Boolean = prefs.getBoolean(K_PHONE_STORAGE, false)
+    @Volatile private var phoneControlEnabled: Boolean = false
+    @Volatile private var extraWorkspaceBinds: List<String> = emptyList()
     @Volatile private var process: AgyProcess? = null
 
     // Interactive OAuth login helper process (`agy acp --login`), if active.
@@ -43,6 +47,8 @@ class RuntimeController private constructor(private val context: Context) {
     init {
         installer.ensureDirectories()
         refreshInstalledStateLocked()
+        val granted = PhoneStorage.isGranted(context)
+        PhoneStorage.syncShortcuts(installer.homeDir, installer.prootRootfsDir, phoneStorageEnabled && granted)
     }
 
     fun addListener(listener: EventListener) {
@@ -54,6 +60,7 @@ class RuntimeController private constructor(private val context: Context) {
     }
 
     fun statusSnapshot(): Map<String, Any?> = synchronized(lock) {
+        val storageGranted = PhoneStorage.isGranted(context)
         mapOf(
             "phase" to phase,
             "abi" to installer.primaryAbi(),
@@ -64,6 +71,10 @@ class RuntimeController private constructor(private val context: Context) {
             "installedVersion" to installedVersion,
             "workspacePath" to installer.workspaceDir.absolutePath,
             "homePath" to installer.homeDir.absolutePath,
+            "phoneStorageEnabled" to phoneStorageEnabled,
+            "phoneStorageGranted" to storageGranted,
+            "phoneStorageMounted" to (phoneStorageEnabled && storageGranted),
+            "phoneStoragePath" to PhoneStorage.hostRoot(),
             "port" to port,
             "token" to token,
             "error" to lastError,
@@ -84,8 +95,38 @@ class RuntimeController private constructor(private val context: Context) {
     fun setPreferProot(enabled: Boolean) {
         synchronized(lock) {
             preferProot = enabled
+            prefs.edit().putBoolean(K_PREFER_PROOT, enabled).apply()
         }
         emitStatus()
+    }
+
+    fun setPhoneStorage(enabled: Boolean) {
+        synchronized(lock) {
+            phoneStorageEnabled = enabled
+            prefs.edit().putBoolean(K_PHONE_STORAGE, enabled).apply()
+            val mounted = enabled && PhoneStorage.isGranted(context)
+            PhoneStorage.syncShortcuts(installer.homeDir, installer.prootRootfsDir, mounted)
+            GuestWorkspaceSetup.writeInstructions(
+                homeDir = installer.homeDir,
+                workspaceDir = installer.workspaceDir,
+                useProot = preferProot && installer.isProotAvailable(),
+                phoneStorageMounted = mounted,
+                phoneControlEnabled = phoneControlEnabled,
+            )
+        }
+        emitStatus()
+    }
+
+    fun setWorkspaceBinds(paths: List<String>) {
+        synchronized(lock) {
+            extraWorkspaceBinds = paths.filter { it.startsWith("/") }.distinct()
+        }
+    }
+
+    fun setPhoneControlEnabled(enabled: Boolean) {
+        synchronized(lock) {
+            phoneControlEnabled = enabled
+        }
     }
 
     fun installOrUpdate() {
@@ -158,11 +199,21 @@ class RuntimeController private constructor(private val context: Context) {
         }
     }
 
-    fun start() {
+    fun start(phoneStorage: Boolean? = null, extraBinds: List<String>? = null) {
         worker.execute {
             val useProot: Boolean
             val currentAuth: AgyAuthHelper.AuthConfig
+            val mountStorage: Boolean
+            val binds: List<String>
+            val phoneCtrl: Boolean
             synchronized(lock) {
+                if (phoneStorage != null) {
+                    phoneStorageEnabled = phoneStorage
+                    prefs.edit().putBoolean(K_PHONE_STORAGE, phoneStorage).apply()
+                }
+                if (extraBinds != null) {
+                    extraWorkspaceBinds = extraBinds.filter { it.startsWith("/") }.distinct()
+                }
                 if (phase == "running" && process?.isAlive() == true) {
                     emitStatus()
                     return@execute
@@ -181,6 +232,12 @@ class RuntimeController private constructor(private val context: Context) {
                 token = null
                 useProot = preferProot && installer.isProotAvailable()
                 currentAuth = authConfig
+                mountStorage = phoneStorageEnabled && PhoneStorage.isGranted(context)
+                binds = extraWorkspaceBinds
+                phoneCtrl = phoneControlEnabled
+            }
+            if (phoneStorageEnabled && !mountStorage) {
+                appendLog("[runtime] phone storage requested but permission not granted", "system")
             }
             emitStatus()
 
@@ -190,6 +247,9 @@ class RuntimeController private constructor(private val context: Context) {
                     installer = installer,
                     authConfig = currentAuth,
                     useProot = useProot,
+                    phoneStorageMounted = mountStorage,
+                    extraWorkspaceBinds = binds,
+                    phoneControlEnabled = phoneCtrl,
                     listener = object : AgyProcess.Listener {
                         override fun onLog(line: String, stream: String) {
                             appendLog(line, stream)
@@ -295,7 +355,7 @@ class RuntimeController private constructor(private val context: Context) {
                     redirectErrorStream(true)
                     val env = environment()
                     env["HOME"] = installer.homeDir.absolutePath
-                    env["SSH_CONNECTION"] = "127.0.0.1 0 127.0.0.1 22" // triggers print-URL + paste-code flow
+                    env["SSH_CONNECTION"] = "127.0.0.1 0 127.0.0.1 22"
                     env["NO_BROWSER"] = "1"
                 }
                 val proc = pb.start()
@@ -346,6 +406,14 @@ class RuntimeController private constructor(private val context: Context) {
         }
     }
 
+    fun notifyStorageChanged() {
+        synchronized(lock) {
+            val mounted = phoneStorageEnabled && PhoneStorage.isGranted(context)
+            PhoneStorage.syncShortcuts(installer.homeDir, installer.prootRootfsDir, mounted)
+        }
+        emitStatus()
+    }
+
     private fun stopLoginProcess() {
         try {
             loginProcess?.destroy()
@@ -392,6 +460,9 @@ class RuntimeController private constructor(private val context: Context) {
 
     companion object {
         private const val MAX_LOG_LINES = 400
+        private const val PREFS_NAME = "agy_runtime_prefs"
+        private const val K_PREFER_PROOT = "prefer_proot"
+        private const val K_PHONE_STORAGE = "phone_storage"
 
         @Volatile private var instance: RuntimeController? = null
 

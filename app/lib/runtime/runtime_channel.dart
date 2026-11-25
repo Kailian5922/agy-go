@@ -43,8 +43,11 @@ class RuntimeChannel {
     return RuntimeUpdateCheck.fromMap(raw ?? const {});
   }
 
-  Future<void> start() async {
-    await _methods.invokeMethod<void>('start');
+  Future<void> start({bool? phoneStorage, List<String>? extraBinds}) async {
+    await _methods.invokeMethod<void>('start', {
+      'phoneStorage': ?phoneStorage,
+      'extraBinds': ?extraBinds,
+    });
   }
 
   Future<void> stop() async {
@@ -74,6 +77,52 @@ class RuntimeChannel {
   Future<void> setPreferProot(bool enabled) async {
     try {
       await _methods.invokeMethod<void>('setPreferProot', {'enabled': enabled});
+    } on MissingPluginException {
+      // Non-Android desktop/test environments.
+    }
+  }
+
+  Future<PhoneStorageStatus> storageStatus() async {
+    try {
+      final raw = await _methods.invokeMethod<Map<Object?, Object?>>('storageStatus');
+      return PhoneStorageStatus.fromMap(raw ?? const {});
+    } on MissingPluginException {
+      return const PhoneStorageStatus();
+    }
+  }
+
+  Future<PhoneStorageStatus> requestStorage() async {
+    try {
+      final raw = await _methods.invokeMethod<Map<Object?, Object?>>('requestStorage');
+      return PhoneStorageStatus.fromMap(raw ?? const {});
+    } on MissingPluginException {
+      return const PhoneStorageStatus();
+    }
+  }
+
+  Future<bool> openAllFilesAccess() async {
+    try {
+      return await _methods.invokeMethod<bool>('openAllFilesAccess') ?? false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  Future<PhoneStorageStatus> setPhoneStorage(bool enabled) async {
+    try {
+      final raw = await _methods.invokeMethod<Map<Object?, Object?>>(
+        'setPhoneStorage',
+        {'enabled': enabled},
+      );
+      return PhoneStorageStatus.fromMap(raw ?? const {});
+    } on MissingPluginException {
+      return const PhoneStorageStatus();
+    }
+  }
+
+  Future<void> setWorkspaceBinds(List<String> paths) async {
+    try {
+      await _methods.invokeMethod<void>('setWorkspaceBinds', {'paths': paths});
     } on MissingPluginException {
       // Non-Android desktop/test environments.
     }

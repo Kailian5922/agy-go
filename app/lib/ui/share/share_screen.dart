@@ -1,3 +1,5 @@
+// Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
+
 import 'dart:convert';
 import 'dart:ui' as ui;
 
@@ -11,11 +13,14 @@ import '../../share/conversation_export.dart';
 import '../../state/chat_state.dart';
 import '../../state/hosts_state.dart';
 import '../../state/system_state.dart';
+import '../common/app_dialog.dart';
+import '../common/brief_notice.dart';
+import '../common/settings_widgets.dart';
+import '../shell/brand_mark.dart';
 import '../shell/page_frame.dart';
-import '../theme/app_theme.dart';
-import '../theme/glass_widgets.dart';
+import '../theme/theme.dart';
 
-/// Share cards (PNG), redacted Markdown/JSON export, and local conversation replay viewer.
+/// Share cards (PNG), redacted Markdown/JSON export, and local replay viewer.
 class ShareScreen extends ConsumerStatefulWidget {
   const ShareScreen({super.key});
 
@@ -34,75 +39,84 @@ class _ShareScreenState extends ConsumerState<ShareScreen> {
     final chat = ref.watch(chatProvider);
     final hosts = ref.watch(hostsProvider);
     final transcript = _replaying ?? chat.transcript;
-    final surfaces = AgySurfaces.of(context);
+    final surfaces = DshSurfaces.of(context);
+    final dsh = DshColors.of(context);
     final theme = Theme.of(context);
 
     final visibleItems = _replaying != null
-        ? transcript.items.take(_replayStep.clamp(0, transcript.items.length)).toList()
+        ? transcript.items
+              .take(_replayStep.clamp(0, transcript.items.length))
+              .toList()
         : transcript.items;
 
-    return AgyPage(
-      title: _replaying != null ? '对话回放' : '分享卡与导出回放',
+    return AppPage.list(
+      title: _replaying != null ? '对话回放' : '分享与回放',
+      subtitle: const Text('所有导出内容均自动脱敏密钥与个人凭据'),
       actions: [
         if (_replaying != null)
-          TextButton(
+          GlassIconButton(
+            icon: AppIcons.close,
+            tooltip: '退出回放',
             onPressed: () => setState(() => _replaying = null),
-            child: const Text('退出回放'),
           ),
       ],
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 6, 14, 32),
-        children: [
-          if (_replaying != null) ...[
-            HairlineCard(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  Text(
-                    '回放进度：$_replayStep / ${transcript.items.length}',
-                    style: theme.textTheme.labelLarge,
-                  ),
-                  const Spacer(),
-                  IconButton(
-                    icon: const Icon(Icons.skip_previous_rounded),
-                    onPressed: _replayStep > 1
-                        ? () => setState(() => _replayStep--)
-                        : null,
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.skip_next_rounded),
-                    onPressed: _replayStep < transcript.items.length
-                        ? () => setState(() => _replayStep++)
-                        : null,
-                  ),
-                ],
+      children: [
+        if (_replaying != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+            child: GlassSurface(
+              tier: GlassTier.card,
+              borderRadius: AppShape.radiusLg,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 8,
+                ),
+                child: Row(
+                  children: [
+                    Text(
+                      '回放进度：$_replayStep / ${transcript.items.length}',
+                      style: AppType.tabular(theme.textTheme.labelLarge!),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(AppIcons.pagePrevious, size: 18),
+                      onPressed: _replayStep > 1
+                          ? () => setState(() => _replayStep--)
+                          : null,
+                    ),
+                    IconButton(
+                      icon: const Icon(AppIcons.pageNext, size: 18),
+                      onPressed: _replayStep < transcript.items.length
+                          ? () => setState(() => _replayStep++)
+                          : null,
+                    ),
+                  ],
+                ),
               ),
             ),
-            const SizedBox(height: 12),
-          ],
-
-          // Visual frosted share card preview captured to high-DPI PNG
-          RepaintBoundary(
+          ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+          child: RepaintBoundary(
             key: _cardKey,
             child: Container(
               padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
+              decoration: ShapeDecoration(
                 gradient: LinearGradient(
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
-                  colors: [surfaces.bgTop, surfaces.bgBottom],
+                  colors: [surfaces.backdropTop, surfaces.backdropBottom],
                 ),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: surfaces.hairline, width: 1),
+                shape: AppShape.outlined(surfaces.card.hairline, radius: 22),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
                     children: [
-                      Icon(
-                        Icons.rocket_launch_rounded,
-                        size: 18,
+                      AgyBrandMark(
+                        size: 20,
                         color: theme.colorScheme.primary,
                       ),
                       const SizedBox(width: 8),
@@ -113,15 +127,13 @@ class _ShareScreenState extends ConsumerState<ShareScreen> {
                               : 'AGY Go 对话分享卡',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.titleSmall?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
+                          style: theme.textTheme.titleSmall,
                         ),
                       ),
                       Text(
                         hosts.activeLabel(),
                         style: theme.textTheme.labelSmall?.copyWith(
-                          color: surfaces.subtleText,
+                          color: dsh.textTertiary,
                         ),
                       ),
                     ],
@@ -133,7 +145,7 @@ class _ShareScreenState extends ConsumerState<ShareScreen> {
                     Text(
                       '当前会话暂无内容，发起对话或导入回放 JSON 后即可生成分享卡。',
                       style: theme.textTheme.bodySmall?.copyWith(
-                        color: surfaces.subtleText,
+                        color: dsh.textTertiary,
                       ),
                     )
                   else
@@ -141,21 +153,31 @@ class _ShareScreenState extends ConsumerState<ShareScreen> {
                       Padding(
                         padding: const EdgeInsets.only(bottom: 10),
                         child: switch (item) {
-                          UserTranscriptItem(:final text) => Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: theme.colorScheme.primary.withValues(alpha: 0.14),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              ConversationExport.redactSecrets(text),
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                fontWeight: FontWeight.w600,
+                          UserTranscriptItem(:final text) => Align(
+                            alignment: Alignment.centerRight,
+                            child: DecoratedBox(
+                              decoration: ShapeDecoration(
+                                color: surfaces.userBubble,
+                                shape: AppShape.bubble,
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 8,
+                                ),
+                                child: Text(
+                                  ConversationExport.redactSecrets(text),
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: surfaces.onUserBubble,
+                                  ),
+                                ),
                               ),
                             ),
                           ),
-                          AssistantTranscriptItem(:final text, :final toolCalls) =>
+                          AssistantTranscriptItem(
+                            :final text,
+                            :final toolCalls,
+                          ) =>
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -164,9 +186,8 @@ class _ShareScreenState extends ConsumerState<ShareScreen> {
                                     padding: const EdgeInsets.only(bottom: 4),
                                     child: Text(
                                       '执行了 ${toolCalls.length} 次工具调用',
-                                      style: theme.textTheme.labelSmall?.copyWith(
-                                        color: surfaces.subtleText,
-                                      ),
+                                      style: theme.textTheme.labelSmall
+                                          ?.copyWith(color: dsh.textTertiary),
                                     ),
                                   ),
                                 Text(
@@ -179,76 +200,82 @@ class _ShareScreenState extends ConsumerState<ShareScreen> {
                             ),
                         },
                       ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Generated by AGY Go · 已自动脱敏密钥与凭据',
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: surfaces.subtleText,
-                    ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Icon(AppIcons.redacted, size: 13, color: dsh.success),
+                      const SizedBox(width: 4),
+                      Text(
+                        'Generated by AGY Go · 已自动脱敏凭据',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: dsh.textTertiary,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
             ),
           ),
-
-          const SizedBox(height: 16),
-
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              FilledButton.icon(
-                onPressed: _capturing ? null : _sharePngCard,
-                icon: const Icon(Icons.image_outlined, size: 18),
-                label: Text(_capturing ? '生成中…' : '生成 PNG 分享卡'),
-              ),
-              FilledButton.tonalIcon(
-                onPressed: () {
-                  final md = ConversationExport.toMarkdown(
-                    transcript,
-                    hostLabel: hosts.activeLabel(),
+        ),
+        SettingsSection(
+          title: '导出与回放',
+          children: [
+            SettingsTile(
+              icon: AppIcons.shareImage,
+              tint: 0,
+              title: _capturing ? '正在生成 PNG…' : '生成 PNG 分享卡',
+              subtitle: '高清渲染并调用系统分享',
+              onTap: _capturing ? null : _sharePngCard,
+            ),
+            SettingsTile(
+              icon: AppIcons.shareText,
+              tint: 4,
+              title: '复制脱敏 Markdown',
+              onTap: () {
+                final md = ConversationExport.toMarkdown(
+                  transcript,
+                  hostLabel: hosts.activeLabel(),
+                );
+                Clipboard.setData(ClipboardData(text: md));
+                showBriefNotice(context, '已复制脱敏 Markdown');
+              },
+            ),
+            SettingsTile(
+              icon: AppIcons.shareBundle,
+              tint: 2,
+              title: '导出回放包 JSON',
+              subtitle: 'agy-go-replay/v1 格式',
+              onTap: () async {
+                final jsonText = ConversationExport.toReplayJson(
+                  transcript,
+                  hostLabel: hosts.activeLabel(),
+                );
+                try {
+                  await ref.read(systemToolsProvider.notifier).shareBytes(
+                    bytes: Uint8List.fromList(utf8.encode(jsonText)),
+                    filename: 'agy-replay.json',
+                    mimeType: 'application/json',
+                    title: '导出 AGY Go 对话回放',
                   );
-                  Clipboard.setData(ClipboardData(text: md));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('已复制脱敏后的 Markdown 对话')),
-                  );
-                },
-                icon: const Icon(Icons.copy_all_rounded, size: 18),
-                label: const Text('复制 Markdown'),
-              ),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  final jsonText = ConversationExport.toReplayJson(
-                    transcript,
-                    hostLabel: hosts.activeLabel(),
-                  );
-                  try {
-                    await ref.read(systemToolsProvider.notifier).shareBytes(
-                      bytes: Uint8List.fromList(utf8.encode(jsonText)),
-                      filename: 'agy-replay.json',
-                      mimeType: 'application/json',
-                      title: '导出 AGY Go 对话回放',
-                    );
-                  } catch (_) {
-                    await Clipboard.setData(ClipboardData(text: jsonText));
-                    if (!context.mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('已复制 JSON 回放包到剪贴板')),
-                    );
+                } catch (_) {
+                  await Clipboard.setData(ClipboardData(text: jsonText));
+                  if (context.mounted) {
+                    showBriefNotice(context, '已复制 JSON 回放包');
                   }
-                },
-                icon: const Icon(Icons.data_object_rounded, size: 18),
-                label: const Text('导出回放 JSON'),
-              ),
-              OutlinedButton.icon(
-                onPressed: _importReplayDialog,
-                icon: const Icon(Icons.play_circle_outline_rounded, size: 18),
-                label: const Text('导入 JSON 回放'),
-              ),
-            ],
-          ),
-        ],
-      ),
+                }
+              },
+            ),
+            SettingsTile(
+              icon: AppIcons.replay,
+              tint: 5,
+              title: '导入 JSON 回放',
+              subtitle: '粘贴回放包逐步重演对话过程',
+              onTap: _importReplayDialog,
+            ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -261,18 +288,14 @@ class _ShareScreenState extends ConsumerState<ShareScreen> {
       final image = await boundary.toImage(pixelRatio: 3.0);
       final data = await image.toByteData(format: ui.ImageByteFormat.png);
       if (data == null) return;
-      final bytes = data.buffer.asUint8List();
       await ref.read(systemToolsProvider.notifier).shareBytes(
-        bytes: bytes,
+        bytes: data.buffer.asUint8List(),
         filename: 'agy-share-card.png',
         mimeType: 'image/png',
         title: '分享 AGY Go 对话卡',
       );
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('分享卡生成失败: $e')),
-      );
+      if (mounted) showBriefNotice(context, '分享卡生成失败: $e');
     } finally {
       if (mounted) setState(() => _capturing = false);
     }
@@ -280,7 +303,7 @@ class _ShareScreenState extends ConsumerState<ShareScreen> {
 
   Future<void> _importReplayDialog() async {
     final ctrl = TextEditingController();
-    final raw = await showDialog<String>(
+    final raw = await showAppDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('导入对话回放 JSON'),
@@ -288,7 +311,7 @@ class _ShareScreenState extends ConsumerState<ShareScreen> {
           controller: ctrl,
           maxLines: 6,
           decoration: const InputDecoration(
-            hintText: '粘贴 agy-go-replay/v1 格式的 JSON 内容…',
+            hintText: '粘贴 agy-go-replay/v1 格式的 JSON…',
           ),
         ),
         actions: [
@@ -312,10 +335,7 @@ class _ShareScreenState extends ConsumerState<ShareScreen> {
         _replayStep = parsed.items.isEmpty ? 0 : 1;
       });
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('无法解析回放包: $e')),
-      );
+      if (mounted) showBriefNotice(context, '无法解析回放包: $e');
     }
   }
 }

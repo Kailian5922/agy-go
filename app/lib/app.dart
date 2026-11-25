@@ -1,33 +1,123 @@
-import 'package:material_ui/material_ui.dart';
+// Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_ui/material_ui.dart';
 
 import 'state/settings_state.dart';
+import 'ui/common/side_insets.dart';
 import 'ui/shell/home_shell.dart';
-import 'ui/theme/app_theme.dart';
+import 'ui/theme/theme.dart';
 
-class AgyGoApp extends ConsumerWidget {
-  const AgyGoApp({super.key});
+class AgyGoApp extends ConsumerStatefulWidget {
+  const AgyGoApp({super.key, this.home});
+
+  /// Replaces [HomeShell] in widget tests.
+  final Widget? home;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<AgyGoApp> createState() => _AgyGoAppState();
+}
+
+class _AgyGoAppState extends ConsumerState<AgyGoApp>
+    with WidgetsBindingObserver {
+  AppAccent? _accent;
+  bool? _glassBlur;
+  bool? _instantPages;
+  bool? _fluid;
+  late ThemeData _light;
+  late ThemeData _dark;
+  bool _settled = false;
+  final _layersKey = GlobalKey(debugLabel: 'agy app layers');
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAccessibilityFeatures() => setState(() {});
+
+  void _ensureThemes({
+    required AppAccent accent,
+    required bool glassBlur,
+    required bool instantPages,
+    required bool fluid,
+  }) {
+    if (accent == _accent &&
+        glassBlur == _glassBlur &&
+        instantPages == _instantPages &&
+        fluid == _fluid) {
+      return;
+    }
+    _accent = accent;
+    _glassBlur = glassBlur;
+    _instantPages = instantPages;
+    _fluid = fluid;
+    _light = buildLightTheme(
+      accent: accent,
+      glassBlur: glassBlur,
+      glyphLocale: const Locale('zh', 'CN'),
+      instantPages: instantPages,
+      fluid: fluid,
+    );
+    _dark = buildDarkTheme(
+      accent: accent,
+      glassBlur: glassBlur,
+      glyphLocale: const Locale('zh', 'CN'),
+      instantPages: instantPages,
+      fluid: fluid,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
+    final reduced = WidgetsBinding
+        .instance
+        .platformDispatcher
+        .accessibilityFeatures
+        .disableAnimations;
+    final fluid = settings.fluidMotion && !reduced;
+
+    _ensureThemes(
+      accent: AppAccent.fromId(settings.accent),
+      glassBlur: settings.glassBlur,
+      instantPages: reduced,
+      fluid: fluid,
+    );
+
+    if (settings.loaded && !_settled) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _settled = true);
+    }
 
     return MaterialApp(
       title: 'AGY Go',
       debugShowCheckedModeBanner: false,
-      locale: settings.locale,
+      theme: _light,
+      darkTheme: _dark,
       themeMode: settings.themeMode,
-      theme: buildAgyTheme(
-        brightness: Brightness.light,
-        accentId: settings.accent,
-        glassBlur: settings.glassBlur,
+      themeAnimationStyle: _settled && !reduced
+          ? const AnimationStyle(
+              duration: AppMotion.standard,
+              curve: AppMotion.std,
+            )
+          : const AnimationStyle(duration: Duration.zero),
+      locale: settings.locale ?? const Locale('zh', 'CN'),
+      supportedLocales: const [Locale('zh', 'CN'), Locale('en')],
+      localizationsDelegates: GlobalMaterialLocalizations.delegates,
+      builder: (context, child) => AppMotionScope(
+        key: _layersKey,
+        fluid: fluid,
+        child: MirroredSideInsets(child: child!),
       ),
-      darkTheme: buildAgyTheme(
-        brightness: Brightness.dark,
-        accentId: settings.accent,
-        glassBlur: settings.glassBlur,
-      ),
-      home: const HomeShell(),
+      home: widget.home ?? const HomeShell(),
     );
   }
 }

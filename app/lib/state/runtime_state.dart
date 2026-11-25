@@ -13,6 +13,7 @@ final runtimeChannelProvider = Provider<RuntimeChannel>(
 class LocalRuntimeState {
   const LocalRuntimeState({
     this.status = const RuntimeStatus.initial(),
+    this.storage = const PhoneStorageStatus(),
     this.progress,
     this.logs = const [],
     this.pendingOAuthUrl,
@@ -21,6 +22,7 @@ class LocalRuntimeState {
   });
 
   final RuntimeStatus status;
+  final PhoneStorageStatus storage;
   final RuntimeProgress? progress;
   final List<String> logs;
   final String? pendingOAuthUrl;
@@ -29,6 +31,7 @@ class LocalRuntimeState {
 
   LocalRuntimeState copyWith({
     RuntimeStatus? status,
+    PhoneStorageStatus? storage,
     RuntimeProgress? progress,
     bool clearProgress = false,
     List<String>? logs,
@@ -38,6 +41,7 @@ class LocalRuntimeState {
     bool? checkingUpdate,
   }) => LocalRuntimeState(
     status: status ?? this.status,
+    storage: storage ?? this.storage,
     progress: clearProgress ? null : (progress ?? this.progress),
     logs: logs ?? this.logs,
     pendingOAuthUrl: clearOAuthUrl
@@ -72,6 +76,9 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
           ),
         );
       }
+      if (prev == null || prev.phoneStorage != next.phoneStorage) {
+        unawaited(channel.setPhoneStorage(next.phoneStorage));
+      }
     });
 
     _sub = channel.events().listen(_onEvent, onError: (_) {});
@@ -87,8 +94,9 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
   Future<void> _hydrate(RuntimeChannel channel) async {
     final status = await channel.getStatus();
     final logs = await channel.getLogs();
+    final storage = await channel.storageStatus();
     if (!ref.mounted) return;
-    state = state.copyWith(status: status, logs: logs);
+    state = state.copyWith(status: status, logs: logs, storage: storage);
 
     final settings = ref.read(settingsProvider);
     if (settings.loaded) {
@@ -97,6 +105,7 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
         apiKey: settings.apiKey,
         baseUrl: settings.customBaseUrl,
       );
+      await channel.setPhoneStorage(settings.phoneStorage);
     }
 
     if (!_autoStartTried &&
@@ -130,11 +139,41 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
     }
   }
 
+  Future<void> refreshStorage() async {
+    final channel = ref.read(runtimeChannelProvider);
+    final storage = await channel.storageStatus();
+    final status = await channel.getStatus();
+    if (!ref.mounted) return;
+    state = state.copyWith(storage: storage, status: status);
+  }
+
+  Future<PhoneStorageStatus> requestStorage() async {
+    final channel = ref.read(runtimeChannelProvider);
+    final storage = await channel.requestStorage();
+    final status = await channel.getStatus();
+    if (ref.mounted) {
+      state = state.copyWith(storage: storage, status: status);
+    }
+    return storage;
+  }
+
+  Future<bool> openAllFilesAccess() =>
+      ref.read(runtimeChannelProvider).openAllFilesAccess();
+
+  Future<void> setPhoneStorage(bool enabled) async {
+    await ref.read(settingsProvider.notifier).setPhoneStorage(enabled);
+    final channel = ref.read(runtimeChannelProvider);
+    final storage = await channel.setPhoneStorage(enabled);
+    final status = await channel.getStatus();
+    if (!ref.mounted) return;
+    state = state.copyWith(storage: storage, status: status);
+  }
+
   Future<void> installOrUpdate() async {
     await ref.read(runtimeChannelProvider).install();
   }
 
-  Future<void> start() async {
+  Future<void> start({List<String>? extraBinds}) async {
     final settings = ref.read(settingsProvider);
     final channel = ref.read(runtimeChannelProvider);
     await channel.setAuthConfig(
@@ -142,7 +181,10 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
       apiKey: settings.apiKey,
       baseUrl: settings.customBaseUrl,
     );
-    await channel.start();
+    await channel.start(
+      phoneStorage: settings.phoneStorage,
+      extraBinds: extraBinds,
+    );
   }
 
   Future<void> stop() async {

@@ -40,6 +40,15 @@
 - **可选 PRoot Ubuntu 24.04 容器**：执行 `bash runtime/build-rootfs.sh arm64-v8a`（或 `x86_64`）生成 Ubuntu 24.04 rootfs 与 Termux `libproot.so` / `libtalloc.so` / `libandroid-shmem.so`，由 Gradle 自动打包并在 `EngineScreen` 解锁 PRoot 切换开关。
 - **后台不断任务**：`AgyService` 前台服务持有 `agy acp` 子进程并通过随机 24 字节令牌鉴权的 `127.0.0.1` 回环桥接给 Flutter，Activity 重建或切后台不断流。
 
+## 2B. 工作区与手机共享存储挂载（参考 DSH Go）
+
+- **存储权限策略（`PhoneStorage.kt`）**：配合 `targetSdk = 28` 与 `android:requestLegacyExternalStorage="true"`，优先通过标准运行时存储权限（`READ/WRITE_EXTERNAL_STORAGE`）授权，并在 Android 11+ 受限时提供「所有文件访问（`MANAGE_EXTERNAL_STORAGE`）」设置直达。
+- **双模式挂载与快捷入口**：
+  - **原生 Bionic 模式**：进程直通访问 `/storage/emulated/0`，自动同步创建 `HOME/手机存储 -> /storage/emulated/0` 软链。
+  - **PRoot 容器模式**：启动 `proot` 时注入 `-b /storage/emulated/0:/sdcard -b /storage` 及额外已注册工作区目录绑定，并在容器内创建 `/root/手机存储 -> /sdcard`。
+- **托管工作区提示（`GuestWorkspaceSetup.kt`）**：在受控标记（`<!-- agy-go:managed`）保护下写入 `.gemini/GEMINI.md` 与 `AGENTS.md`，明确告知 `agy` 已挂载的手机存储路径与推荐输出目录 `/storage/emulated/0/Download/AGY-Go/`。
+- **多工作区注册与 ACP `cwd` 绑定（`WorkspacesController` + `DirectoryBrowserPage`）**：按主机独立持久化多个工作区（置顶、分组、最近路径），抽屉和空状态随时切换；新建会话时将选中工作区的真实路径作为 `cwd` 传给 `agy acp` 的 `session/new`。
+
 ## 3. MCP 手机操控安全边界（SafetyGate）
 
 - `PhoneMcpServer.kt` 在 `127.0.0.1:<随机端口>/mcp` 提供标准 MCP Streamable HTTP（JSON-RPC 2.0，Bearer Token 鉴权），由 `PhonePlugin` 自动写入 `~/.gemini/antigravity-cli/settings.json` 并在 `ChatController` 的 `session/new` 中通过 `HttpMcpServerConfig` 注入，完全无需改动 `agy` 二进制。

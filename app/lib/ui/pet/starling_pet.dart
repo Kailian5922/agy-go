@@ -4,17 +4,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../state/pet_state.dart';
+import '../common/brief_notice.dart';
+import '../common/settings_widgets.dart';
 import '../shell/page_frame.dart';
-import '../theme/app_theme.dart';
-import '../theme/glass_widgets.dart';
+import '../theme/theme.dart';
 
 /// 100% original animated companion ("星灵 Starling") rendered via CustomPainter.
+/// Zero proprietary assets from DSH Go.
 class StarlingAvatar extends StatefulWidget {
-  const StarlingAvatar({
-    super.key,
-    required this.mood,
-    this.size = 56,
-  });
+  const StarlingAvatar({super.key, required this.mood, this.size = 56});
 
   final PetMood mood;
   final double size;
@@ -40,15 +38,10 @@ class _StarlingAvatarState extends State<StarlingAvatar>
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: _ctrl,
-      builder: (context, _) {
-        return CustomPaint(
-          size: Size.square(widget.size),
-          painter: _StarlingPainter(
-            mood: widget.mood,
-            progress: _ctrl.value,
-          ),
-        );
-      },
+      builder: (context, _) => CustomPaint(
+        size: Size.square(widget.size),
+        painter: _StarlingPainter(mood: widget.mood, progress: _ctrl.value),
+      ),
     );
   }
 }
@@ -68,22 +61,20 @@ class _StarlingPainter extends CustomPainter {
     final r = size.shortestSide * 0.34;
 
     final accent = switch (mood) {
-      PetMood.thinking => const Color(0xFF638CFF),
-      PetMood.working => const Color(0xFF10B981),
-      PetMood.waitingApproval => const Color(0xFFF59E0B),
-      PetMood.happy => const Color(0xFF8B5CF6),
+      PetMood.thinking => const Color(0xFF4B67B4),
+      PetMood.working => const Color(0xFF34766F),
+      PetMood.waitingApproval => const Color(0xFFD97706),
+      PetMood.happy => const Color(0xFF726291),
       PetMood.sleeping => const Color(0xFF64748B),
-      PetMood.idle => const Color(0xFF3E63DD),
+      PetMood.idle => const Color(0xFF4B67B4),
     };
 
-    // Ambient halo
     canvas.drawCircle(
       Offset(cx, cy),
       r * (1.28 + 0.06 * math.sin(angle * 2)),
-      Paint()..color = accent.withValues(alpha: 0.24),
+      Paint()..color = accent.withValues(alpha: 0.22),
     );
 
-    // Core orb with specular gradient
     final bodyPaint = Paint()
       ..shader = RadialGradient(
         center: const Alignment(-0.35, -0.35),
@@ -96,7 +87,6 @@ class _StarlingPainter extends CustomPainter {
       ).createShader(Rect.fromCircle(center: Offset(cx, cy), radius: r));
     canvas.drawCircle(Offset(cx, cy), r, bodyPaint);
 
-    // Crisp glass rim
     canvas.drawCircle(
       Offset(cx, cy),
       r,
@@ -106,7 +96,6 @@ class _StarlingPainter extends CustomPainter {
         ..color = Colors.white.withValues(alpha: 0.55),
     );
 
-    // Expressive eyes
     final eyePaint = Paint()
       ..color = Colors.white
       ..strokeWidth = 2.0
@@ -116,13 +105,31 @@ class _StarlingPainter extends CustomPainter {
     final ex = r * 0.32;
     final ey = cy - r * 0.05;
     if (mood == PetMood.sleeping) {
-      canvas.drawLine(Offset(cx - ex - 3.5, ey), Offset(cx - ex + 3.5, ey), eyePaint);
-      canvas.drawLine(Offset(cx + ex - 3.5, ey), Offset(cx + ex + 3.5, ey), eyePaint);
+      canvas.drawLine(
+        Offset(cx - ex - 3.5, ey),
+        Offset(cx - ex + 3.5, ey),
+        eyePaint,
+      );
+      canvas.drawLine(
+        Offset(cx + ex - 3.5, ey),
+        Offset(cx + ex + 3.5, ey),
+        eyePaint,
+      );
     } else if (mood == PetMood.happy) {
-      final leftArc = Rect.fromCenter(center: Offset(cx - ex, ey + 1), width: 7, height: 6);
-      final rightArc = Rect.fromCenter(center: Offset(cx + ex, ey + 1), width: 7, height: 6);
-      canvas.drawArc(leftArc, math.pi, math.pi, false, eyePaint);
-      canvas.drawArc(rightArc, math.pi, math.pi, false, eyePaint);
+      canvas.drawArc(
+        Rect.fromCenter(center: Offset(cx - ex, ey + 1), width: 7, height: 6),
+        math.pi,
+        math.pi,
+        false,
+        eyePaint,
+      );
+      canvas.drawArc(
+        Rect.fromCenter(center: Offset(cx + ex, ey + 1), width: 7, height: 6),
+        math.pi,
+        math.pi,
+        false,
+        eyePaint,
+      );
     } else {
       final blink = progress > 0.94 ? 0.25 : 1.0;
       final fill = Paint()..color = Colors.white;
@@ -144,7 +151,6 @@ class _StarlingPainter extends CustomPainter {
       );
     }
 
-    // Orbiting spark satellite during active / approval states
     if (mood == PetMood.thinking ||
         mood == PetMood.working ||
         mood == PetMood.waitingApproval) {
@@ -168,14 +174,17 @@ class _StarlingPainter extends CustomPainter {
 }
 
 /// Draggable in-app floating companion resting over HomeShell.
-class DraggableInAppPet extends ConsumerStatefulWidget {
-  const DraggableInAppPet({super.key});
+class StarlingPetOverlay extends ConsumerStatefulWidget {
+  const StarlingPetOverlay({super.key});
 
   @override
-  ConsumerState<DraggableInAppPet> createState() => _DraggableInAppPetState();
+  ConsumerState<StarlingPetOverlay> createState() => _StarlingPetOverlayState();
 }
 
-class _DraggableInAppPetState extends ConsumerState<DraggableInAppPet> {
+/// Legacy alias kept for compatibility.
+typedef DraggableInAppPet = StarlingPetOverlay;
+
+class _StarlingPetOverlayState extends ConsumerState<StarlingPetOverlay> {
   double _right = 14;
   double _bottom = 96;
   bool _showLabel = false;
@@ -199,7 +208,7 @@ class _DraggableInAppPetState extends ConsumerState<DraggableInAppPet> {
         },
         onTap: () => setState(() => _showLabel = !_showLabel),
         onLongPress: () => Navigator.of(context).push(
-          MaterialPageRoute<void>(builder: (_) => const PetSettingsScreen()),
+          MaterialPageRoute<void>(builder: (_) => const PetSettingsPage()),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
@@ -208,12 +217,18 @@ class _DraggableInAppPetState extends ConsumerState<DraggableInAppPet> {
               Padding(
                 padding: const EdgeInsets.only(bottom: 4),
                 child: GlassSurface(
-                  borderRadius: BorderRadius.circular(12),
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  child: Text(
-                    '星灵 · ${mood.label}',
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      fontWeight: FontWeight.w600,
+                  tier: GlassTier.chrome,
+                  stadium: true,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    child: Text(
+                      '星灵 · ${mood.label}',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                 ),
@@ -226,103 +241,103 @@ class _DraggableInAppPetState extends ConsumerState<DraggableInAppPet> {
   }
 }
 
-class PetSettingsScreen extends ConsumerStatefulWidget {
-  const PetSettingsScreen({super.key});
+/// Companion & desktop overlay settings page in DSH Go style.
+class PetSettingsPage extends ConsumerStatefulWidget {
+  const PetSettingsPage({super.key});
 
   @override
-  ConsumerState<PetSettingsScreen> createState() => _PetSettingsScreenState();
+  ConsumerState<PetSettingsPage> createState() => _PetSettingsPageState();
 }
 
-class _PetSettingsScreenState extends ConsumerState<PetSettingsScreen> {
+typedef PetSettingsScreen = PetSettingsPage;
+
+class _PetSettingsPageState extends ConsumerState<PetSettingsPage> {
   PetMood _previewMood = PetMood.idle;
 
   @override
   Widget build(BuildContext context) {
     final pet = ref.watch(petSettingsProvider);
-    final surfaces = AgySurfaces.of(context);
     final theme = Theme.of(context);
+    final dsh = DshColors.of(context);
 
-    return AgyPage(
-      title: '桌宠与伙伴（星灵）',
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 6, 14, 32),
-        children: [
-          HairlineCard(
-            child: Column(
-              children: [
-                StarlingAvatar(mood: _previewMood, size: 96),
-                const SizedBox(height: 8),
-                Text(
-                  '星灵 Starling · ${_previewMood.label}',
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
+    return AppPage.list(
+      title: '星灵桌宠',
+      subtitle: const Text('AGY Go 原创状态联动伴侣与桌面悬浮球'),
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+          child: GlassSurface(
+            tier: GlassTier.card,
+            borderRadius: AppShape.radiusLg,
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                children: [
+                  StarlingAvatar(mood: _previewMood, size: 96),
+                  const SizedBox(height: 8),
+                  Text(
+                    '星灵 Starling · ${_previewMood.label}',
+                    style: theme.textTheme.titleSmall,
                   ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'AGY Go 原创极简伴侣：实时反映思考、工具执行、待确认审批与完成状态。',
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: surfaces.subtleText,
+                  const SizedBox(height: 4),
+                  Text(
+                    '实时反映思考、工具执行、等待确认与任务完成状态。',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: dsh.textTertiary,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  alignment: WrapAlignment.center,
-                  children: [
-                    for (final m in PetMood.values)
-                      ChoiceChip(
-                        label: Text(m.label),
-                        selected: _previewMood == m,
-                        onSelected: (_) => setState(() => _previewMood = m),
-                      ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 14),
-          HairlineCard(
-            child: Column(
-              children: [
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('在 App 内显示悬浮伙伴'),
-                  subtitle: const Text('可自由拖拽，单击查看状态，长按进入本设置页'),
-                  value: pet.showInApp,
-                  onChanged: (v) =>
-                      ref.read(petSettingsProvider.notifier).setShowInApp(v),
-                ),
-                const Divider(),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('App 外桌面悬浮球'),
-                  subtitle: Text(
-                    pet.canDrawOverlays
-                        ? '已获得悬浮窗权限，切到其他应用时自动靠边吸附显示'
-                        : '需要开启「显示在其他应用上层」权限',
-                  ),
-                  value: pet.showSystemOverlay,
-                  onChanged: (v) async {
-                    final ok = await ref
-                        .read(petSettingsProvider.notifier)
-                        .setShowSystemOverlay(v);
-                    if (v && !ok && context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('请在系统设置中允许 AGY Go 显示悬浮窗后返回开启。'),
+                  const SizedBox(height: 14),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    alignment: WrapAlignment.center,
+                    children: [
+                      for (final m in PetMood.values)
+                        ChoiceChip(
+                          label: Text(m.label),
+                          selected: _previewMood == m,
+                          onSelected: (_) => setState(() => _previewMood = m),
                         ),
-                      );
-                    }
-                  },
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
-        ],
-      ),
+        ),
+        SettingsSection(
+          title: '显示方式',
+          children: [
+            SettingsSwitchTile(
+              icon: AppIcons.pet,
+              tint: 2,
+              title: '在 App 内显示悬浮伙伴',
+              subtitle: '可自由拖拽，单击查看状态，长按进入本页',
+              value: pet.showInApp,
+              onChanged: (v) =>
+                  ref.read(petSettingsProvider.notifier).setShowInApp(v),
+            ),
+            SettingsSwitchTile(
+              icon: AppIcons.overlayBall,
+              tint: 1,
+              title: 'App 外桌面悬浮球',
+              subtitle: pet.canDrawOverlays
+                  ? '已获悬浮窗权限，切到其他应用时靠边吸附显示'
+                  : '需要开启「显示在其他应用上层」权限',
+              value: pet.showSystemOverlay,
+              onChanged: (v) async {
+                final ok = await ref
+                    .read(petSettingsProvider.notifier)
+                    .setShowSystemOverlay(v);
+                if (v && !ok && context.mounted) {
+                  showBriefNotice(context, '请在系统设置中允许悬浮窗后返回开启');
+                }
+              },
+            ),
+          ],
+        ),
+      ],
     );
   }
 }

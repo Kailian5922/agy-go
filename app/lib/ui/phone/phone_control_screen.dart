@@ -1,12 +1,17 @@
+// Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
+
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../state/phone_state.dart';
+import '../common/overview_card.dart';
+import '../common/settings_widgets.dart';
+import '../common/status_dot.dart';
 import '../shell/page_frame.dart';
-import '../theme/app_theme.dart';
-import '../theme/glass_widgets.dart';
+import '../theme/theme.dart';
 
-/// Inline high-visibility approval card for SafetyGate phone-control actions.
+/// Inline SafetyGate approval card matching DSH Go's ApprovalCard visual hierarchy.
 class PhoneApprovalCard extends StatelessWidget {
   const PhoneApprovalCard({
     super.key,
@@ -21,77 +26,94 @@ class PhoneApprovalCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final surfaces = AgySurfaces.of(context);
     final theme = Theme.of(context);
-    final accent = prompt.isHighRisk ? surfaces.danger : surfaces.warning;
+    final dsh = DshColors.of(context);
+    final surfaces = DshSurfaces.of(context);
+    final accent = prompt.isHighRisk ? dsh.danger : dsh.warning;
 
     return GlassSurface(
-      borderRadius: BorderRadius.circular(18),
-      padding: const EdgeInsets.all(14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                prompt.isHighRisk
-                    ? Icons.gpp_maybe_rounded
-                    : Icons.touch_app_rounded,
-                size: 18,
-                color: accent,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  prompt.isHighRisk ? '高风险手机操作确认' : '手机操控操作确认',
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    color: accent,
+      tier: GlassTier.card,
+      borderRadius: AppShape.radiusLg,
+      style: surfaces.card.copyWith(
+        hairline: accent.withValues(alpha: 0.6),
+        hairlineWidth: 1.0,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  prompt.isHighRisk
+                      ? AppIcons.securityWarning
+                      : AppIcons.phoneControl,
+                  size: 18,
+                  color: accent,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    prompt.isHighRisk ? '高风险手机操作确认' : '手机操控确认',
+                    style: theme.textTheme.titleSmall?.copyWith(color: accent),
                   ),
                 ),
-              ),
-              Text(
-                prompt.tool,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  fontFamily: 'monospace',
-                  color: surfaces.subtleText,
+                Text(
+                  prompt.tool,
+                  style: AppType.monoLabel(color: dsh.textTertiary),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            prompt.summary,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              fontWeight: FontWeight.w600,
+              ],
             ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            prompt.reason,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: surfaces.subtleText,
-            ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              FilledButton(
-                onPressed: onApprove,
-                child: const Text('允许执行'),
+            const SizedBox(height: 8),
+            Text(
+              prompt.summary,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.w600,
               ),
-              const SizedBox(width: 8),
-              OutlinedButton(
-                onPressed: onDeny,
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: surfaces.danger,
-                  side: BorderSide(color: surfaces.danger.withValues(alpha: 0.5)),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              prompt.reason,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: dsh.textTertiary,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(0, 44),
+                      foregroundColor: dsh.danger,
+                      side: BorderSide(color: dsh.danger.withValues(alpha: 0.5)),
+                    ),
+                    onPressed: () {
+                      HapticFeedback.selectionClick();
+                      onDeny();
+                    },
+                    child: const Text('拒绝'),
+                  ),
                 ),
-                child: const Text('拒绝'),
-              ),
-            ],
-          ),
-        ],
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton(
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, 44),
+                    ),
+                    onPressed: () {
+                      HapticFeedback.selectionClick();
+                      onApprove();
+                    },
+                    child: const Text('允许执行'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -103,111 +125,53 @@ class PhoneControlScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final phone = ref.watch(phoneControlProvider);
-    final surfaces = AgySurfaces.of(context);
     final theme = Theme.of(context);
+    final dsh = DshColors.of(context);
 
-    return AgyPage(
-      title: '手机操控（MCP）',
+    final ready = phone.enabled && phone.accessibilityConnected;
+
+    return AppPage.list(
+      title: '手机操控',
+      subtitle: const Text('通过无障碍服务与本地受保护 MCP 协议让 agy 安全操作手机'),
       actions: [
-        IconButton(
+        GlassIconButton(
+          icon: AppIcons.refresh,
           tooltip: '刷新状态',
-          icon: const Icon(Icons.refresh_rounded, size: 20),
           onPressed: () => ref.read(phoneControlProvider.notifier).refresh(),
         ),
       ],
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 6, 14, 32),
-        children: [
-          // Master switch & emergency stop
-          HairlineCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '启用 MCP 手机操控',
-                            style: theme.textTheme.titleSmall?.copyWith(
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            '开启后将启动本地受保护的 MCP HTTP 服务，并自动挂载给本机 Antigravity CLI。',
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: surfaces.subtleText,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Switch(
-                      value: phone.enabled,
-                      onChanged: (v) =>
-                          ref.read(phoneControlProvider.notifier).setEnabled(v),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    StatusPill(
-                      label: phone.accessibilityConnected
-                          ? '无障碍服务已就绪'
-                          : '无障碍服务未开启',
-                      dotColor: phone.accessibilityConnected
-                          ? surfaces.success
-                          : surfaces.warning,
-                    ),
-                    const Spacer(),
-                    OutlinedButton.icon(
-                      onPressed: () => ref
-                          .read(phoneControlProvider.notifier)
-                          .openAccessibilitySettings(),
-                      icon: const Icon(Icons.accessibility_new_rounded, size: 17),
-                      label: const Text('无障碍设置'),
-                    ),
-                  ],
-                ),
-                if (phone.mcpUrl != null) ...[
-                  const SizedBox(height: 10),
-                  Text(
-                    'MCP 端点：${phone.mcpUrl}（Bearer 鉴权已启用）',
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      fontFamily: 'monospace',
-                      color: surfaces.subtleText,
-                    ),
-                  ),
-                ],
-                if (phone.enabled) ...[
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      onPressed: () => ref
-                          .read(phoneControlProvider.notifier)
-                          .emergencyStop(),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: surfaces.danger,
-                        foregroundColor: Colors.white,
-                      ),
-                      icon: const Icon(Icons.emergency_rounded, size: 18),
-                      label: const Text('紧急停止并撤销所有待确认操作'),
-                    ),
-                  ),
-                ],
-              ],
-            ),
+      children: [
+        OverviewCard(
+          leading: OverviewGlyph(
+            AppIcons.phoneControl,
+            tint: ready ? 4 : 3,
           ),
-
-          if (phone.pendingApprovals.isNotEmpty) ...[
-            const SizedBox(height: 14),
-            for (final prompt in phone.pendingApprovals) ...[
-              PhoneApprovalCard(
+          title: Text(
+            ready
+                ? '手机操控已就绪'
+                : phone.enabled
+                ? '还差一步：开启无障碍服务'
+                : '手机操控未开启',
+          ),
+          subtitle: Text(
+            phone.mcpUrl != null
+                ? 'MCP 端点：${phone.mcpUrl}（Bearer 鉴权）'
+                : '开启后将自动把本地 phone MCP 挂载到新会话',
+          ),
+          footer: OverviewFooter(
+            tone: ready
+                ? StatusTone.ok
+                : phone.enabled
+                ? StatusTone.warn
+                : StatusTone.idle,
+            text: phone.accessibilityConnected ? '无障碍服务：已连接' : '无障碍服务：未开启',
+          ),
+        ),
+        if (phone.pendingApprovals.isNotEmpty)
+          for (final prompt in phone.pendingApprovals)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: PhoneApprovalCard(
                 prompt: prompt,
                 onApprove: () => ref
                     .read(phoneControlProvider.notifier)
@@ -216,159 +180,103 @@ class PhoneControlScreen extends ConsumerWidget {
                     .read(phoneControlProvider.notifier)
                     .resolveApproval(prompt.id, approved: false),
               ),
-              const SizedBox(height: 8),
-            ],
+            ),
+        SettingsSection(
+          title: '开关与无障碍',
+          children: [
+            SettingsSwitchTile(
+              icon: AppIcons.phoneControl,
+              tint: 3,
+              title: '启用 MCP 手机操控',
+              subtitle: '启动本地受保护 HTTP MCP 并挂载给本机 agy',
+              value: phone.enabled,
+              onChanged: (v) =>
+                  ref.read(phoneControlProvider.notifier).setEnabled(v),
+            ),
+            SettingsTile(
+              icon: AppIcons.accessibility,
+              tint: 4,
+              title: '系统无障碍设置',
+              value: Text(
+                phone.accessibilityConnected ? '已开启' : '去开启',
+                style: TextStyle(
+                  color: phone.accessibilityConnected
+                      ? dsh.success
+                      : dsh.warning,
+                ),
+              ),
+              onTap: () => ref
+                  .read(phoneControlProvider.notifier)
+                  .openAccessibilitySettings(),
+            ),
+            if (phone.enabled)
+              SettingsTile(
+                icon: AppIcons.stop,
+                title: '紧急停止并撤销所有待确认操作',
+                danger: true,
+                chevron: false,
+                onTap: () =>
+                    ref.read(phoneControlProvider.notifier).emergencyStop(),
+              ),
           ],
-
-          const SizedBox(height: 14),
-
-          // Three-tier SafetyGate mode selection
-          HairlineCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '安全确认档位（SafetyGate）',
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
+        ),
+        SettingsSection(
+          title: '安全确认档位（SafetyGate）',
+          footer: const Text(
+            '无论选择何种档位，银行、支付、密码管理器以及包含「支付、转账、验证码、卸载、删除」等关键词的修改操作均强制拦截确认。',
+          ),
+          children: [
+            for (final mode in PhoneSafetyMode.values)
+              SettingsTile(
+                icon: switch (mode) {
+                  PhoneSafetyMode.confirmAll => AppIcons.askFirst,
+                  PhoneSafetyMode.confirmSensitive => AppIcons.askPerTask,
+                  PhoneSafetyMode.autoNonFinancial => AppIcons.noConfirm,
+                },
+                tint: 3,
+                title: mode.label,
+                subtitle: mode.description,
+                chevron: false,
+                trailing: Icon(
+                  phone.safetyMode == mode
+                      ? AppIcons.radioOn
+                      : AppIcons.radioOff,
+                  size: 20,
+                  color: phone.safetyMode == mode
+                      ? theme.colorScheme.primary
+                      : dsh.textTertiary,
                 ),
-                const SizedBox(height: 6),
-                Text(
-                  '无论处于何种档位，银行/支付/密码管理器及包含「支付、转账、验证码、卸载、删除」等关键词的修改操作均强制拦截确认。',
+                onTap: () =>
+                    ref.read(phoneControlProvider.notifier).setSafetyMode(mode),
+              ),
+          ],
+        ),
+        SettingsSection(
+          title: '近期操控审计日志',
+          children: [
+            if (phone.auditLog.isEmpty)
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  '暂无操控记录。开启后在对话中调用 phone_* 工具即可实时看到操作审计。',
                   style: theme.textTheme.bodySmall?.copyWith(
-                    color: surfaces.subtleText,
-                    height: 1.45,
+                    color: dsh.textTertiary,
                   ),
                 ),
-                const SizedBox(height: 10),
-                for (final mode in PhoneSafetyMode.values)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: HairlineCard(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                      borderRadius: BorderRadius.circular(14),
-                      borderColor: phone.safetyMode == mode
-                          ? theme.colorScheme.primary.withValues(alpha: 0.55)
-                          : null,
-                      backgroundColor: phone.safetyMode == mode
-                          ? theme.colorScheme.primary.withValues(alpha: 0.12)
-                          : null,
-                      onTap: () => ref
-                          .read(phoneControlProvider.notifier)
-                          .setSafetyMode(mode),
-                      child: Row(
-                        children: [
-                          Icon(
-                            phone.safetyMode == mode
-                                ? Icons.radio_button_checked_rounded
-                                : Icons.radio_button_unchecked_rounded,
-                            size: 19,
-                            color: phone.safetyMode == mode
-                                ? theme.colorScheme.primary
-                                : surfaces.subtleText,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  mode.label,
-                                  style: theme.textTheme.bodyMedium?.copyWith(
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                Text(
-                                  mode.description,
-                                  style: theme.textTheme.bodySmall?.copyWith(
-                                    color: surfaces.subtleText,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 14),
-
-          // Audit log
-          HairlineCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '近期操控审计日志',
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
+              )
+            else
+              for (final item in phone.auditLog.take(25))
+                SettingsTile(
+                  icon: item.outcome == 'ok' ? AppIcons.done : AppIcons.warning,
+                  tinted: false,
+                  title: '${item.tool} · ${item.summary}',
+                  subtitle:
+                      '${item.at.hour.toString().padLeft(2, '0')}:${item.at.minute.toString().padLeft(2, '0')}:${item.at.second.toString().padLeft(2, '0')} · ${item.outcome}',
+                  chevron: false,
                 ),
-                const SizedBox(height: 10),
-                if (phone.auditLog.isEmpty)
-                  Text(
-                    '暂无操控记录。开启后在对话中让 Antigravity 调用 `phone_*` 工具即可看到实时审计。',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: surfaces.subtleText,
-                    ),
-                  )
-                else
-                  for (final item in phone.auditLog.take(30))
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Container(
-                            margin: const EdgeInsets.only(top: 5),
-                            width: 7,
-                            height: 7,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: item.outcome == 'ok'
-                                  ? surfaces.success
-                                  : item.outcome == 'denied' ||
-                                          item.outcome == 'blocked'
-                                  ? surfaces.warning
-                                  : surfaces.danger,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  '${item.tool} · ${item.summary}',
-                                  style: theme.textTheme.bodySmall?.copyWith(
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                Text(
-                                  '${item.at.hour.toString().padLeft(2, '0')}:${item.at.minute.toString().padLeft(2, '0')}:${item.at.second.toString().padLeft(2, '0')} · ${item.outcome}',
-                                  style: theme.textTheme.labelSmall?.copyWith(
-                                    color: surfaces.subtleText,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-              ],
-            ),
-          ),
-        ],
-      ),
+          ],
+        ),
+      ],
     );
   }
 }

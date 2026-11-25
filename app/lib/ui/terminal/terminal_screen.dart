@@ -1,18 +1,22 @@
+// Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
-import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../state/connection_state.dart';
 import '../../state/runtime_state.dart';
+import '../../state/workspaces_state.dart';
 import '../shell/page_frame.dart';
+import '../theme/theme.dart';
 
-/// Embedded interactive terminal using xterm (connects to SSH PTY or local Android `/system/bin/sh`).
+/// Embedded interactive terminal using xterm (SSH PTY or local Android workspace shell).
 class TerminalScreen extends ConsumerStatefulWidget {
   const TerminalScreen({super.key});
 
@@ -61,10 +65,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       }
     }
 
-    // Local Android workspace shell fallback
     final runtime = ref.read(localRuntimeProvider).status;
-    final cwd = runtime.workspacePath;
-    _terminal.write('Starting local shell (${cwd ?? Directory.current.path})...\r\n');
+    final cwd = ref.read(effectiveWorkingDirProvider);
+    _terminal.write('Starting local shell ($cwd)...\r\n');
     try {
       final shellBin = File('/system/bin/sh').existsSync()
           ? '/system/bin/sh'
@@ -72,7 +75,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       final proc = await Process.start(
         shellBin,
         const [],
-        workingDirectory: cwd != null && Directory(cwd).existsSync() ? cwd : null,
+        workingDirectory: Directory(cwd).existsSync() ? cwd : null,
         environment: {
           if (runtime.homePath != null) 'HOME': runtime.homePath!,
         },
@@ -80,12 +83,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       _localShell = proc;
       _subs.add(
         proc.stdout.listen((bytes) {
-          _terminal.write(utf8.decode(bytes, allowMalformed: true).replaceAll('\n', '\r\n'));
+          _terminal.write(
+            utf8.decode(bytes, allowMalformed: true).replaceAll('\n', '\r\n'),
+          );
         }),
       );
       _subs.add(
         proc.stderr.listen((bytes) {
-          _terminal.write(utf8.decode(bytes, allowMalformed: true).replaceAll('\n', '\r\n'));
+          _terminal.write(
+            utf8.decode(bytes, allowMalformed: true).replaceAll('\n', '\r\n'),
+          );
         }),
       );
       _terminal.onOutput = (data) {
@@ -110,17 +117,56 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return AgyPage(
-      title: '终端',
-      body: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 4, 10, 12),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(18),
-          child: TerminalView(
-            _terminal,
-            autofocus: true,
-            padding: const EdgeInsets.all(10),
-          ),
+    final top = MediaQuery.paddingOf(context).top;
+    final bottom = MediaQuery.paddingOf(context).bottom;
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+
+    return AppBackdrop(
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        resizeToAvoidBottomInset: false,
+        body: Stack(
+          children: [
+            Positioned.fill(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  12,
+                  top + 60,
+                  12,
+                  (keyboard > 0 ? keyboard : bottom) + 12,
+                ),
+                child: ClipRRect(
+                  borderRadius: AppShape.radiusLg,
+                  child: TerminalView(
+                    _terminal,
+                    autofocus: true,
+                    padding: const EdgeInsets.all(10),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              left: 12,
+              right: 12,
+              top: top,
+              height: 56,
+              child: BackdropGroup(
+                child: NavigationToolbar(
+                  centerMiddle: true,
+                  leading: GlassIconButton(
+                    icon: AppIcons.back,
+                    tooltip: '返回',
+                    onPressed: () => Navigator.of(context).maybePop(),
+                  ),
+                  middle: Text(
+                    '终端',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  trailing: const SizedBox(width: 44),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );

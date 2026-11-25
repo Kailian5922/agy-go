@@ -2,11 +2,10 @@ import 'package:acp_client/acp_client.dart';
 import 'package:agy_go/share/conversation_export.dart';
 import 'package:agy_go/state/pet_state.dart';
 import 'package:agy_go/state/phone_state.dart';
-import 'package:agy_go/state/settings_state.dart';
 import 'package:agy_go/state/system_state.dart';
 import 'package:agy_go/ui/pet/starling_pet.dart';
 import 'package:agy_go/ui/phone/phone_control_screen.dart';
-import 'package:agy_go/ui/theme/app_theme.dart';
+import 'package:agy_go/ui/theme/theme.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -31,47 +30,53 @@ b3BlbnNzaC1rZXktdjEAAAAABG5vbmU=
       expect(clean, contains('[REDACTED_PRIVATE_KEY]'));
     });
 
-    test('serializes and parses replay JSON bundle preserving turns and tool calls', () {
-      final transcript = ChatTranscript(
-        title: 'Demo Session',
-        items: [
-          UserTranscriptItem(
-            id: 'u1',
-            timestamp: DateTime.utc(2026, 11, 25, 12, 0),
-            text: 'Check status with key AIzaSyD1234567890abcdefghijklmno',
-          ),
-          AssistantTranscriptItem(
-            id: 'a1',
-            timestamp: DateTime.utc(2026, 11, 25, 12, 1),
-            thought: 'Checking repository',
-            text: 'All checks passed.',
-            toolCalls: const [
-              AcpToolCall(
-                toolCallId: 'tc_1',
-                title: 'Run dart test',
-                kind: AcpToolKind.execute,
-                status: AcpToolStatus.completed,
-              ),
-            ],
-          ),
-        ],
-      );
+    test(
+      'serializes and parses replay JSON bundle preserving turns and tool calls',
+      () {
+        final transcript = ChatTranscript(
+          title: 'Demo Session',
+          items: [
+            UserTranscriptItem(
+              id: 'u1',
+              timestamp: DateTime.utc(2026, 11, 25, 12, 0),
+              text: 'Check status with key AIzaSyD1234567890abcdefghijklmno',
+            ),
+            AssistantTranscriptItem(
+              id: 'a1',
+              timestamp: DateTime.utc(2026, 11, 25, 12, 1),
+              thought: 'Checking repository',
+              text: 'All checks passed.',
+              toolCalls: const [
+                AcpToolCall(
+                  toolCallId: 'tc_1',
+                  title: 'Run dart test',
+                  kind: AcpToolKind.execute,
+                  status: AcpToolStatus.completed,
+                ),
+              ],
+            ),
+          ],
+        );
 
-      final md = ConversationExport.toMarkdown(transcript, hostLabel: '本机引擎');
-      expect(md, contains('# Demo Session'));
-      expect(md, contains('[REDACTED_GEMINI_KEY]'));
-      expect(md, contains('Run dart test'));
+        final md = ConversationExport.toMarkdown(
+          transcript,
+          hostLabel: '本机引擎',
+        );
+        expect(md, contains('# Demo Session'));
+        expect(md, contains('[REDACTED_GEMINI_KEY]'));
+        expect(md, contains('Run dart test'));
 
-      final jsonStr = ConversationExport.toReplayJson(transcript);
-      final replayed = ConversationExport.parseReplayJson(jsonStr);
-      expect(replayed.title, 'Demo Session');
-      expect(replayed.items.length, 2);
-      final user = replayed.items.first as UserTranscriptItem;
-      expect(user.text, contains('[REDACTED_GEMINI_KEY]'));
-      final assistant = replayed.items.last as AssistantTranscriptItem;
-      expect(assistant.text, 'All checks passed.');
-      expect(assistant.toolCalls.single.title, 'Run dart test');
-    });
+        final jsonStr = ConversationExport.toReplayJson(transcript);
+        final replayed = ConversationExport.parseReplayJson(jsonStr);
+        expect(replayed.title, 'Demo Session');
+        expect(replayed.items.length, 2);
+        final user = replayed.items.first as UserTranscriptItem;
+        expect(user.text, contains('[REDACTED_GEMINI_KEY]'));
+        final assistant = replayed.items.last as AssistantTranscriptItem;
+        expect(assistant.text, 'All checks passed.');
+        expect(assistant.toolCalls.single.title, 'Run dart test');
+      },
+    );
   });
 
   group('SystemToolsController version comparison', () {
@@ -99,11 +104,7 @@ b3BlbnNzaC1rZXktdjEAAAAABG5vbmU=
 
     await tester.pumpWidget(
       MaterialApp(
-        theme: buildAgyTheme(
-          brightness: Brightness.dark,
-          accentId: AppAccentId.nebula,
-          glassBlur: false,
-        ),
+        theme: buildDarkTheme(accent: AppAccent.mist, glassBlur: false),
         home: Scaffold(
           body: PhoneApprovalCard(
             prompt: prompt,

@@ -6,7 +6,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'connection_state.dart';
-import 'runtime_state.dart';
+import 'workspaces_state.dart';
 
 class WorkspaceEntry {
   const WorkspaceEntry({
@@ -22,6 +22,8 @@ class WorkspaceEntry {
   final bool isDirectory;
   final int sizeBytes;
   final DateTime? modifiedAt;
+
+  bool get hidden => name.startsWith('.');
 }
 
 class WorkspaceState {
@@ -65,14 +67,14 @@ class WorkspaceState {
 }
 
 /// Browses, reads, edits, creates, and deletes files in either the on-device Android
-/// workspace or the active remote SSH host (via SFTP).
+/// workspace (including mounted phone storage) or the active remote SSH host (via SFTP).
 class WorkspaceController extends Notifier<WorkspaceState> {
   SftpClient? _sftp;
 
   @override
   WorkspaceState build() {
     final conn = ref.watch(activeConnectionProvider).value;
-    final runtime = ref.watch(localRuntimeProvider).status;
+    final root = ref.watch(effectiveWorkingDirProvider);
 
     _sftp?.close();
     _sftp = null;
@@ -82,10 +84,6 @@ class WorkspaceController extends Notifier<WorkspaceState> {
     });
 
     final isRemote = conn != null && conn.sshConnection != null;
-    final root = isRemote
-        ? conn.defaultCwd
-        : (runtime.workspacePath ?? Directory.current.path);
-
     Future.microtask(() => openDirectory(root));
     return WorkspaceState(
       currentPath: root,
@@ -108,13 +106,39 @@ class WorkspaceController extends Notifier<WorkspaceState> {
     return client;
   }
 
+  /// Lists subdirectories at any path (for the DSH Go DirectoryBrowserPage).
+  Future<List<WorkspaceEntry>> listSubdirectories(String path) async {
+    final entries = state.isRemote
+        ? await _listRemote(path)
+        : await _listLocal(path, createIfMissing: false);
+    final dirs = entries.where((e) => e.isDirectory).toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return dirs;
+  }
+
+  /// Creates a subdirectory inside an arbitrary parent path (for DirectoryBrowserPage).
+  Future<String> createSubdirectoryAt(String parentPath, String name) async {
+    final clean = name.trim();
+    if (clean.isEmpty || clean.contains('/')) {
+      throw ArgumentError('无效文件夹名称');
+    }
+    final target = _join(parentPath, clean);
+    if (state.isRemote) {
+      final sftp = await _requireSftp();
+      await sftp.mkdir(target);
+    } else {
+      await Directory(target).create(recursive: true);
+    }
+    return target;
+  }
+
   Future<void> openDirectory(String path) async {
     if (!ref.mounted) return;
     state = state.copyWith(currentPath: path, loading: true, clearError: true);
     try {
       final list = state.isRemote
           ? await _listRemote(path)
-          : await _listLocal(path);
+          : await _listLocal(path, createIfMissing: path == state.rootPath);
       list.sort((a, b) {
         if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
         return a.name.toLowerCase().compareTo(b.name.toLowerCase());
@@ -177,13 +201,7 @@ class WorkspaceController extends Notifier<WorkspaceState> {
   Future<void> createDirectory(String name) async {
     final clean = name.trim();
     if (clean.isEmpty || clean.contains('/')) return;
-    final target = _join(state.currentPath, clean);
-    if (state.isRemote) {
-      final sftp = await _requireSftp();
-      await sftp.mkdir(target);
-    } else {
-      await Directory(target).create(recursive: true);
-    }
+    await createSubdirectoryAt(state.currentPath, clean);
     await refresh();
   }
 
@@ -212,25 +230,36 @@ class WorkspaceController extends Notifier<WorkspaceState> {
     await refresh();
   }
 
-  Future<List<WorkspaceEntry>> _listLocal(String path) async {
+  Future<List<WorkspaceEntry>> _listLocal(
+    String path, {
+    required bool createIfMissing,
+  }) async {
     final dir = Directory(path);
     if (!await dir.exists()) {
-      await dir.create(recursive: true);
+      if (createIfMissing) {
+        await dir.create(recursive: true);
+      } else {
+        throw FileSystemException('目录不存在或无访问权限', path);
+      }
     }
     final result = <WorkspaceEntry>[];
     await for (final entity in dir.list(followLinks: false)) {
-      final stat = await entity.stat();
-      final name = entity.path.split('/').last;
-      if (name.isEmpty) continue;
-      result.add(
-        WorkspaceEntry(
-          name: name,
-          path: entity.path,
-          isDirectory: stat.type == FileSystemEntityType.directory,
-          sizeBytes: stat.size,
-          modifiedAt: stat.modified,
-        ),
-      );
+      try {
+        final stat = await entity.stat();
+        final name = entity.path.split('/').last;
+        if (name.isEmpty) continue;
+        result.add(
+          WorkspaceEntry(
+            name: name,
+            path: entity.path,
+            isDirectory: stat.type == FileSystemEntityType.directory,
+            sizeBytes: stat.size,
+            modifiedAt: stat.modified,
+          ),
+        );
+      } catch (_) {
+        // Skip unreadable entries (e.g. Android/data restricted dirs).
+      }
     }
     return result;
   }

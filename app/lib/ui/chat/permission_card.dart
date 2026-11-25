@@ -1,101 +1,176 @@
+// SPDX-FileCopyrightText: 2026 CikeSeven
+// SPDX-License-Identifier: MIT
+// Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
+
 import 'package:acp_client/acp_client.dart';
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
-import '../theme/app_theme.dart';
-import '../theme/glass_widgets.dart';
+import '../theme/theme.dart';
 
-/// Interactive approval card for ACP `session/request_permission`.
+/// Approval card mirroring DSH Go's ApprovalCard:
+/// 1px warning hairline, shield header, monospace command/path well,
+/// equal-width Decline / Allow Once buttons, and low-emphasis Allow All link.
 class PermissionCard extends StatelessWidget {
   const PermissionCard({
     super.key,
     required this.pending,
     required this.onSelect,
     required this.onCancel,
+    this.onAllowAllForChat,
   });
 
   final PendingPermission pending;
   final void Function(String optionId) onSelect;
   final VoidCallback onCancel;
+  final void Function(String allowOptionId)? onAllowAllForChat;
+
+  String _title(AcpToolCall tc) => switch (tc.kind) {
+    AcpToolKind.execute => '允许运行这条命令？',
+    AcpToolKind.edit => '允许修改这个文件？',
+    AcpToolKind.delete => '允许删除文件？',
+    AcpToolKind.fetch => '允许访问外部网络？',
+    _ => '允许执行此操作？',
+  };
 
   @override
   Widget build(BuildContext context) {
     final req = pending.request;
-    final surfaces = AgySurfaces.of(context);
+    final tc = req.toolCall;
     final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final dsh = DshColors.of(context);
+    final surfaces = DshSurfaces.of(context);
+
+    final allowOpt = req.options.where((o) => o.kind.isAllow).firstOrNull;
+    final rejectOpt = req.options.where((o) => !o.kind.isAllow).firstOrNull;
+    final codeSummary = tc.title.isNotEmpty
+        ? tc.title
+        : (tc.locations.isNotEmpty
+              ? tc.locations.map((l) => l.path).join('\n')
+              : (tc.name ?? '执行工具调用'));
 
     return GlassSurface(
-      borderRadius: BorderRadius.circular(18),
-      padding: const EdgeInsets.all(14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(Icons.shield_outlined, size: 18, color: surfaces.warning),
-              const SizedBox(width: 8),
-              Text(
-                '需要你的确认',
-                style: theme.textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.w700,
+      tier: GlassTier.card,
+      borderRadius: AppShape.radiusLg,
+      style: surfaces.card.copyWith(
+        hairline: dsh.warning.withValues(alpha: 0.55),
+        hairlineWidth: 1.0,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Icon(AppIcons.approval, size: 18, color: dsh.warning),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _title(tc),
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      color: colors.onSurface,
+                    ),
+                  ),
+                ),
+                Text(
+                  tc.kind.name,
+                  style: AppType.monoLabel(color: dsh.textTertiary),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            DecoratedBox(
+              decoration: ShapeDecoration(
+                color: dsh.codeWellBg,
+                shape: AppShape.outlined(dsh.codeWellBorder, radius: 12),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 9,
+                ),
+                child: Text(
+                  tc.kind == AcpToolKind.execute ? '\$ $codeSummary' : codeSummary,
+                  maxLines: 4,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppType.monoSmall(color: dsh.codeWellFg).copyWith(
+                    fontSize: 12.5,
+                  ),
                 ),
               ),
-              const Spacer(),
+            ),
+            if (tc.locations.isNotEmpty) ...[
+              const SizedBox(height: 6),
               Text(
-                req.toolCall.kind.name,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: surfaces.subtleText,
-                ),
+                tc.locations.map((l) => l.path).join(', '),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: AppType.monoLabel(color: dsh.textTertiary),
               ),
             ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            req.toolCall.title.isNotEmpty
-                ? req.toolCall.title
-                : (req.toolCall.name ?? '执行工具调用'),
-            style: theme.textTheme.bodyMedium?.copyWith(
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          if (req.toolCall.locations.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              req.toolCall.locations.map((l) => l.path).join(', '),
-              style: theme.textTheme.labelSmall?.copyWith(
-                fontFamily: 'monospace',
-                color: surfaces.subtleText,
-              ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final opt in req.options)
-                opt.kind.isAllow
-                    ? FilledButton.tonal(
-                        onPressed: () => onSelect(opt.optionId),
-                        child: Text(opt.name),
-                      )
-                    : OutlinedButton(
-                        onPressed: () => onSelect(opt.optionId),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: surfaces.danger,
-                          side: BorderSide(
-                            color: surfaces.danger.withValues(alpha: 0.45),
-                          ),
-                        ),
-                        child: Text(opt.name),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () {
+                      HapticFeedback.selectionClick();
+                      if (rejectOpt != null) {
+                        onSelect(rejectOpt.optionId);
+                      } else {
+                        onCancel();
+                      }
+                    },
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(0, 44),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      side: BorderSide(
+                        color: colors.outline.withValues(alpha: 0.5),
                       ),
-              if (req.options.every((o) => o.kind.isAllow))
-                OutlinedButton(
-                  onPressed: onCancel,
-                  child: const Text('取消'),
+                    ),
+                    child: Text(rejectOpt?.name ?? '拒绝'),
+                  ),
                 ),
+                if (allowOpt != null) ...[
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: () {
+                        HapticFeedback.selectionClick();
+                        onSelect(allowOpt.optionId);
+                      },
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 44),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: Text(allowOpt.name),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            if (allowOpt != null && onAllowAllForChat != null) ...[
+              const SizedBox(height: 4),
+              Center(
+                child: TextButton(
+                  onPressed: () {
+                    HapticFeedback.selectionClick();
+                    onAllowAllForChat!(allowOpt.optionId);
+                  },
+                  style: TextButton.styleFrom(
+                    minimumSize: const Size(0, 34),
+                    foregroundColor: dsh.textTertiary,
+                    textStyle: theme.textTheme.labelMedium,
+                  ),
+                  child: const Text('本对话都允许'),
+                ),
+              ),
             ],
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

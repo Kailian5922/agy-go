@@ -1,7 +1,6 @@
 import 'package:acp_client/acp_client.dart';
-import 'package:agy_go/state/settings_state.dart';
 import 'package:agy_go/ui/chat/tool_call_card.dart';
-import 'package:agy_go/ui/theme/app_theme.dart';
+import 'package:agy_go/ui/theme/theme.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -26,11 +25,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        theme: buildAgyTheme(
-          brightness: Brightness.dark,
-          accentId: AppAccentId.nebula,
-          glassBlur: false,
-        ),
+        theme: buildDarkTheme(accent: AppAccent.mist, glassBlur: false),
         home: const Scaffold(
           body: Padding(
             padding: EdgeInsets.all(16),

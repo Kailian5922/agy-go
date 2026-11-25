@@ -1,325 +1,396 @@
+// Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
+
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../../state/hosts_state.dart';
+import '../../state/runtime_state.dart';
 import '../../state/workspace_state.dart';
+import '../../state/workspaces_state.dart';
+import '../common/app_dialog.dart';
+import '../common/app_sheet.dart';
+import '../common/breadcrumb_row.dart';
+import '../common/brief_notice.dart';
+import '../common/empty_view.dart';
+import '../common/fade_in.dart';
+import '../common/list_page_row.dart';
+import '../common/search_capsule.dart';
 import '../shell/page_frame.dart';
-import '../theme/app_theme.dart';
-import '../theme/glass_widgets.dart';
+import '../theme/theme.dart';
+import 'workspaces_ui.dart';
 
-/// Local & SSH SFTP workspace file explorer with inline text viewer/editor.
-class WorkspaceScreen extends ConsumerWidget {
+/// Workspace files browser & inline editor mirroring DSH Go's WorkspaceFilesPage.
+class WorkspaceScreen extends ConsumerStatefulWidget {
   const WorkspaceScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final ws = ref.watch(workspaceProvider);
-    final surfaces = AgySurfaces.of(context);
-    final theme = Theme.of(context);
+  ConsumerState<WorkspaceScreen> createState() => _WorkspaceScreenState();
+}
 
-    return AgyPage(
-      title: ws.isRemote ? '远程工作区 (SFTP)' : '本机工作区',
-      actions: [
-        IconButton(
-          tooltip: '新建文件',
-          icon: const Icon(Icons.note_add_outlined, size: 20),
-          onPressed: () => _promptCreate(context, ref, isDir: false),
-        ),
-        IconButton(
-          tooltip: '新建文件夹',
-          icon: const Icon(Icons.create_new_folder_outlined, size: 20),
-          onPressed: () => _promptCreate(context, ref, isDir: true),
-        ),
-        IconButton(
-          tooltip: '刷新',
-          icon: const Icon(Icons.refresh_rounded, size: 20),
-          onPressed: () => ref.read(workspaceProvider.notifier).refresh(),
-        ),
-      ],
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-            child: HairlineCard(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              borderRadius: BorderRadius.circular(14),
-              child: Row(
-                children: [
-                  if (ws.canGoUp)
-                    IconButton(
-                      icon: const Icon(Icons.arrow_upward_rounded, size: 18),
-                      visualDensity: VisualDensity.compact,
-                      tooltip: '上一级',
-                      onPressed: () =>
-                          ref.read(workspaceProvider.notifier).goUp(),
-                    )
-                  else
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 6),
-                      child: Icon(Icons.folder_special_outlined, size: 18),
-                    ),
-                  Expanded(
-                    child: SelectableText(
-                      ws.currentPath,
-                      maxLines: 1,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        fontFamily: 'monospace',
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.copy_rounded, size: 16),
-                    visualDensity: VisualDensity.compact,
-                    tooltip: '复制路径',
-                    onPressed: () {
-                      Clipboard.setData(ClipboardData(text: ws.currentPath));
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('已复制目录路径')),
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ),
+class _WorkspaceScreenState extends ConsumerState<WorkspaceScreen> {
+  final _searchCtrl = TextEditingController();
+  String _query = '';
+  bool _showHidden = false;
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  List<({String label, String path})> _crumbs(
+    WorkspaceState ws,
+    bool local,
+    String storageRoot,
+  ) {
+    final parts = ws.currentPath.split('/').where((s) => s.isNotEmpty).toList();
+    final raw = <({String label, String path})>[(label: '/', path: '/')];
+    var acc = '';
+    for (final p in parts) {
+      acc = '$acc/$p';
+      raw.add((label: p, path: acc));
+    }
+    if (local) {
+      final sIdx = raw.indexWhere((c) => c.path == storageRoot);
+      if (sIdx >= 0) {
+        return [(label: '手机存储', path: storageRoot), ...raw.sublist(sIdx + 1)];
+      }
+    }
+    final rIdx = raw.indexWhere((c) => c.path == ws.rootPath);
+    if (rIdx > 0) {
+      return [(label: '工作区', path: ws.rootPath), ...raw.sublist(rIdx + 1)];
+    }
+    return raw;
+  }
+
+  Future<void> _openFile(WorkspaceEntry entry) async {
+    final ctrl = ref.read(workspaceProvider.notifier);
+    try {
+      final content = await ctrl.readTextFile(entry.path);
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => _FileEditorPage(
+            entry: entry,
+            initialContent: content,
+            onSave: (text) => ctrl.writeTextFile(entry.path, text),
           ),
-          if (ws.error != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: HairlineCard(
-                padding: const EdgeInsets.all(10),
-                borderColor: surfaces.danger.withValues(alpha: 0.45),
-                child: Text(
-                  ws.error!,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: surfaces.danger,
-                  ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(content: Text('无法打开文件：$e')),
+      );
+    }
+  }
+
+  Future<void> _showEntryActions(WorkspaceEntry entry) async {
+    final action = await showAppSheet<String>(
+      context,
+      builder: (sheet) => SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SheetHeader(entry.name),
+            SheetGroup(
+              children: [
+                ListPageRow(
+                  icon: AppIcons.copy,
+                  title: '复制路径',
+                  chevron: false,
+                  onTap: () => Navigator.pop(sheet, 'copy'),
                 ),
-              ),
-            ),
-          Expanded(
-            child: ws.loading
-                ? const Center(child: CircularProgressIndicator.adaptive())
-                : ws.entries.isEmpty
-                ? Center(
-                    child: Text(
-                      '目录为空\n点击右上角新建文件或文件夹',
-                      textAlign: TextAlign.center,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: surfaces.subtleText,
-                      ),
-                    ),
-                  )
-                : ListView.separated(
-                    padding: const EdgeInsets.fromLTRB(12, 2, 12, 24),
-                    itemCount: ws.entries.length,
-                    separatorBuilder: (_, _) => const SizedBox(height: 6),
-                    itemBuilder: (context, index) {
-                      final entry = ws.entries[index];
-                      return HairlineCard(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
-                        ),
-                        borderRadius: BorderRadius.circular(14),
-                        onTap: () {
-                          if (entry.isDirectory) {
-                            ref
-                                .read(workspaceProvider.notifier)
-                                .openDirectory(entry.path);
-                          } else {
-                            Navigator.of(context).push(
-                              MaterialPageRoute<void>(
-                                builder: (_) =>
-                                    _FileEditorScreen(entry: entry),
-                              ),
-                            );
-                          }
-                        },
-                        child: Row(
-                          children: [
-                            Icon(
-                              entry.isDirectory
-                                  ? Icons.folder_rounded
-                                  : Icons.description_outlined,
-                              size: 20,
-                              color: entry.isDirectory
-                                  ? theme.colorScheme.primary
-                                  : surfaces.subtleText,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    entry.name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: theme.textTheme.bodyMedium?.copyWith(
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                  if (!entry.isDirectory)
-                                    Text(
-                                      _formatBytes(entry.sizeBytes),
-                                      style: theme.textTheme.labelSmall
-                                          ?.copyWith(
-                                            color: surfaces.subtleText,
-                                          ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                            IconButton(
-                              icon: Icon(
-                                Icons.delete_outline_rounded,
-                                size: 18,
-                                color: surfaces.subtleText,
-                              ),
-                              visualDensity: VisualDensity.compact,
-                              onPressed: () => _confirmDelete(context, ref, entry),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
+                if (!entry.isDirectory)
+                  ListPageRow(
+                    icon: AppIcons.edit,
+                    title: '查看 / 编辑',
+                    chevron: false,
+                    onTap: () => Navigator.pop(sheet, 'edit'),
                   ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _promptCreate(
-    BuildContext context,
-    WidgetRef ref, {
-    required bool isDir,
-  }) async {
-    final ctrl = TextEditingController();
-    final name = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(isDir ? '新建文件夹' : '新建文件'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: InputDecoration(
-            hintText: isDir ? '例如：src' : '例如：main.py',
-          ),
+                ListPageRow(
+                  icon: AppIcons.delete,
+                  title: '删除',
+                  danger: true,
+                  chevron: false,
+                  onTap: () => Navigator.pop(sheet, 'delete'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()),
-            child: const Text('创建'),
-          ),
-        ],
       ),
     );
-    ctrl.dispose();
-    if (name == null || name.isEmpty) return;
-    if (isDir) {
-      await ref.read(workspaceProvider.notifier).createDirectory(name);
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'copy':
+        await Clipboard.setData(ClipboardData(text: entry.path));
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showBriefNotice('已复制路径');
+        }
+      case 'edit':
+        await _openFile(entry);
+      case 'delete':
+        final ok = await showAppDialog<bool>(
+          context: context,
+          builder: (d) => AlertDialog(
+            title: Text('删除「${entry.name}」？'),
+            content: Text(
+              entry.isDirectory ? '将递归删除该文件夹内所有内容，无法撤销。' : '删除后无法撤销。',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(d, false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: DshColors.of(d).danger,
+                  foregroundColor: DshColors.of(d).onDanger,
+                ),
+                onPressed: () => Navigator.pop(d, true),
+                child: const Text('删除'),
+              ),
+            ],
+          ),
+        );
+        if (ok == true) {
+          await ref.read(workspaceProvider.notifier).deleteEntry(entry);
+        }
+    }
+  }
+
+  Future<void> _showCreateSheet() async {
+    final choice = await showAppSheet<String>(
+      context,
+      builder: (sheet) => SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SheetHeader('新建'),
+            SheetGroup(
+              children: [
+                ListPageRow(
+                  icon: AppIcons.newFolder,
+                  title: '新建文件夹',
+                  chevron: false,
+                  onTap: () => Navigator.pop(sheet, 'dir'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.file,
+                  title: '新建文件',
+                  chevron: false,
+                  onTap: () => Navigator.pop(sheet, 'file'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    final name = await showTextPromptDialog(
+      context,
+      title: choice == 'dir' ? '新建文件夹' : '新建文件',
+      hint: choice == 'dir' ? 'folder_name' : 'notes.md',
+      confirmLabel: '创建',
+      validate: (v) {
+        if (v.isEmpty) return '请输入名称';
+        if (v.contains('/')) return '名称不能包含 /';
+        return null;
+      },
+    );
+    if (name == null || !mounted) return;
+    final ctrl = ref.read(workspaceProvider.notifier);
+    if (choice == 'dir') {
+      await ctrl.createDirectory(name);
     } else {
-      await ref.read(workspaceProvider.notifier).createFile(name);
+      await ctrl.createFile(name);
     }
   }
 
-  Future<void> _confirmDelete(
-    BuildContext context,
-    WidgetRef ref,
-    WorkspaceEntry entry,
-  ) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('确认删除'),
-        content: Text('确定删除「${entry.name}」吗？此操作不可撤销。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-    if (ok == true) {
-      await ref.read(workspaceProvider.notifier).deleteEntry(entry);
-    }
-  }
-
-  static String _formatBytes(int bytes) {
+  String _formatSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
+
+  @override
+  Widget build(BuildContext context) {
+    final ws = ref.watch(workspaceProvider);
+    final local = ref.watch(hostsProvider.select((h) => h.active.isLocal));
+    final runtime = ref.watch(localRuntimeProvider).status;
+    final ctrl = ref.read(workspaceProvider.notifier);
+    final colors = DshColors.of(context);
+    final q = _query.trim().toLowerCase();
+    final visible = [
+      for (final e in ws.entries)
+        if ((_showHidden || !e.hidden) &&
+            (q.isEmpty || e.name.toLowerCase().contains(q)))
+          e,
+    ];
+    final hiddenCount = ws.entries.where((e) => e.hidden).length;
+
+    return PopScope(
+      canPop: !ws.canGoUp,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && ws.canGoUp) unawaited(ctrl.goUp());
+      },
+      child: RefreshIndicator(
+        onRefresh: ctrl.refresh,
+        edgeOffset: MediaQuery.paddingOf(context).top + 56,
+        child: AppPage(
+          title: '文件',
+          subtitle: Text(
+            displayWorkspacePath(
+              ws.currentPath,
+              local: local,
+              homePath: runtime.homePath,
+              storageRoot: runtime.phoneStoragePath,
+            ),
+            style: AppType.mono(
+              size: 12.5,
+              height: 1.4,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          actions: [
+            GlassIconButton(
+              icon: AppIcons.workspace,
+              tooltip: '切换工作区',
+              onPressed: () => showWorkspaceSheet(
+                context,
+                ref,
+                onManage: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const WorkspacesPage(),
+                  ),
+                ),
+              ),
+            ),
+            GlassIconButton(
+              icon: AppIcons.add,
+              tooltip: '新建文件或文件夹',
+              onPressed: _showCreateSheet,
+            ),
+          ],
+          slivers: [
+            SliverList.list(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  child: SearchCapsule(
+                    controller: _searchCtrl,
+                    hint: '搜索当前目录…',
+                    onChanged: (v) => setState(() => _query = v),
+                    onClear: () {
+                      _searchCtrl.clear();
+                      setState(() => _query = '');
+                    },
+                  ),
+                ),
+                BreadcrumbRow(
+                  crumbs: _crumbs(ws, local, runtime.phoneStoragePath),
+                  onTap: (p) {
+                    if (p != ws.currentPath) unawaited(ctrl.openDirectory(p));
+                  },
+                ),
+                if (ws.loading)
+                  const Padding(
+                    padding: EdgeInsets.all(48),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (ws.error != null)
+                  EmptyView(
+                    icon: AppIcons.error,
+                    title: '无法读取目录',
+                    message: ws.error,
+                    actionLabel: '重试',
+                    onAction: ctrl.refresh,
+                  )
+                else if (visible.isEmpty)
+                  EmptyView(
+                    icon: AppIcons.folderOpen,
+                    title: q.isNotEmpty ? '没有匹配的文件' : '目录为空',
+                    message: q.isNotEmpty ? '尝试更换搜索关键词。' : '点击右上角 + 可新建文件或文件夹。',
+                  )
+                else
+                  ListPageCard(
+                    children: [
+                      for (final (i, entry) in visible.indexed)
+                        FadeSlideIn(
+                          index: i,
+                          child: ListPageRow(
+                            icon: entry.isDirectory
+                                ? AppIcons.folder
+                                : AppIcons.file,
+                            iconColor: entry.isDirectory
+                                ? Theme.of(context).colorScheme.primary
+                                : (entry.hidden ? colors.textTertiary : null),
+                            title: entry.name,
+                            meta: entry.isDirectory
+                                ? null
+                                : _formatSize(entry.sizeBytes),
+                            chevron: entry.isDirectory,
+                            onTap: () => entry.isDirectory
+                                ? unawaited(ctrl.openDirectory(entry.path))
+                                : unawaited(_openFile(entry)),
+                            onLongPress: () => unawaited(_showEntryActions(entry)),
+                          ),
+                        ),
+                    ],
+                  ),
+                if (hiddenCount > 0)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+                      child: TextButton(
+                        onPressed: () =>
+                            setState(() => _showHidden = !_showHidden),
+                        child: Text(
+                          _showHidden
+                              ? '隐藏点文件'
+                              : '显示 $hiddenCount 个隐藏项',
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
-class _FileEditorScreen extends ConsumerStatefulWidget {
-  const _FileEditorScreen({required this.entry});
+class _FileEditorPage extends StatefulWidget {
+  const _FileEditorPage({
+    required this.entry,
+    required this.initialContent,
+    required this.onSave,
+  });
 
   final WorkspaceEntry entry;
+  final String initialContent;
+  final Future<void> Function(String) onSave;
 
   @override
-  ConsumerState<_FileEditorScreen> createState() => _FileEditorScreenState();
+  State<_FileEditorPage> createState() => _FileEditorPageState();
 }
 
-class _FileEditorScreenState extends ConsumerState<_FileEditorScreen> {
-  final _ctrl = TextEditingController();
-  bool _loading = true;
+class _FileEditorPageState extends State<_FileEditorPage> {
+  late final _ctrl = TextEditingController(text: widget.initialContent);
   bool _saving = false;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    try {
-      final text = await ref
-          .read(workspaceProvider.notifier)
-          .readTextFile(widget.entry.path);
-      if (!mounted) return;
-      _ctrl.text = text;
-      setState(() => _loading = false);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = e.toString();
-      });
-    }
-  }
-
-  Future<void> _save() async {
-    setState(() => _saving = true);
-    try {
-      await ref
-          .read(workspaceProvider.notifier)
-          .writeTextFile(widget.entry.path, _ctrl.text);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已保存文件')),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('保存失败: $e')),
-      );
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
+  bool _dirty = false;
 
   @override
   void dispose() {
@@ -327,55 +398,77 @@ class _FileEditorScreenState extends ConsumerState<_FileEditorScreen> {
     super.dispose();
   }
 
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    try {
+      await widget.onSave(_ctrl.text);
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _dirty = false;
+      });
+      ScaffoldMessenger.maybeOf(context)?.showBriefNotice('已保存 ${widget.entry.name}');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(content: Text('保存失败：$e')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return AgyPage(
+    final colors = DshColors.of(context);
+    return AppPage(
       title: widget.entry.name,
+      showLargeTitle: false,
       actions: [
-        IconButton(
+        GlassIconButton(
+          icon: AppIcons.copy,
+          tooltip: '复制全部内容',
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: _ctrl.text));
+            if (context.mounted) {
+              ScaffoldMessenger.maybeOf(context)?.showBriefNotice('已复制');
+            }
+          },
+        ),
+        GlassIconButton(
+          icon: AppIcons.save,
           tooltip: '保存',
-          onPressed: _loading || _saving ? null : _save,
-          icon: _saving
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.save_rounded, size: 20),
+          onPressed: (_saving || !_dirty) ? null : _save,
         ),
       ],
-      body: _loading
-          ? const Center(child: CircularProgressIndicator.adaptive())
-          : _error != null
-          ? Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text('读取失败: $_error'),
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+          sliver: SliverToBoxAdapter(
+            child: DecoratedBox(
+              decoration: ShapeDecoration(
+                color: colors.codeWellBg,
+                shape: AppShape.outlined(colors.codeWellBorder, radius: AppShape.md),
               ),
-            )
-          : Padding(
-              padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
-              child: HairlineCard(
-                padding: const EdgeInsets.all(12),
-                child: TextField(
-                  controller: _ctrl,
-                  maxLines: null,
-                  expands: true,
-                  textAlignVertical: TextAlignVertical.top,
-                  style: const TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 13,
-                    height: 1.45,
-                  ),
-                  decoration: const InputDecoration(
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    filled: false,
-                  ),
+              child: TextField(
+                controller: _ctrl,
+                maxLines: null,
+                minLines: 22,
+                onChanged: (_) {
+                  if (!_dirty) setState(() => _dirty = true);
+                },
+                style: AppType.mono(size: 13, color: colors.codeWellFg),
+                decoration: const InputDecoration(
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  filled: false,
+                  contentPadding: EdgeInsets.all(14),
                 ),
               ),
             ),
+          ),
+        ),
+      ],
     );
   }
 }

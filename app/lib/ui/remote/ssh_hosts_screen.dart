@@ -1,11 +1,17 @@
+// Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
+
 import 'package:agy_remote/agy_remote.dart';
-import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../state/hosts_state.dart';
+import '../common/app_sheet.dart';
+import '../common/empty_view.dart';
+import '../common/list_page_row.dart';
+import '../common/segmented_pill.dart';
+import '../common/status_chip.dart';
 import '../shell/page_frame.dart';
-import '../theme/app_theme.dart';
-import '../theme/glass_widgets.dart';
+import '../theme/theme.dart';
 
 class SshHostsScreen extends ConsumerWidget {
   const SshHostsScreen({super.key});
@@ -13,165 +19,81 @@ class SshHostsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hosts = ref.watch(hostsProvider);
-    final surfaces = AgySurfaces.of(context);
-    final theme = Theme.of(context);
 
-    return AgyPage(
+    return AppPage.list(
       title: 'SSH 远程主机',
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _openEditor(context, ref),
-        icon: const Icon(Icons.add_rounded),
-        label: const Text('添加主机'),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 6, 14, 96),
-        children: [
-          HairlineCard(
-            padding: const EdgeInsets.all(14),
-            child: Text(
-              '通过 SSH exec 通道直接启动远端电脑/服务器上的 `agy acp`，无需在远端开放额外端口。密码和私钥仅保存在系统安全存储中。',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: surfaces.subtleText,
-                height: 1.45,
-              ),
+      subtitle: const Text('通过 SSH exec 通道直接连接电脑或服务器上的 agy acp'),
+      actions: [
+        GlassIconButton(
+          icon: AppIcons.add,
+          tooltip: '添加主机',
+          onPressed: () => _openEditor(context),
+        ),
+      ],
+      children: [
+        if (hosts.sshHosts.isEmpty)
+          EmptyView(
+            icon: AppIcons.sshHost,
+            title: '还没有远程主机',
+            message: '添加 Mac、Linux 电脑或云服务器后，即可随时切换连接远端 Antigravity CLI',
+            action: FilledButton.icon(
+              onPressed: () => _openEditor(context),
+              icon: const Icon(AppIcons.add, size: 18),
+              label: const Text('添加 SSH 主机'),
             ),
-          ),
-          const SizedBox(height: 12),
-          if (hosts.sshHosts.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 48),
-              child: Center(
-                child: Text(
-                  '尚未添加 SSH 主机\n点击右下角「添加主机」配置电脑或服务器',
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: surfaces.subtleText,
-                  ),
-                ),
-              ),
-            )
-          else
-            for (final h in hosts.sshHosts) ...[
-              _SshHostTile(
-                config: h,
-                isActive: !hosts.active.isLocal && hosts.active.id == h.id,
-                onActivate: () async {
-                  await ref
-                      .read(hostsProvider.notifier)
-                      .selectHost(HostRef.ssh(h.id));
-                  if (context.mounted) Navigator.of(context).pop();
-                },
-                onEdit: () => _openEditor(context, ref, existing: h),
-                onDelete: () =>
-                    ref.read(hostsProvider.notifier).deleteSshHost(h.id),
-              ),
-              const SizedBox(height: 10),
-            ],
-        ],
-      ),
-    );
-  }
-
-  Future<void> _openEditor(
-    BuildContext context,
-    WidgetRef ref, {
-    SshHostConfig? existing,
-  }) async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _SshHostEditorSheet(existing: existing),
-    );
-  }
-}
-
-class _SshHostTile extends StatelessWidget {
-  const _SshHostTile({
-    required this.config,
-    required this.isActive,
-    required this.onActivate,
-    required this.onEdit,
-    required this.onDelete,
-  });
-
-  final SshHostConfig config;
-  final bool isActive;
-  final VoidCallback onActivate;
-  final VoidCallback onEdit;
-  final VoidCallback onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    final surfaces = AgySurfaces.of(context);
-    final theme = Theme.of(context);
-
-    return HairlineCard(
-      onTap: onActivate,
-      borderColor: isActive
-          ? theme.colorScheme.primary.withValues(alpha: 0.55)
-          : null,
-      child: Row(
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: theme.colorScheme.primary.withValues(alpha: 0.14),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Icon(
-              Icons.dns_rounded,
-              color: theme.colorScheme.primary,
-              size: 20,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        config.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.titleSmall?.copyWith(
-                          fontWeight: FontWeight.w700,
+          )
+        else
+          ListPageCard(
+            children: [
+              for (final h in hosts.sshHosts)
+                ListPageRow(
+                  icon: AppIcons.sshHost,
+                  title: h.name,
+                  subtitle: '${h.authority} · ${h.agyCommand} acp',
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!hosts.active.isLocal && hosts.active.id == h.id)
+                        const Padding(
+                          padding: EdgeInsets.only(right: 6),
+                          child: StatusChip(tone: StatusTone.ok, label: '当前'),
                         ),
+                      IconButton(
+                        icon: const Icon(AppIcons.edit, size: 18),
+                        tooltip: '编辑',
+                        onPressed: () => _openEditor(context, existing: h),
                       ),
-                    ),
-                    if (isActive) ...[
-                      const SizedBox(width: 8),
-                      StatusPill(label: '当前', dotColor: surfaces.success),
+                      IconButton(
+                        icon: Icon(
+                          AppIcons.delete,
+                          size: 18,
+                          color: DshColors.of(context).danger,
+                        ),
+                        tooltip: '删除',
+                        onPressed: () => ref
+                            .read(hostsProvider.notifier)
+                            .deleteSshHost(h.id),
+                      ),
                     ],
-                  ],
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  '${config.authority} · ${config.agyCommand} acp',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: surfaces.subtleText,
-                    fontFamily: 'monospace',
                   ),
+                  onTap: () async {
+                    await ref
+                        .read(hostsProvider.notifier)
+                        .selectHost(HostRef.ssh(h.id));
+                    if (context.mounted) Navigator.of(context).pop();
+                  },
                 ),
-              ],
-            ),
+            ],
           ),
-          IconButton(
-            icon: const Icon(Icons.edit_outlined, size: 19),
-            onPressed: onEdit,
-          ),
-          IconButton(
-            icon: Icon(Icons.delete_outline_rounded, size: 19, color: surfaces.danger),
-            onPressed: onDelete,
-          ),
-        ],
-      ),
+      ],
+    );
+  }
+
+  Future<void> _openEditor(BuildContext context, {SshHostConfig? existing}) {
+    return showAppSheet<void>(
+      context,
+      isScrollControlled: true,
+      builder: (_) => _SshHostEditorSheet(existing: existing),
     );
   }
 }
@@ -230,28 +152,23 @@ class _SshHostEditorSheetState extends ConsumerState<_SshHostEditorSheet> {
   @override
   Widget build(BuildContext context) {
     final inset = MediaQuery.viewInsetsOf(context).bottom;
-    return Padding(
-      padding: EdgeInsets.only(bottom: inset),
-      child: GlassSurface(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-        padding: const EdgeInsets.fromLTRB(18, 16, 18, 20),
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: EdgeInsets.only(bottom: inset),
         child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                widget.existing == null ? '添加 SSH 主机' : '编辑 SSH 主机',
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 14),
+              SheetHeader(widget.existing == null ? '添加 SSH 主机' : '编辑 SSH 主机'),
+              const SizedBox(height: 8),
               TextField(
                 controller: _nameCtrl,
                 decoration: const InputDecoration(
                   labelText: '名称',
-                  hintText: '例如：家里 Mac / 实验室 GPU 服务器',
+                  hintText: '例如：家里 Mac / 实验室服务器',
                 ),
               ),
               const SizedBox(height: 10),
@@ -283,19 +200,14 @@ class _SshHostEditorSheetState extends ConsumerState<_SshHostEditorSheet> {
                 decoration: const InputDecoration(labelText: '用户名'),
               ),
               const SizedBox(height: 12),
-              SegmentedButton<SshAuthMethod>(
+              SegmentedPill<SshAuthMethod>(
+                expand: true,
                 segments: const [
-                  ButtonSegment(
-                    value: SshAuthMethod.password,
-                    label: Text('密码'),
-                  ),
-                  ButtonSegment(
-                    value: SshAuthMethod.privateKey,
-                    label: Text('私钥 PEM'),
-                  ),
+                  PillSegment(SshAuthMethod.password, '密码认证'),
+                  PillSegment(SshAuthMethod.privateKey, '私钥 PEM'),
                 ],
-                selected: {_authMethod},
-                onSelectionChanged: (s) => setState(() => _authMethod = s.first),
+                selected: _authMethod,
+                onChanged: (m) => setState(() => _authMethod = m),
               ),
               const SizedBox(height: 10),
               if (_authMethod == SshAuthMethod.password)
@@ -340,6 +252,7 @@ class _SshHostEditorSheetState extends ConsumerState<_SshHostEditorSheet> {
               ),
               const SizedBox(height: 16),
               FilledButton(
+                style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
                 onPressed: _save,
                 child: const Text('保存主机'),
               ),
@@ -364,8 +277,12 @@ class _SshHostEditorSheetState extends ConsumerState<_SshHostEditorSheet> {
       port: int.tryParse(_portCtrl.text.trim()) ?? 22,
       username: user,
       authMethod: _authMethod,
-      workingDirectory: _cwdCtrl.text.trim().isEmpty ? null : _cwdCtrl.text.trim(),
-      agyCommand: _agyCmdCtrl.text.trim().isEmpty ? 'agy' : _agyCmdCtrl.text.trim(),
+      workingDirectory: _cwdCtrl.text.trim().isEmpty
+          ? null
+          : _cwdCtrl.text.trim(),
+      agyCommand: _agyCmdCtrl.text.trim().isEmpty
+          ? 'agy'
+          : _agyCmdCtrl.text.trim(),
       pinnedHostKeySha256: widget.existing?.pinnedHostKeySha256,
     );
 

@@ -17,14 +17,21 @@ import kotlin.concurrent.thread
  * Spawns the on-device `agy acp` process (Native Android Bionic by default, or optional PRoot Linux)
  * and bridges its stdin/stdout NDJSON stream to a token-authenticated loopback TCP socket.
  *
- * Keeping the child process owned by Android's ForegroundService + loopback bridge means
- * Flutter Activity recreations or backgrounding do not break an active `agy` turn.
+ * Workspace & phone storage mounting mirrors DSH Go:
+ * - Native Bionic mode: `HOME` is `filesDir/runtime/home`, default workspace is `HOME/workspace`,
+ *   and when phone storage is enabled & granted, `HOME/手机存储 -> /storage/emulated/0` is synced
+ *   and `agy` can directly operate on any workspace path passed via ACP `cwd`.
+ * - PRoot Linux mode: passes `-b /storage/emulated/0:/sdcard -b /storage` plus extra registered
+ *   workspace binds before `/usr/bin/env`, and syncs `/root/手机存储 -> /sdcard`.
  */
 class AgyProcess(
     private val context: Context,
     private val installer: AgyInstaller,
     private val authConfig: AgyAuthHelper.AuthConfig,
     private val useProot: Boolean,
+    private val phoneStorageMounted: Boolean,
+    private val extraWorkspaceBinds: List<String>,
+    private val phoneControlEnabled: Boolean,
     private val listener: Listener,
 ) {
     interface Listener {
@@ -52,6 +59,14 @@ class AgyProcess(
     fun start() {
         installer.ensureDirectories()
         AgyAuthHelper.applySettings(installer.homeDir, authConfig)
+        PhoneStorage.syncShortcuts(installer.homeDir, installer.prootRootfsDir, phoneStorageMounted)
+        GuestWorkspaceSetup.writeInstructions(
+            homeDir = installer.homeDir,
+            workspaceDir = installer.workspaceDir,
+            useProot = useProot && installer.isProotAvailable(),
+            phoneStorageMounted = phoneStorageMounted,
+            phoneControlEnabled = phoneControlEnabled,
+        )
 
         val server = ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"))
         serverSocket = server
@@ -63,14 +78,17 @@ class AgyProcess(
             val env = environment()
             env["HOME"] = installer.homeDir.absolutePath
             env["USER"] = "agy"
-            env["TMPDIR"] = File(context.cacheDir, "tmp").absolutePath
+            env["TMPDIR"] = File(context.cacheDir, "tmp").apply { mkdirs() }.absolutePath
             env["XDG_CONFIG_HOME"] = File(installer.homeDir, ".config").absolutePath
             env["XDG_CACHE_HOME"] = File(installer.homeDir, ".cache").absolutePath
             env["XDG_DATA_HOME"] = File(installer.homeDir, ".local/share").absolutePath
             env["TERM"] = "xterm-256color"
+            if (phoneStorageMounted) {
+                env["AGY_PHONE_STORAGE"] = if (executionMode == "proot") PhoneStorage.GUEST_PATH else PhoneStorage.hostRoot()
+            }
             val currentPath = env["PATH"] ?: "/system/bin:/system/xbin"
             env["PATH"] = "${installer.binDir.absolutePath}:$currentPath"
-            if (useProot) {
+            if (executionMode == "proot") {
                 env["PROOT_TMP_DIR"] = File(context.cacheDir, "proot-tmp").apply { mkdirs() }.absolutePath
                 env["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
             }
@@ -79,7 +97,10 @@ class AgyProcess(
             }
         }
 
-        listener.onLog("[runtime] launching ($executionMode): ${cmd.joinToString(" ")}", "system")
+        listener.onLog(
+            "[runtime] launching ($executionMode, storage=${if (phoneStorageMounted) "mounted" else "isolated"}): ${cmd.joinToString(" ")}",
+            "system",
+        )
         val proc = pb.start()
         process = proc
         processStdin = BufferedWriter(OutputStreamWriter(proc.outputStream, Charsets.UTF_8))
@@ -162,18 +183,28 @@ class AgyProcess(
         if (useProot && installer.isProotAvailable()) {
             executionMode = "proot"
             val proot = File(context.applicationInfo.nativeLibraryDir, "libproot.so").absolutePath
-            return listOf(
-                proot,
-                "-r", installer.prootRootfsDir.absolutePath,
-                "-0",
-                "-w", "/root/workspace",
-                "-b", "/dev",
-                "-b", "/proc",
-                "-b", "/sys",
-                "-b", "${installer.homeDir.absolutePath}:/root",
-                "/usr/bin/env", "HOME=/root", "PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin",
-                "/root/.local/bin/agy", "acp",
-            )
+            val cmd = ArrayList<String>().apply {
+                add(proot)
+                add("-r"); add(installer.prootRootfsDir.absolutePath)
+                add("-0")
+                add("-w"); add("/root/workspace")
+                add("-b"); add("/dev")
+                add("-b"); add("/proc")
+                add("-b"); add("/sys")
+                add("-b"); add("${installer.homeDir.absolutePath}:/root")
+                for (bind in PhoneStorage.prootBinds(phoneStorageMounted, extraWorkspaceBinds)) {
+                    add("-b"); add(bind)
+                }
+                add("/usr/bin/env")
+                add("HOME=/root")
+                add("PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin")
+                if (phoneStorageMounted) {
+                    add("AGY_PHONE_STORAGE=${PhoneStorage.GUEST_PATH}")
+                }
+                add("/root/.local/bin/agy")
+                add("acp")
+            }
+            return cmd
         }
         executionMode = "native_bionic"
         return listOf(installer.agyBinary.absolutePath, "acp")

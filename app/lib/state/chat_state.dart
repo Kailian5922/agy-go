@@ -6,24 +6,30 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'connection_state.dart';
 import 'phone_state.dart';
 import 'sessions_state.dart';
+import 'settings_state.dart';
+import 'workspaces_state.dart';
 
 class ChatState {
   const ChatState({
     this.sessionId,
+    this.sessionCwd,
     this.transcript = const ChatTranscript(),
     this.pendingPermissions = const [],
     this.isSending = false,
     this.isLoadingSession = false,
     this.authRequired = false,
+    this.quotedText,
     this.error,
   });
 
   final String? sessionId;
+  final String? sessionCwd;
   final ChatTranscript transcript;
   final List<PendingPermission> pendingPermissions;
   final bool isSending;
   final bool isLoadingSession;
   final bool authRequired;
+  final String? quotedText;
   final String? error;
 
   bool get isBusy => isSending || transcript.isStreaming;
@@ -31,20 +37,26 @@ class ChatState {
   ChatState copyWith({
     String? sessionId,
     bool clearSessionId = false,
+    String? sessionCwd,
+    bool clearSessionCwd = false,
     ChatTranscript? transcript,
     List<PendingPermission>? pendingPermissions,
     bool? isSending,
     bool? isLoadingSession,
     bool? authRequired,
+    String? quotedText,
+    bool clearQuotedText = false,
     String? error,
     bool clearError = false,
   }) => ChatState(
     sessionId: clearSessionId ? null : (sessionId ?? this.sessionId),
+    sessionCwd: clearSessionCwd ? null : (sessionCwd ?? this.sessionCwd),
     transcript: transcript ?? this.transcript,
     pendingPermissions: pendingPermissions ?? this.pendingPermissions,
     isSending: isSending ?? this.isSending,
     isLoadingSession: isLoadingSession ?? this.isLoadingSession,
     authRequired: authRequired ?? this.authRequired,
+    quotedText: clearQuotedText ? null : (quotedText ?? this.quotedText),
     error: clearError ? null : (error ?? this.error),
   );
 }
@@ -53,6 +65,7 @@ class ChatController extends Notifier<ChatState> {
   StreamSubscription<AcpSessionNotification>? _updateSub;
   StreamSubscription<PendingPermission>? _permSub;
   String? _loadedSessionId;
+  final Set<String> _allowAllSessions = {};
 
   List<AcpMcpServerConfig> _sessionMcpServers(HostConnection conn) {
     if (!conn.isLocal || !conn.initResult.capabilities.supportsHttpMcp) {
@@ -93,13 +106,24 @@ class ChatController extends Notifier<ChatState> {
     _permSub = conn.client.permissionRequests.listen(_onPermissionRequest);
 
     if (selectedId != null && selectedId.isNotEmpty) {
-      unawaited(_loadExistingSession(conn, selectedId));
-      return ChatState(sessionId: selectedId, isLoadingSession: true);
+      final sessionInfo = ref.read(sessionsProvider).currentSession;
+      final String cwd =
+          sessionInfo?.cwd ?? ref.read(effectiveWorkingDirProvider);
+      unawaited(_loadExistingSession(conn, selectedId, cwd));
+      return ChatState(
+        sessionId: selectedId,
+        sessionCwd: cwd,
+        isLoadingSession: true,
+      );
     }
     return const ChatState();
   }
 
-  Future<void> _loadExistingSession(HostConnection conn, String sid) async {
+  Future<void> _loadExistingSession(
+    HostConnection conn,
+    String sid,
+    String cwd,
+  ) async {
     _loadedSessionId = sid;
     final mcpServers = _sessionMcpServers(conn);
     try {
@@ -107,13 +131,13 @@ class ChatController extends Notifier<ChatState> {
       if (conn.initResult.capabilities.loadSession) {
         handle = await conn.client.loadSession(
           sessionId: sid,
-          cwd: conn.defaultCwd,
+          cwd: cwd,
           mcpServers: mcpServers,
         );
       } else if (conn.initResult.capabilities.canResumeSession) {
         handle = await conn.client.resumeSession(
           sessionId: sid,
-          cwd: conn.defaultCwd,
+          cwd: cwd,
           mcpServers: mcpServers,
         );
       } else {
@@ -124,6 +148,7 @@ class ChatController extends Notifier<ChatState> {
       if (!ref.mounted || _loadedSessionId != sid) return;
       state = state.copyWith(
         sessionId: handle.sessionId,
+        sessionCwd: cwd,
         transcript: state.transcript.copyWith(
           modes: handle.modes ?? state.transcript.modes,
           configOptions: handle.configOptions.isNotEmpty
@@ -153,9 +178,28 @@ class ChatController extends Notifier<ChatState> {
     state = const ChatState();
   }
 
+  void setQuote(String? text) {
+    final clean = text?.trim();
+    if (clean == null || clean.isEmpty) {
+      state = state.copyWith(clearQuotedText: true);
+    } else {
+      state = state.copyWith(quotedText: clean);
+    }
+  }
+
+  void allowAllForCurrentSession() {
+    final sid = state.sessionId;
+    if (sid != null) _allowAllSessions.add(sid);
+  }
+
   Future<void> send(String rawText) async {
-    final text = rawText.trim();
-    if (text.isEmpty) return;
+    final cleanBody = rawText.trim();
+    if (cleanBody.isEmpty) return;
+
+    final quote = state.quotedText;
+    final text = quote != null && quote.isNotEmpty
+        ? '> ${quote.replaceAll('\n', '\n> ')}\n\n$cleanBody'
+        : cleanBody;
 
     final conn = ref.read(activeConnectionProvider).value;
     if (conn == null) {
@@ -163,13 +207,20 @@ class ChatController extends Notifier<ChatState> {
       return;
     }
 
-    state = state.copyWith(isSending: true, clearError: true, authRequired: false);
+    state = state.copyWith(
+      isSending: true,
+      clearError: true,
+      clearQuotedText: true,
+      authRequired: false,
+    );
 
     try {
       var sid = state.sessionId;
+      final String cwd =
+          state.sessionCwd ?? ref.read(effectiveWorkingDirProvider);
       if (sid == null || sid.isEmpty) {
         final handle = await conn.client.newSession(
-          cwd: conn.defaultCwd,
+          cwd: cwd,
           mcpServers: _sessionMcpServers(conn),
         );
         sid = handle.sessionId;
@@ -177,13 +228,16 @@ class ChatController extends Notifier<ChatState> {
         ref.read(sessionsProvider.notifier).registerCreatedSession(
           AcpSessionInfo(
             sessionId: sid,
-            cwd: conn.defaultCwd,
-            title: text.length > 36 ? '${text.substring(0, 36)}…' : text,
+            cwd: cwd,
+            title: cleanBody.length > 36
+                ? '${cleanBody.substring(0, 36)}…'
+                : cleanBody,
             updatedAt: DateTime.now(),
           ),
         );
         state = state.copyWith(
           sessionId: sid,
+          sessionCwd: cwd,
           transcript: state.transcript.copyWith(
             modes: handle.modes,
             configOptions: handle.configOptions,
@@ -235,7 +289,14 @@ class ChatController extends Notifier<ChatState> {
     );
   }
 
-  void respondPermission(PendingPermission pending, String? optionId) {
+  void respondPermission(
+    PendingPermission pending,
+    String? optionId, {
+    bool allowAllForChat = false,
+  }) {
+    if (allowAllForChat) {
+      allowAllForCurrentSession();
+    }
     if (optionId == null) {
       pending.cancel();
     } else {
@@ -288,7 +349,8 @@ class ChatController extends Notifier<ChatState> {
     if (currentSid != null && notification.sessionId != currentSid) return;
 
     final nextTranscript = state.transcript.applyUpdate(notification.update);
-    if (notification.update case SessionInfoUpdate(:final title?) when currentSid != null) {
+    if (notification.update case SessionInfoUpdate(:final title?)
+        when currentSid != null) {
       ref.read(sessionsProvider.notifier).updateSessionTitle(currentSid, title);
     }
     state = state.copyWith(transcript: nextTranscript);
@@ -298,6 +360,19 @@ class ChatController extends Notifier<ChatState> {
     if (!ref.mounted) return;
     final currentSid = state.sessionId;
     if (currentSid != null && pending.request.sessionId != currentSid) return;
+
+    final autoGlobal = ref.read(settingsProvider).autoApproveCommands;
+    final autoChat = currentSid != null && _allowAllSessions.contains(currentSid);
+    if (autoGlobal || autoChat) {
+      final allow = pending.request.options
+          .where((o) => o.kind.isAllow)
+          .firstOrNull;
+      if (allow != null) {
+        pending.select(allow.optionId);
+        return;
+      }
+    }
+
     state = state.copyWith(
       pendingPermissions: [...state.pendingPermissions, pending],
     );

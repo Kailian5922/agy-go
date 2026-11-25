@@ -29,6 +29,38 @@ class RuntimeProgress {
   final String detail;
 }
 
+class PhoneStorageStatus {
+  const PhoneStorageStatus({
+    this.granted = false,
+    this.permission = false,
+    this.legacy = false,
+    this.guestPath = '/sdcard',
+    this.hostPath = '/storage/emulated/0',
+    this.outputPath = '/storage/emulated/0/Download/AGY-Go',
+    this.needsAllFilesFallback = false,
+  });
+
+  factory PhoneStorageStatus.fromMap(Map<Object?, Object?> raw) =>
+      PhoneStorageStatus(
+        granted: raw['granted'] == true,
+        permission: raw['permission'] == true,
+        legacy: raw['legacy'] == true,
+        guestPath: raw['guestPath'] as String? ?? '/sdcard',
+        hostPath: raw['hostPath'] as String? ?? '/storage/emulated/0',
+        outputPath:
+            raw['outputPath'] as String? ?? '/storage/emulated/0/Download/AGY-Go',
+        needsAllFilesFallback: raw['needsAllFilesFallback'] == true,
+      );
+
+  final bool granted;
+  final bool permission;
+  final bool legacy;
+  final String guestPath;
+  final String hostPath;
+  final String outputPath;
+  final bool needsAllFilesFallback;
+}
+
 class RuntimeStatus {
   const RuntimeStatus({
     required this.phase,
@@ -40,6 +72,10 @@ class RuntimeStatus {
     this.installedVersion,
     this.workspacePath,
     this.homePath,
+    this.phoneStorageEnabled = false,
+    this.phoneStorageGranted = false,
+    this.phoneStorageMounted = false,
+    this.phoneStoragePath = '/storage/emulated/0',
     this.port,
     this.token,
     this.error,
@@ -58,6 +94,10 @@ class RuntimeStatus {
     installedVersion: raw['installedVersion'] as String?,
     workspacePath: raw['workspacePath'] as String?,
     homePath: raw['homePath'] as String?,
+    phoneStorageEnabled: raw['phoneStorageEnabled'] == true,
+    phoneStorageGranted: raw['phoneStorageGranted'] == true,
+    phoneStorageMounted: raw['phoneStorageMounted'] == true,
+    phoneStoragePath: raw['phoneStoragePath'] as String? ?? '/storage/emulated/0',
     port: (raw['port'] as num?)?.toInt(),
     token: raw['token'] as String?,
     error: raw['error'] as String?,
@@ -73,6 +113,10 @@ class RuntimeStatus {
   final String? installedVersion;
   final String? workspacePath;
   final String? homePath;
+  final bool phoneStorageEnabled;
+  final bool phoneStorageGranted;
+  final bool phoneStorageMounted;
+  final String phoneStoragePath;
   final int? port;
   final String? token;
   final String? error;

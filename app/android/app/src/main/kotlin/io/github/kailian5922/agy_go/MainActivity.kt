@@ -19,11 +19,22 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         val messenger = flutterEngine.dartExecutor.binaryMessenger
         disposePlugins()
-        runtimePlugin = RuntimePlugin(applicationContext, messenger)
+        runtimePlugin = RuntimePlugin(applicationContext, { this }, messenger)
         phonePlugin = PhonePlugin(applicationContext, messenger)
         voicePlugin = VoicePlugin(applicationContext, { this }, messenger)
         petPlugin = PetPlugin(applicationContext, messenger)
         systemPlugin = SystemPlugin(applicationContext, messenger)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (runtimePlugin?.onRequestPermissionsResult(requestCode) == true) {
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {

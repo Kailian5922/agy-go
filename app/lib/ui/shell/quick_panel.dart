@@ -1,231 +1,196 @@
-import 'package:material_ui/material_ui.dart';
+// Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../state/chat_state.dart';
-import '../../state/connection_state.dart';
-import '../theme/app_theme.dart';
-import '../theme/glass_widgets.dart';
+import '../../state/hosts_state.dart';
+import '../../state/runtime_state.dart';
+import '../../state/workspaces_state.dart';
+import '../common/status_dot.dart';
+import '../theme/theme.dart';
+import 'drawer_destination.dart';
 
-/// Right-side quick panel: live ACP model / reasoning effort / mode switcher, plan & usage.
+/// Right-edge quick panel pulled over chat by a leftward swipe, mirroring DSH Go's QuickPanel.
 class QuickPanel extends ConsumerWidget {
-  const QuickPanel({super.key, this.onClose});
+  const QuickPanel({
+    super.key,
+    required this.motion,
+    required this.onOpen,
+    this.sessionId,
+  });
 
-  final VoidCallback? onClose;
+  final Animation<double> motion;
+  final ValueChanged<DrawerDestination> onOpen;
+  final String? sessionId;
+
+  static const width = 264.0;
+  static const conversationWidth = 304.0;
+
+  static const _radius = BorderRadius.only(
+    topLeft: Radius.circular(AppShape.xl),
+    bottomLeft: Radius.circular(AppShape.xl),
+  );
+
+  static const _defaultItems = <DrawerDestination>[
+    DrawerDestination.engine,
+    DrawerDestination.workspaces,
+    DrawerDestination.files,
+    DrawerDestination.remote,
+    DrawerDestination.terminal,
+    DrawerDestination.phone,
+    DrawerDestination.pet,
+    DrawerDestination.share,
+    DrawerDestination.keepAlive,
+    DrawerDestination.features,
+    DrawerDestination.settings,
+  ];
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final chat = ref.watch(chatProvider);
-    final connAsync = ref.watch(activeConnectionProvider);
-    final conn = connAsync.value;
-    final surfaces = AgySurfaces.of(context);
     final theme = Theme.of(context);
+    final colors = DshColors.of(context);
+    final chat = ref.watch(chatProvider);
+    final hosts = ref.watch(hostsProvider);
+    final runtime = ref.watch(localRuntimeProvider).status;
+    final cwd = ref.watch(effectiveWorkingDirProvider);
+    final hasSession = sessionId != null;
 
-    return GlassSurface(
-      borderRadius: const BorderRadius.horizontal(left: Radius.circular(24)),
+    final content = Material(
+      type: MaterialType.transparency,
       child: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 24),
+        left: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                Text(
-                  '会话控制',
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 10),
+              child: Semantics(
+                header: true,
+                child: Text(
+                  hasSession ? '当前对话与快捷入口' : '快捷入口',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleLarge,
                 ),
-                const Spacer(),
-                if (onClose != null)
-                  IconButton(
-                    icon: const Icon(Icons.close_rounded, size: 20),
-                    onPressed: onClose,
-                    visualDensity: VisualDensity.compact,
-                  ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            HairlineCard(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '连接信息',
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: surfaces.subtleText,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    conn == null
-                        ? '未连接主机'
-                        : '${conn.label} · ${conn.initResult.agentInfo?.name ?? 'agy'} ${conn.initResult.agentInfo?.version ?? ''}',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  if (conn != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      '工作目录: ${conn.defaultCwd}',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: surfaces.subtleText,
-                      ),
-                    ),
-                  ],
-                ],
               ),
             ),
-            if (chat.transcript.modes != null &&
-                chat.transcript.modes!.availableModes.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              Text(
-                '执行模式',
-                style: theme.textTheme.labelLarge?.copyWith(
-                  color: surfaces.subtleText,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final m in chat.transcript.modes!.availableModes)
-                    ChoiceChip(
-                      label: Text(m.name),
-                      selected: m.id == chat.transcript.modes!.currentModeId,
-                      onSelected: (_) =>
-                          ref.read(chatProvider.notifier).setMode(m.id),
-                    ),
-                ],
-              ),
-            ],
-            for (final opt in chat.transcript.configOptions) ...[
-              const SizedBox(height: 16),
-              Text(
-                opt.name,
-                style: theme.textTheme.labelLarge?.copyWith(
-                  color: surfaces.subtleText,
-                ),
-              ),
-              const SizedBox(height: 8),
-              if (opt.options.isNotEmpty)
-                HairlineCard(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<String>(
-                      isExpanded: true,
-                      value: opt.options.any((v) => v.value == opt.currentValue)
-                          ? opt.currentValue?.toString()
-                          : null,
-                      hint: Text(opt.currentValue?.toString() ?? '选择'),
-                      items: [
-                        for (final v in opt.options)
-                          DropdownMenuItem(
-                            value: v.value,
+            if (hasSession)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                child: GlassSurface(
+                  tier: GlassTier.card,
+                  borderRadius: AppShape.radiusMd,
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          StatusDot(
+                            tone: chat.isBusy ? StatusTone.busy : StatusTone.ok,
+                            size: 7,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
                             child: Text(
-                              v.name,
+                              hosts.activeLabel(),
+                              maxLines: 1,
                               overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.titleSmall,
                             ),
                           ),
-                      ],
-                      onChanged: (val) {
-                        if (val != null) {
-                          ref
-                              .read(chatProvider.notifier)
-                              .setConfigOption(opt.id, val);
-                        }
-                      },
-                    ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        displayWorkspacePath(
+                          chat.sessionCwd ?? cwd,
+                          local: hosts.active.isLocal,
+                          homePath: runtime.homePath,
+                          storageRoot: runtime.phoneStoragePath,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppType.monoLabel(color: colors.textTertiary),
+                      ),
+                    ],
                   ),
                 ),
-            ],
-            if (chat.transcript.plan.isNotEmpty) ...[
-              const SizedBox(height: 18),
-              Text(
-                '执行计划',
-                style: theme.textTheme.labelLarge?.copyWith(
-                  color: surfaces.subtleText,
-                ),
               ),
-              const SizedBox(height: 8),
-              HairlineCard(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  children: [
-                    for (final entry in chat.transcript.plan)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Icon(
-                              entry.status == 'completed'
-                                  ? Icons.check_circle_rounded
-                                  : entry.status == 'in_progress'
-                                  ? Icons.timelapse_rounded
-                                  : Icons.radio_button_unchecked_rounded,
-                              size: 16,
-                              color: entry.status == 'completed'
-                                  ? surfaces.success
-                                  : entry.status == 'in_progress'
-                                  ? theme.colorScheme.primary
-                                  : surfaces.subtleText,
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                entry.content,
-                                style: theme.textTheme.bodySmall,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-            if (chat.transcript.usage != null) ...[
-              const SizedBox(height: 16),
-              HairlineCard(
-                padding: const EdgeInsets.all(12),
-                child: Row(
-                  children: [
-                    Icon(Icons.data_usage_rounded, size: 18, color: theme.colorScheme.primary),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        '上下文: ${chat.transcript.usage!.usedTokens ?? 0} / ${chat.transcript.usage!.sizeTokens ?? 0} tokens',
-                        style: theme.textTheme.bodySmall,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-            if (chat.transcript.availableCommands.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              Text(
-                '可用斜杠命令',
-                style: theme.textTheme.labelLarge?.copyWith(
-                  color: surfaces.subtleText,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
                 children: [
-                  for (final cmd in chat.transcript.availableCommands.take(12))
-                    Chip(
-                      label: Text('/${cmd.name}'),
-                      visualDensity: VisualDensity.compact,
+                  for (final destination in _defaultItems)
+                    _QuickRow(
+                      destination: destination,
+                      onTap: () => onOpen(destination),
                     ),
                 ],
               ),
-            ],
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 13),
+              child: Text(
+                '右滑打开会话抽屉 · 左滑打开快捷入口',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colors.textTertiary,
+                ),
+              ),
+            ),
           ],
+        ),
+      ),
+    );
+
+    return SlidingGlass(
+      motion: motion,
+      tier: GlassTier.sheet,
+      borderRadius: _radius,
+      child: content,
+    );
+  }
+}
+
+class _QuickRow extends StatelessWidget {
+  const _QuickRow({required this.destination, required this.onTap});
+
+  final DrawerDestination destination;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return InkWell(
+      key: ValueKey('quick-panel-${destination.name}'),
+      onTap: onTap,
+      customBorder: Squircle.border(AppShape.md),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            children: [
+              Icon(
+                destination.icon,
+                size: 20,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  destination.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodyLarge?.copyWith(
+                    fontSize: 15,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

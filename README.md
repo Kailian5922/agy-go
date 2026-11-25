@@ -20,7 +20,7 @@ Google [Antigravity CLI (`agy`)](https://github.com/google-antigravity/antigravi
   - **原创伴侣「星灵 Starling」**：App 内可拖拽悬浮伙伴 + Android 系统桌面悬浮球（`SYSTEM_ALERT_WINDOW`，靠边吸附），实时同步思考/执行/审批/完成状态。
   - **分享卡与对话回放**：自动脱敏密钥/Token 的高分辨率 PNG 分享卡（FileProvider 原生分享）、Markdown 导出、JSON 回放包导出与内置回放器。
   - **后台保活与自更新**：小米/华为/荣耀/OPPO/vivo/三星省电豁免与厂商自启动直达引导 + GitHub Releases APK 自更新。
-  - **玻璃拟态三栏外壳**：借鉴 [dsh-Go](https://github.com/ccch1mneyyy/dsh-go) 的雾面玻璃、细线骨架与三栏跟手手势设计，原创实现 6 套主题配色、浅/深色模式、中英文双语切换与平板常驻侧栏。
+  - **雾面玻璃三栏外壳与工作区挂载**：直接采用并适配 [DSH Go](https://github.com/ccch1mneyyy/dsh-go)（GNU AGPL-3.0）的 Mist Glass 雾面玻璃设计语言、6 套 OKLCH 配色、左抽屉 + 浮动顶栏/底栏 + 右快捷面板手势架构、设置枢纽与「全部功能」页；支持多工作区注册、置顶、分组、两步目录选择器，以及 Android 手机共享存储挂载（`targetSdk = 28` + `PhoneStorage` + 原生 Bionic `~/手机存储` 软链 + PRoot `-b /storage/emulated/0:/sdcard` + 托管 `.gemini/GEMINI.md` 路径提示 + ACP `session/new` `cwd` 精确绑定）。品牌图形与「星灵」伴侣为 AGY Go 原创，不包含 DSH Go 专有品牌/吉祥物素材。
 
 ## 仓库结构
 
@@ -28,10 +28,11 @@ Google [Antigravity CLI (`agy`)](https://github.com/google-antigravity/antigravi
 agy-go/
 ├── packages/acp_client/     # 纯 Dart Agent Client Protocol (ACP) JSON-RPC 2.0 客户端 + ChatTranscript 折叠器
 ├── packages/agy_remote/     # 传输层：Android 本机回环令牌桥接 + SSH exec `agy acp`（含指纹钉死）
-├── app/                     # Flutter Android 应用（Riverpod 3 + Kotlin 原生运行时 / MCP 手机操控 / 语音 / 桌宠 / 保活更新）
+├── app/                     # Flutter Android 应用（Riverpod 3 + DSH Go Mist Glass UI + Kotlin 原生运行时 / 手机存储挂载 / MCP 手机操控 / 语音 / 桌宠 / 保活更新）
 ├── runtime/                 # 可选 PRoot Ubuntu 24.04 Linux 容器构建脚本（build-rootfs.sh）
 ├── tooling/                 # Android APK 打包脚本（build-apk.sh）
 ├── docs/architecture.md     # 完整架构设计文档
+├── THIRD_PARTY_NOTICES.md   # 第三方开源组件与版权声明
 └── .github/workflows/ci.yml # Dart/Flutter 静态分析、单元测试与 Android APK 构建 CI
 ```
 
@@ -54,6 +55,6 @@ bash runtime/build-rootfs.sh arm64-v8a
 
 ## 致谢与许可
 
-- 代码以 [MIT License](LICENSE) 开源。
-- UI 交互结构与 Android `targetSdk = 28` 本机运行思路深受社区优秀项目 [dsh-Go](https://github.com/ccch1mneyyy/dsh-go) 启发，本仓库全部源码、视觉设计与品牌素材均为独立全新编写。
-- AGY Go 是非官方社区客户端，与 Google 无隶属关系。
+- 本项目以 [GNU AGPL-3.0](LICENSE) 协议开源。
+- 雾面玻璃 UI 架构、主题系统、交互组件及 Android 手机存储挂载设计复用并适配自 [DSH Go](https://github.com/ccch1mneyyy/dsh-go)（GNU AGPL-3.0）及其上游组件，详情见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。所有 DSH Go 保留所有权利的品牌与吉祥物素材均未引入，AGY Go 品牌图标与「星灵」伴侣均为原创实现。
+- AGY Go 是非官方社区客户端，直连 Google 官方 Antigravity CLI 二进制与官方 ACP 协议，不构成反向代理，与 Google 无隶属关系。

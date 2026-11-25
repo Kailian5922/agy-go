@@ -1,205 +1,363 @@
-import 'package:material_ui/material_ui.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+// SPDX-FileCopyrightText: 2026 CikeSeven
+// SPDX-License-Identifier: MIT
+// Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_ui/material_ui.dart';
+
+import '../../runtime/runtime_models.dart';
 import '../../state/chat_state.dart';
 import '../../state/connection_state.dart';
 import '../../state/hosts_state.dart';
 import '../../state/phone_state.dart';
+import '../../state/runtime_state.dart';
+import '../../state/sessions_state.dart';
+import '../../state/workspaces_state.dart';
+import '../common/status_dot.dart';
 import '../engine/engine_screen.dart';
 import '../phone/phone_control_screen.dart';
-import '../remote/ssh_hosts_screen.dart';
-import '../share/share_screen.dart';
-import '../theme/app_theme.dart';
-import '../theme/glass_widgets.dart';
+import '../shell/drawer_destination.dart';
+import '../shell/sessions_drawer.dart';
+import '../theme/theme.dart';
+import 'chat_header.dart';
 import 'chat_list.dart';
 import 'composer_bar.dart';
 import 'permission_card.dart';
+import 'session_detail_page.dart';
 
-class ChatScreen extends ConsumerWidget {
+class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({
     super.key,
-    required this.showDrawerButton,
     required this.onOpenDrawer,
     required this.onOpenQuickPanel,
+    required this.onOpenDestination,
   });
 
-  final bool showDrawerButton;
   final VoidCallback onOpenDrawer;
   final VoidCallback onOpenQuickPanel;
+  final ValueChanged<DrawerDestination> onOpenDestination;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends ConsumerState<ChatScreen> {
+  final _scrollController = ScrollController();
+  final _composerController = TextEditingController();
+  final _scrolledUnder = ValueNotifier<double>(0);
+  bool _showJumpDown = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    _composerController.dispose();
+    _scrolledUnder.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    final nextFade = (pos.pixels / 24).clamp(0.0, 1.0);
+    if (_scrolledUnder.value != nextFade) {
+      _scrolledUnder.value = nextFade;
+    }
+    final farFromBottom =
+        pos.maxScrollExtent > 120 && (pos.maxScrollExtent - pos.pixels) > 180;
+    if (farFromBottom != _showJumpDown) {
+      setState(() => _showJumpDown = farFromBottom);
+    }
+  }
+
+  void _scrollToBottom() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: AppMotion.of(context, AppMotion.standard),
+      curve: AppMotion.std,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final hosts = ref.watch(hostsProvider);
+    final runtime = ref.watch(localRuntimeProvider).status;
     final connAsync = ref.watch(activeConnectionProvider);
+    final selectedWs = ref.watch(selectedWorkspaceProvider);
+    final currentSession = ref.watch(
+      sessionsProvider.select((s) => s.currentSession),
+    );
+    final sessions = ref.watch(sessionsProvider);
     final phoneApprovals = ref.watch(
       phoneControlProvider.select((p) => p.pendingApprovals),
     );
     final chat = ref.watch(
       chatProvider.select(
         (s) => (
+          sessionId: s.sessionId,
           title: s.transcript.title,
           isBusy: s.isBusy,
           permissions: s.pendingPermissions,
           error: s.error,
           authRequired: s.authRequired,
+          hasItems: s.transcript.items.isNotEmpty,
         ),
       ),
     );
 
-    final surfaces = AgySurfaces.of(context);
     final connected = connAsync.value != null;
-    final dotColor = connected
-        ? surfaces.success
-        : connAsync.isLoading
-        ? surfaces.warning
-        : connAsync.hasError
-        ? surfaces.danger
-        : surfaces.subtleText;
+    final hasSession = chat.sessionId != null;
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final bottomPad = MediaQuery.paddingOf(context).bottom;
+    final dockReserve = keyboardInset + bottomPad + 84;
+
+    final HeaderStatus headerStatus;
+    if (chat.permissions.isNotEmpty || phoneApprovals.isNotEmpty) {
+      headerStatus = const HeaderStatus(StatusTone.warn, '等你确认');
+    } else if (chat.isBusy) {
+      headerStatus = const HeaderStatus(StatusTone.busy, '生成中');
+    } else if (connected) {
+      headerStatus = HeaderStatus(StatusTone.ok, hosts.activeLabel());
+    } else if (connAsync.isLoading || runtime.phase == RuntimePhase.starting) {
+      headerStatus = const HeaderStatus(StatusTone.busy, '连接中');
+    } else if (connAsync.hasError || runtime.phase == RuntimePhase.error) {
+      headerStatus = const HeaderStatus(StatusTone.error, '连接异常');
+    } else {
+      headerStatus = const HeaderStatus(StatusTone.idle, '未连接');
+    }
+
+    final headerTitle = hasSession
+        ? (chat.title?.isNotEmpty == true
+              ? chat.title!
+              : (currentSession != null
+                    ? sessions.displayTitle(currentSession)
+                    : '当前对话'))
+        : 'AGY Go';
 
     return Stack(
       children: [
-        Column(
-          children: [
-            Expanded(
-              child: ChatList(
-                onPickSuggestion: (text) =>
-                    ref.read(chatProvider.notifier).send(text),
-              ),
-            ),
-            if (chat.error != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-                child: HairlineCard(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  borderColor: surfaces.danger.withValues(alpha: 0.45),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.error_outline_rounded,
-                        size: 18,
-                        color: surfaces.danger,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          chat.error!,
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: surfaces.danger),
-                        ),
-                      ),
-                      if (chat.authRequired)
-                        TextButton(
-                          onPressed: () => Navigator.of(context).push(
-                            MaterialPageRoute<void>(
-                              builder: (_) => const EngineScreen(),
-                            ),
-                          ),
-                          child: const Text('去认证'),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            for (final prompt in phoneApprovals)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-                child: PhoneApprovalCard(
-                  prompt: prompt,
-                  onApprove: () => ref
-                      .read(phoneControlProvider.notifier)
-                      .resolveApproval(prompt.id, approved: true),
-                  onDeny: () => ref
-                      .read(phoneControlProvider.notifier)
-                      .resolveApproval(prompt.id, approved: false),
-                ),
-              ),
-            for (final perm in chat.permissions)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-                child: PermissionCard(
-                  pending: perm,
-                  onSelect: (optId) => ref
-                      .read(chatProvider.notifier)
-                      .respondPermission(perm, optId),
-                  onCancel: () => ref
-                      .read(chatProvider.notifier)
-                      .respondPermission(perm, null),
-                ),
-              ),
-            ComposerBar(
-              enabled: connected,
-              isBusy: chat.isBusy,
-              onSend: (text) => ref.read(chatProvider.notifier).send(text),
-              onCancel: () => ref.read(chatProvider.notifier).cancel(),
-            ),
-          ],
+        // Main scrolling message stream or empty state
+        Positioned.fill(
+          child: ChatList(
+            scrollController: _scrollController,
+            bottomInset: dockReserve,
+            onPickSuggestion: (prompt) =>
+                ref.read(chatProvider.notifier).send(prompt),
+            onEditDraft: (text) {
+              _composerController.value = TextEditingValue(
+                text: text,
+                selection: TextSelection.collapsed(offset: text.length),
+              );
+            },
+          ),
         ),
 
-        // Floating frosted-glass top header
+        // Floating top chrome-glass header
         Positioned(
           top: 0,
           left: 0,
           right: 0,
-          child: SafeArea(
-            bottom: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-              child: GlassSurface(
-                borderRadius: BorderRadius.circular(20),
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                child: Row(
-                  children: [
-                    if (showDrawerButton)
-                      IconButton(
-                        icon: const Icon(Icons.menu_rounded, size: 22),
-                        tooltip: '会话与导航',
-                        onPressed: onOpenDrawer,
-                      )
-                    else
-                      const SizedBox(width: 8),
-                    Expanded(
+          child: ChatHeader(
+            title: headerTitle,
+            status: headerStatus,
+            detail: selectedWs?.displayTitle,
+            scrolledUnder: chat.hasItems ? _scrolledUnder : null,
+            onOpenDrawer: widget.onOpenDrawer,
+            onTitleTap: hasSession
+                ? () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const SessionDetailPage(),
+                    ),
+                  )
+                : () => showHostSwitcherSheet(context, ref),
+            trailing: const ModelModeChip(),
+            onNewChat: hasSession
+                ? () => ref.read(chatProvider.notifier).startNewChat()
+                : null,
+          ),
+        ),
+
+        // Floating bottom composer dock with fade, approval cards, and jump-to-bottom pill
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_showJumpDown && chat.hasItems)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: SizedBox.square(
+                    dimension: 40,
+                    child: GlassSurface(
+                      tier: GlassTier.chrome,
+                      circle: true,
+                      onTap: _scrollToBottom,
                       child: Center(
-                        child: StatusPill(
-                          label: chat.title?.isNotEmpty == true
-                              ? '${hosts.activeLabel()} · ${chat.title}'
-                              : hosts.activeLabel(),
-                          dotColor: dotColor,
-                          trailing: Icon(
-                            Icons.keyboard_arrow_down_rounded,
-                            size: 16,
-                            color: surfaces.subtleText,
-                          ),
-                          onTap: () => Navigator.of(context).push(
-                            MaterialPageRoute<void>(
-                              builder: (_) => hosts.active.isLocal
-                                  ? const EngineScreen()
-                                  : const SshHostsScreen(),
+                        child: Icon(
+                          AppIcons.scrollToBottom,
+                          size: 18,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              Stack(
+                children: [
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: BottomFade(height: bottomPad + 96),
+                    ),
+                  ),
+                  Padding(
+                    padding: EdgeInsets.only(
+                      bottom: keyboardInset > 0 ? keyboardInset : bottomPad,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (chat.error != null)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                            child: Center(
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxWidth: AppSpace.floatingWidth,
+                                ),
+                                child: GlassSurface(
+                                  tier: GlassTier.card,
+                                  borderRadius: AppShape.radiusLg,
+                                  style: DshSurfaces.of(context).card.copyWith(
+                                    hairline: DshColors.of(
+                                      context,
+                                    ).danger.withValues(alpha: 0.45),
+                                  ),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                      vertical: 10,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          AppIcons.error,
+                                          size: 18,
+                                          color: DshColors.of(context).danger,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            chat.error!,
+                                            style: Theme.of(context)
+                                                .textTheme
+                                                .bodySmall
+                                                ?.copyWith(
+                                                  color: DshColors.of(
+                                                    context,
+                                                  ).danger,
+                                                ),
+                                          ),
+                                        ),
+                                        if (chat.authRequired)
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.of(context).push(
+                                                  MaterialPageRoute<void>(
+                                                    builder: (_) =>
+                                                        const EngineScreen(),
+                                                  ),
+                                                ),
+                                            child: const Text('去认证'),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
                             ),
                           ),
+                        for (final prompt in phoneApprovals)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                            child: Center(
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxWidth: AppSpace.floatingWidth,
+                                ),
+                                child: PhoneApprovalCard(
+                                  prompt: prompt,
+                                  onApprove: () => ref
+                                      .read(phoneControlProvider.notifier)
+                                      .resolveApproval(
+                                        prompt.id,
+                                        approved: true,
+                                      ),
+                                  onDeny: () => ref
+                                      .read(phoneControlProvider.notifier)
+                                      .resolveApproval(
+                                        prompt.id,
+                                        approved: false,
+                                      ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        for (final perm in chat.permissions)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                            child: Center(
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxWidth: AppSpace.floatingWidth,
+                                ),
+                                child: PermissionCard(
+                                  pending: perm,
+                                  onSelect: (optId) => ref
+                                      .read(chatProvider.notifier)
+                                      .respondPermission(perm, optId),
+                                  onCancel: () => ref
+                                      .read(chatProvider.notifier)
+                                      .respondPermission(perm, null),
+                                  onAllowAllForChat: (allowId) => ref
+                                      .read(chatProvider.notifier)
+                                      .respondPermission(
+                                        perm,
+                                        allowId,
+                                        allowAllForChat: true,
+                                      ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ComposerBar(
+                          controller: _composerController,
+                          enabled: connected,
+                          isBusy: chat.isBusy,
+                          onOpenDestination: widget.onOpenDestination,
+                          onSend: (text) async {
+                            await ref.read(chatProvider.notifier).send(text);
+                            WidgetsBinding.instance.addPostFrameCallback(
+                              (_) => _scrollToBottom(),
+                            );
+                          },
+                          onCancel: () =>
+                              ref.read(chatProvider.notifier).cancel(),
                         ),
-                      ),
+                      ],
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.ios_share_rounded, size: 19),
-                      tooltip: '分享卡 / 导出',
-                      onPressed: () => Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => const ShareScreen(),
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.tune_rounded, size: 21),
-                      tooltip: '会话控制',
-                      onPressed: onOpenQuickPanel,
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-            ),
+            ],
           ),
         ),
       ],
