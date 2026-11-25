@@ -53,6 +53,10 @@ android {
         release {
             // Local release builds fall back to debug signing until key.properties is configured.
             signingConfig = signingConfigs.getByName("debug")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }

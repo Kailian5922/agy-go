@@ -1,9 +1,15 @@
-name: CI
+name: CI & Test APK
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      include_proot:
+        description: "Bundle optional PRoot Ubuntu 24.04 arm64 rootfs into test APK"
+        type: boolean
+        default: false
 
 jobs:
   dart-packages:
@@ -26,7 +32,7 @@ jobs:
           dart analyze
           dart test
 
-  flutter-app:
+  android-test-apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +49,26 @@ jobs:
           flutter pub get
           flutter analyze
           flutter test
-      - name: Build Android debug APK (verifies Kotlin & Gradle)
+      - name: Optional PRoot Ubuntu 24.04 arm64 rootfs
+        if: ${{ inputs.include_proot == true }}
+        run: bash runtime/build-rootfs.sh arm64-v8a
+      - name: Build Android arm64 test APK (Release AOT, no GitHub Release)
         run: |
-          cd app
-          flutter build apk --debug --target-platform android-arm64
+          bash tooling/build-apk.sh --release --abi arm64
+          cp app/build/app/outputs/flutter-apk/app-release.apk agy-go-arm64-test.apk
+          SHA="$(sha256sum agy-go-arm64-test.apk | awk '{print $1}')"
+          SIZE="$(du -h agy-go-arm64-test.apk | awk '{print $1}')"
+          {
+            echo "### Android arm64 Test APK (Not Released)"
+            echo "- File: \`agy-go-arm64-test.apk\`"
+            echo "- Size: \`$SIZE\`"
+            echo "- SHA-256: \`$SHA\`"
+            echo "- PRoot Ubuntu bundled: \`${{ inputs.include_proot == true }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload test APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agy-go-arm64-test-apk
+          path: agy-go-arm64-test.apk
+          retention-days: 14
+          if-no-files-found: error
