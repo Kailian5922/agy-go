@@ -1,4 +1,5 @@
 import 'package:acp_client/acp_client.dart';
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
@@ -8,6 +9,7 @@ import '../../state/chat_state.dart';
 import '../../state/connection_state.dart';
 import '../../state/hosts_state.dart';
 import '../../state/runtime_state.dart';
+import '../../state/voice_state.dart';
 import '../engine/engine_screen.dart';
 import '../remote/ssh_hosts_screen.dart';
 import '../theme/app_theme.dart';
@@ -102,16 +104,16 @@ class _UserBubble extends StatelessWidget {
   }
 }
 
-class _AssistantTurnView extends StatefulWidget {
+class _AssistantTurnView extends ConsumerStatefulWidget {
   const _AssistantTurnView({required this.item});
 
   final AssistantTranscriptItem item;
 
   @override
-  State<_AssistantTurnView> createState() => _AssistantTurnViewState();
+  ConsumerState<_AssistantTurnView> createState() => _AssistantTurnViewState();
 }
 
-class _AssistantTurnViewState extends State<_AssistantTurnView> {
+class _AssistantTurnViewState extends ConsumerState<_AssistantTurnView> {
   bool _processExpanded = false;
 
   @override
@@ -119,6 +121,7 @@ class _AssistantTurnViewState extends State<_AssistantTurnView> {
     final item = widget.item;
     final surfaces = AgySurfaces.of(context);
     final theme = Theme.of(context);
+    final isSpeaking = ref.watch(voiceProvider.select((v) => v.isSpeaking));
 
     final showProcessExpanded =
         _processExpanded || (item.isStreaming && item.text.isEmpty);
@@ -193,7 +196,7 @@ class _AssistantTurnViewState extends State<_AssistantTurnView> {
           ],
           const SizedBox(height: 6),
         ],
-        if (item.text.isNotEmpty)
+        if (item.text.isNotEmpty) ...[
           HairlineCard(
             padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 12),
             borderRadius: const BorderRadius.only(
@@ -208,8 +211,51 @@ class _AssistantTurnViewState extends State<_AssistantTurnView> {
                 style: theme.textTheme.bodyMedium?.copyWith(height: 1.55),
               ),
             ),
-          )
-        else if (item.isStreaming && !item.hasActivity)
+          ),
+          if (!item.isStreaming)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, left: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: Icon(
+                      isSpeaking
+                          ? Icons.stop_circle_outlined
+                          : Icons.volume_up_outlined,
+                      size: 17,
+                      color: surfaces.subtleText,
+                    ),
+                    tooltip: isSpeaking ? '停止朗读' : '语音朗读',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () {
+                      final voice = ref.read(voiceProvider.notifier);
+                      if (isSpeaking) {
+                        voice.stopSpeaking();
+                      } else {
+                        voice.speak(item.text);
+                      }
+                    },
+                  ),
+                  IconButton(
+                    icon: Icon(
+                      Icons.copy_rounded,
+                      size: 16,
+                      color: surfaces.subtleText,
+                    ),
+                    tooltip: '复制回复',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: item.text));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('已复制回复内容')),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+        ] else if (item.isStreaming && !item.hasActivity)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
             child: Row(

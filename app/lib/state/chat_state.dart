@@ -4,6 +4,7 @@ import 'package:acp_client/acp_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'connection_state.dart';
+import 'phone_state.dart';
 import 'sessions_state.dart';
 
 class ChatState {
@@ -53,6 +54,21 @@ class ChatController extends Notifier<ChatState> {
   StreamSubscription<PendingPermission>? _permSub;
   String? _loadedSessionId;
 
+  List<AcpMcpServerConfig> _sessionMcpServers(HostConnection conn) {
+    if (!conn.isLocal || !conn.initResult.capabilities.supportsHttpMcp) {
+      return const [];
+    }
+    final phone = ref.read(phoneControlProvider);
+    if (!phone.isMcpReady) return const [];
+    return [
+      HttpMcpServerConfig(
+        name: 'phone',
+        url: phone.mcpUrl!,
+        headers: {'Authorization': 'Bearer ${phone.mcpToken!}'},
+      ),
+    ];
+  }
+
   @override
   ChatState build() {
     final conn = ref.watch(activeConnectionProvider).value;
@@ -85,17 +101,20 @@ class ChatController extends Notifier<ChatState> {
 
   Future<void> _loadExistingSession(HostConnection conn, String sid) async {
     _loadedSessionId = sid;
+    final mcpServers = _sessionMcpServers(conn);
     try {
       final AcpSessionHandle handle;
       if (conn.initResult.capabilities.loadSession) {
         handle = await conn.client.loadSession(
           sessionId: sid,
           cwd: conn.defaultCwd,
+          mcpServers: mcpServers,
         );
       } else if (conn.initResult.capabilities.canResumeSession) {
         handle = await conn.client.resumeSession(
           sessionId: sid,
           cwd: conn.defaultCwd,
+          mcpServers: mcpServers,
         );
       } else {
         if (!ref.mounted || _loadedSessionId != sid) return;
@@ -149,7 +168,10 @@ class ChatController extends Notifier<ChatState> {
     try {
       var sid = state.sessionId;
       if (sid == null || sid.isEmpty) {
-        final handle = await conn.client.newSession(cwd: conn.defaultCwd);
+        final handle = await conn.client.newSession(
+          cwd: conn.defaultCwd,
+          mcpServers: _sessionMcpServers(conn),
+        );
         sid = handle.sessionId;
         _loadedSessionId = sid;
         ref.read(sessionsProvider.notifier).registerCreatedSession(

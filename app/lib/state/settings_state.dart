@@ -36,6 +36,7 @@ class AppSettings {
     this.themeMode = ThemeMode.system,
     this.accent = AppAccentId.nebula,
     this.glassBlur = true,
+    this.localeCode = 'system',
     this.authMode = LocalAuthMode.oauth,
     this.apiKey = '',
     this.customBaseUrl = '',
@@ -46,16 +47,24 @@ class AppSettings {
   final ThemeMode themeMode;
   final AppAccentId accent;
   final bool glassBlur;
+  final String localeCode; // 'system' | 'zh' | 'en'
   final LocalAuthMode authMode;
   final String apiKey;
   final String customBaseUrl;
   final bool autoStartLocalEngine;
+
+  Locale? get locale => switch (localeCode) {
+    'zh' => const Locale('zh'),
+    'en' => const Locale('en'),
+    _ => null,
+  };
 
   AppSettings copyWith({
     bool? loaded,
     ThemeMode? themeMode,
     AppAccentId? accent,
     bool? glassBlur,
+    String? localeCode,
     LocalAuthMode? authMode,
     String? apiKey,
     String? customBaseUrl,
@@ -65,6 +74,7 @@ class AppSettings {
     themeMode: themeMode ?? this.themeMode,
     accent: accent ?? this.accent,
     glassBlur: glassBlur ?? this.glassBlur,
+    localeCode: localeCode ?? this.localeCode,
     authMode: authMode ?? this.authMode,
     apiKey: apiKey ?? this.apiKey,
     customBaseUrl: customBaseUrl ?? this.customBaseUrl,
@@ -80,6 +90,7 @@ class SettingsController extends Notifier<AppSettings> {
   static const _kThemeMode = 'agy.themeMode';
   static const _kAccent = 'agy.accent';
   static const _kGlassBlur = 'agy.glassBlur';
+  static const _kLocaleCode = 'agy.localeCode';
   static const _kAuthMode = 'agy.authMode';
   static const _kBaseUrl = 'agy.customBaseUrl';
   static const _kAutoStart = 'agy.autoStartLocal';
@@ -111,6 +122,7 @@ class SettingsController extends Notifier<AppSettings> {
         themeMode: themeMode,
         accent: AppAccentId.parse(prefs.getString(_kAccent)),
         glassBlur: prefs.getBool(_kGlassBlur) ?? true,
+        localeCode: prefs.getString(_kLocaleCode) ?? 'system',
         authMode: LocalAuthMode.parse(prefs.getString(_kAuthMode)),
         apiKey: apiKey,
         customBaseUrl: prefs.getString(_kBaseUrl) ?? '',
@@ -119,6 +131,12 @@ class SettingsController extends Notifier<AppSettings> {
     } catch (_) {
       state = state.copyWith(loaded: true);
     }
+  }
+
+  Future<void> setLocaleCode(String code) async {
+    state = state.copyWith(localeCode: code);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kLocaleCode, code);
   }
 
   Future<void> setThemeMode(ThemeMode mode) async {

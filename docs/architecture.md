@@ -5,11 +5,16 @@
 ```text
 ┌─────────────────── Android App (Flutter + Kotlin) ───────────────────┐
 │ Flutter UI (app/lib/ui/)                                             │
-│   ├─ theme/    雾面玻璃、0.75px 细线、6 套主题色、边到边透明系统栏       │
-│   ├─ shell/    三栏连续跟手手势外壳（SessionsDrawer / Chat / QuickPanel）│
-│   ├─ chat/     流式 Markdown、思考/工具折叠、Diff 预览、权限审批卡       │
-│   ├─ engine/   本机引擎一键安装/启停/更新/OAuth/API Key/脱敏日志        │
-│   └─ remote/   SSH 主机管理 + xterm 交互终端                          │
+│   ├─ theme/     雾面玻璃、0.75px 细线、6 套主题色、中英双语、边到边   │
+│   ├─ shell/     三栏连续跟手手势外壳 + 悬浮星灵伙伴（DraggableInAppPet）│
+│   ├─ chat/      流式 Markdown、思考/工具折叠、Diff、审批卡、语音/朗读  │
+│   ├─ engine/    本机引擎一键安装/启停/更新/OAuth/API Key/脱敏日志     │
+│   ├─ workspace/ 本机文件系统 + SSH SFTP 文件浏览与在线编辑            │
+│   ├─ remote/    SSH 主机管理 + xterm 交互终端                        │
+│   ├─ phone/     MCP 手机操控管理、SafetyGate 三档确认与审计日志       │
+│   ├─ pet/       原创「星灵 Starling」App 内/系统桌面悬浮球设置        │
+│   ├─ share/     高分辨率 PNG 分享卡、脱敏 Markdown/JSON 导出与回放器  │
+│   └─ system/    国产 ROM 后台保活引导与 GitHub Releases APK 自更新    │
 │        │ Riverpod 3 (app/lib/state/)                                 │
 │        ▼                                                             │
 │ packages/acp_client  (纯 Dart ACP JSON-RPC 2.0 + ChatTranscript)      │
@@ -19,31 +24,30 @@
 │ LoopbackAcpTransport       SshAcpConnection (packages/agy_remote)    │
 │ (127.0.0.1 + 随机 Token)    (dartssh2 exec `agy acp` + 指纹钉死)      │
 │   │                                                                  │
-│   ▼ Android MethodChannel/EventChannel (`agy/runtime`)               │
-│ Kotlin RuntimeController + AgyService (ForegroundService)            │
-│   ├─ AgyInstaller  官方 manifest 拉取 + SHA-512 校验 + 原子解压        │
-│   ├─ AgyProcess    原生 Android Bionic `agy acp` / 可选 PRoot Linux   │
-│   └─ AgyAuthHelper 管理 ~/.gemini/antigravity-cli/settings.json       │
+│   ▼ Android MethodChannel / EventChannel                             │
+│ Kotlin 原生层 (app/android/.../agy_go/)                              │
+│   ├─ runtime/  AgyInstaller(SHA-512) + AgyProcess + AgyService       │
+│   ├─ phone/    PhoneMcpServer(MCP HTTP) + SafetyGate + 无障碍服务     │
+│   ├─ voice/    SpeechRecognizer + TextToSpeech                       │
+│   ├─ pet/      PetOverlayService (SYSTEM_ALERT_WINDOW 靠边吸附)      │
+│   └─ system/   FileProvider 分享/APK 安装 + 厂商省电豁免与自启动跳转  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-## 2. 为什么 Android 本机可以直接跑官方 `agy`
+## 2. 本机运行环境（默认原生 Bionic + 可选 PRoot Linux）
 
-Google 官方 `antigravity-cli` 自动更新器为 `arm64-v8a` 发布了原生 Android Bionic 版本：
-- 清单地址：`https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/android_arm64.json`
-- 配合 `minSdk = 26`、`targetSdk = 28`（避开 Android 10+ 对应用私有目录 `exec()` 的 W^X 限制），`AgyInstaller.kt` 可直接在首次使用时下载、校验 SHA-512 并解压至 `filesDir/runtime/bin/agy`，冷启动极快且免去了 1GB PRoot 镜像的前置门槛。
-- 当需要完整 Ubuntu 工具链（`apt`、`git`、`python3`、`node`）或在 `x86_64` 模拟器上运行时，可按 `runtime/README.md` 启用可选的 PRoot Ubuntu 24.04 容器模式。
+- **默认模式（Android 原生 Bionic `arm64`）**：Google 官方自动更新器发布 `android_arm64` 原生 Bionic 二进制。配合 `minSdk = 26`、`targetSdk = 28`，`AgyInstaller.kt` 在首次启动时直接拉取、校验 SHA-512 并原子解压至 `filesDir/runtime/bin/agy`，冷启动快且免去 1GB 镜像门槛。
+- **可选 PRoot Ubuntu 24.04 容器**：执行 `bash runtime/build-rootfs.sh arm64-v8a`（或 `x86_64`）生成 Ubuntu 24.04 rootfs 与 Termux `libproot.so` / `libtalloc.so` / `libandroid-shmem.so`，由 Gradle 自动打包并在 `EngineScreen` 解锁 PRoot 切换开关。
+- **后台不断任务**：`AgyService` 前台服务持有 `agy acp` 子进程并通过随机 24 字节令牌鉴权的 `127.0.0.1` 回环桥接给 Flutter，Activity 重建或切后台不断流。
 
-## 3. 切后台不断任务的设计
+## 3. MCP 手机操控安全边界（SafetyGate）
 
-`agy acp` 的标准协议跑在 stdin/stdout 上。如果由 Dart 进程直接持有子进程，Android Activity 重建或系统回收 Flutter 视图时容易中断管道。
+- `PhoneMcpServer.kt` 在 `127.0.0.1:<随机端口>/mcp` 提供标准 MCP Streamable HTTP（JSON-RPC 2.0，Bearer Token 鉴权），由 `PhonePlugin` 自动写入 `~/.gemini/antigravity-cli/settings.json` 并在 `ChatController` 的 `session/new` 中通过 `HttpMcpServerConfig` 注入，完全无需改动 `agy` 二进制。
+- `SafetyGate.kt` 强制执行三档确认策略，对银行/支付/密码管理器包名及敏感关键词（支付、转账、验证码、密码、卸载、删除等）的修改操作**始终拦截并等待人工确认**；超时、断连或点击「紧急停止」均 **fail-closed 拒绝**。
 
-AGY Go 采用 **ForegroundService + 本地令牌回环桥（`AgyProcess.kt`）**：
-1. `AgyService` 作为前台服务保活，持有 `agy acp` 子进程。
-2. 每次启动监听 `127.0.0.1:<随机端口>` 并生成 24 字节 `SecureRandom` 会话令牌。
-3. Flutter 连接后首行校验 `{"auth":"<token>"}\n`，校验通过后透明转发双向 NDJSON 帧；Flutter 断开重连时子进程保持存活。
+## 4. 语音、桌宠、分享与系统集成
 
-## 4. 后续 Phase 3 / Phase 4 扩展接口
-
-- **Phase 3（MCP 手机操控）**：`AcpClient.newSession()` 已完整支持 `mcpServers` 参数（`StdioMcpServerConfig` / `HttpMcpServerConfig`），后续只需在 Kotlin 侧实现本地 MCP Server（无障碍 + Shizuku + `SafetyGate`）即可直接挂载给 `agy`，无需改动任何引擎二进制。
-- **Phase 4（体验增强）**：语音 VAD、悬浮桌宠、加密分享回放与自更新均围绕 `app/lib/state/` 独立模块扩展，不侵入 `packages/acp_client`。
+- **语音（`VoicePlugin.kt`）**：调用 Android 原生 `SpeechRecognizer` 流式识别并回填至 `ComposerBar`，同时提供 `TextToSpeech` 回复朗读。
+- **原创伴侣星灵（`StarlingAvatar` + `PetOverlayService.kt`）**：纯代码绘制动画，无任何第三方受限版权素材；状态由 `petMoodProvider` 实时联动（思考、工具执行、等待确认、完成、休眠）。
+- **分享与回放（`ConversationExport` + `ShareScreen`）**：导出前自动正则脱敏 API Key / OAuth Token / 私钥 PEM，支持 `RepaintBoundary` 3x PNG 分享卡（经 `FileProvider` 调用系统分享）与 `agy-go-replay/v1` JSON 步进回放。
+- **后台保活与自更新（`SystemPlugin.kt` + `KeepAliveAndUpdateScreen`）**：识别小米/华为/荣耀/OPPO/vivo/三星 ROM 并提供省电豁免及厂商自启动直达，支持检查 GitHub Releases 最新 APK 并验证下载安装。

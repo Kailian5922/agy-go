@@ -15,6 +15,7 @@ class AgyGoApp extends ConsumerWidget {
     return MaterialApp(
       title: 'AGY Go',
       debugShowCheckedModeBanner: false,
+      locale: settings.locale,
       themeMode: settings.themeMode,
       theme: buildAgyTheme(
         brightness: Brightness.light,

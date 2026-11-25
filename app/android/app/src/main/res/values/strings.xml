@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">AGY Go 手机操控服务：仅在你主动开启手机操控开关并通过安全确认门后，允许本机 Antigravity CLI 读取屏幕元素与执行点按操作。</string>
+</resources>

@@ -4,8 +4,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../state/chat_state.dart';
 import '../../state/connection_state.dart';
 import '../../state/hosts_state.dart';
+import '../../state/phone_state.dart';
 import '../engine/engine_screen.dart';
+import '../phone/phone_control_screen.dart';
 import '../remote/ssh_hosts_screen.dart';
+import '../share/share_screen.dart';
 import '../theme/app_theme.dart';
 import '../theme/glass_widgets.dart';
 import 'chat_list.dart';
@@ -28,6 +31,9 @@ class ChatScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hosts = ref.watch(hostsProvider);
     final connAsync = ref.watch(activeConnectionProvider);
+    final phoneApprovals = ref.watch(
+      phoneControlProvider.select((p) => p.pendingApprovals),
+    );
     final chat = ref.watch(
       chatProvider.select(
         (s) => (
@@ -97,6 +103,19 @@ class ChatScreen extends ConsumerWidget {
                   ),
                 ),
               ),
+            for (final prompt in phoneApprovals)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+                child: PhoneApprovalCard(
+                  prompt: prompt,
+                  onApprove: () => ref
+                      .read(phoneControlProvider.notifier)
+                      .resolveApproval(prompt.id, approved: true),
+                  onDeny: () => ref
+                      .read(phoneControlProvider.notifier)
+                      .resolveApproval(prompt.id, approved: false),
+                ),
+              ),
             for (final perm in chat.permissions)
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
@@ -160,6 +179,15 @@ class ChatScreen extends ConsumerWidget {
                                   : const SshHostsScreen(),
                             ),
                           ),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.ios_share_rounded, size: 19),
+                      tooltip: '分享卡 / 导出',
+                      onPressed: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const ShareScreen(),
                         ),
                       ),
                     ),

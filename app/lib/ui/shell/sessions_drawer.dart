@@ -1,18 +1,24 @@
 import 'package:agy_remote/agy_remote.dart';
-import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../../runtime/runtime_models.dart';
 import '../../state/chat_state.dart';
 import '../../state/hosts_state.dart';
+import '../../state/phone_state.dart';
 import '../../state/runtime_state.dart';
 import '../../state/sessions_state.dart';
 import '../engine/engine_screen.dart';
+import '../pet/starling_pet.dart';
+import '../phone/phone_control_screen.dart';
 import '../remote/ssh_hosts_screen.dart';
 import '../settings/settings_screen.dart';
+import '../share/share_screen.dart';
+import '../system/keep_alive_screen.dart';
 import '../terminal/terminal_screen.dart';
 import '../theme/app_theme.dart';
 import '../theme/glass_widgets.dart';
+import '../workspace/workspace_screen.dart';
 
 /// Left sessions & navigation drawer, usable both as a swipe overlay and docked tablet sidebar.
 class SessionsDrawer extends ConsumerWidget {
@@ -30,6 +36,7 @@ class SessionsDrawer extends ConsumerWidget {
     final hosts = ref.watch(hostsProvider);
     final runtime = ref.watch(localRuntimeProvider);
     final sessions = ref.watch(sessionsProvider);
+    final phone = ref.watch(phoneControlProvider);
     final surfaces = AgySurfaces.of(context);
     final theme = Theme.of(context);
 
@@ -128,7 +135,7 @@ class SessionsDrawer extends ConsumerWidget {
               ),
             ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
 
           // Sessions list
           Expanded(
@@ -137,7 +144,7 @@ class SessionsDrawer extends ConsumerWidget {
                 : sessions.sessions.isEmpty
                 ? Center(
                     child: Padding(
-                      padding: const EdgeInsets.all(24),
+                      padding: const EdgeInsets.all(20),
                       child: Text(
                         '暂无历史对话\n发送一条消息即可创建新会话',
                         textAlign: TextAlign.center,
@@ -157,7 +164,7 @@ class SessionsDrawer extends ConsumerWidget {
                       return HairlineCard(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 12,
-                          vertical: 10,
+                          vertical: 9,
                         ),
                         borderRadius: BorderRadius.circular(14),
                         backgroundColor: selected
@@ -221,9 +228,11 @@ class SessionsDrawer extends ConsumerWidget {
           ),
 
           const Divider(),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 8, 10, 12),
-            child: Column(
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 310),
+            child: ListView(
+              shrinkWrap: true,
+              padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
               children: [
                 _NavTile(
                   icon: Icons.memory_rounded,
@@ -245,9 +254,35 @@ class SessionsDrawer extends ConsumerWidget {
                   onTap: () => _push(context, const SshHostsScreen()),
                 ),
                 _NavTile(
+                  icon: Icons.folder_open_rounded,
+                  title: '工作区文件',
+                  onTap: () => _push(context, const WorkspaceScreen()),
+                ),
+                _NavTile(
                   icon: Icons.terminal_rounded,
                   title: '终端',
                   onTap: () => _push(context, const TerminalScreen()),
+                ),
+                _NavTile(
+                  icon: Icons.touch_app_rounded,
+                  title: '手机操控 (MCP)',
+                  trailingText: phone.enabled ? '已开启' : '未开启',
+                  onTap: () => _push(context, const PhoneControlScreen()),
+                ),
+                _NavTile(
+                  icon: Icons.auto_awesome_rounded,
+                  title: '桌宠与伙伴',
+                  onTap: () => _push(context, const PetSettingsScreen()),
+                ),
+                _NavTile(
+                  icon: Icons.ios_share_rounded,
+                  title: '分享卡与回放',
+                  onTap: () => _push(context, const ShareScreen()),
+                ),
+                _NavTile(
+                  icon: Icons.shield_moon_outlined,
+                  title: '后台保活与更新',
+                  onTap: () => _push(context, const KeepAliveAndUpdateScreen()),
                 ),
                 _NavTile(
                   icon: Icons.tune_rounded,
@@ -353,10 +388,10 @@ class _NavTile extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         child: Row(
           children: [
-            Icon(icon, size: 19),
+            Icon(icon, size: 18),
             const SizedBox(width: 12),
             Expanded(
               child: Text(

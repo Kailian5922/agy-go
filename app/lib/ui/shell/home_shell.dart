@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:material_ui/material_ui.dart';
 
 import '../chat/chat_screen.dart';
+import '../pet/starling_pet.dart';
 import '../theme/app_theme.dart';
 import '../theme/glass_widgets.dart';
 import 'quick_panel.dart';
@@ -130,6 +131,8 @@ class _HomeShellState extends State<HomeShell> with TickerProviderStateMixin {
                   )
                 else
                   chat,
+
+                const DraggableInAppPet(),
 
                 // Scrim + overlays rebuilt independently via AnimatedBuilder
                 AnimatedBuilder(
