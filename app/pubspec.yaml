@@ -1,0 +1,31 @@
+name: agy_go
+description: Android mobile client and on-device runtime for Google Antigravity CLI (agy).
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  acp_client:
+    path: ../packages/acp_client
+  agy_remote:
+    path: ../packages/agy_remote
+  dartssh2: ^2.11.0
+  flutter_riverpod: ^3.0.0
+  flutter_secure_storage: ^11.0.0
+  gpt_markdown: ^1.4.0
+  material_ui: ^1.11.0
+  shared_preferences: ^2.5.0
+  url_launcher: ^6.3.1
+  xterm: ^4.0.0
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

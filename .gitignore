@@ -1,0 +1,28 @@
+# Dart / Flutter
+.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+packages/*/pubspec.lock
+build/
+**/build/
+**/.dart_tool/
+app/android/.gradle/
+app/android/local.properties
+app/android/key.properties
+*.jks
+*.keystore
+
+# Runtime build caches & downloaded archives (never commit proprietary binaries)
+runtime/.cache/
+runtime/.work/
+runtime/out/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db

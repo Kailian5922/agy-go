@@ -1,0 +1,185 @@
+import 'dart:async';
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../runtime/runtime_channel.dart';
+import '../runtime/runtime_models.dart';
+import 'settings_state.dart';
+
+final runtimeChannelProvider = Provider<RuntimeChannel>(
+  (ref) => const RuntimeChannel(),
+);
+
+class LocalRuntimeState {
+  const LocalRuntimeState({
+    this.status = const RuntimeStatus.initial(),
+    this.progress,
+    this.logs = const [],
+    this.pendingOAuthUrl,
+    this.updateCheck,
+    this.checkingUpdate = false,
+  });
+
+  final RuntimeStatus status;
+  final RuntimeProgress? progress;
+  final List<String> logs;
+  final String? pendingOAuthUrl;
+  final RuntimeUpdateCheck? updateCheck;
+  final bool checkingUpdate;
+
+  LocalRuntimeState copyWith({
+    RuntimeStatus? status,
+    RuntimeProgress? progress,
+    bool clearProgress = false,
+    List<String>? logs,
+    String? pendingOAuthUrl,
+    bool clearOAuthUrl = false,
+    RuntimeUpdateCheck? updateCheck,
+    bool? checkingUpdate,
+  }) => LocalRuntimeState(
+    status: status ?? this.status,
+    progress: clearProgress ? null : (progress ?? this.progress),
+    logs: logs ?? this.logs,
+    pendingOAuthUrl: clearOAuthUrl
+        ? null
+        : (pendingOAuthUrl ?? this.pendingOAuthUrl),
+    updateCheck: updateCheck ?? this.updateCheck,
+    checkingUpdate: checkingUpdate ?? this.checkingUpdate,
+  );
+}
+
+class LocalRuntimeController extends Notifier<LocalRuntimeState> {
+  static const _maxLogs = 400;
+  StreamSubscription<RuntimeEvent>? _sub;
+  bool _autoStartTried = false;
+
+  @override
+  LocalRuntimeState build() {
+    final channel = ref.read(runtimeChannelProvider);
+
+    ref.listen<AppSettings>(settingsProvider, (prev, next) {
+      if (!next.loaded) return;
+      if (prev == null ||
+          prev.loaded != next.loaded ||
+          prev.authMode != next.authMode ||
+          prev.apiKey != next.apiKey ||
+          prev.customBaseUrl != next.customBaseUrl) {
+        unawaited(
+          channel.setAuthConfig(
+            mode: next.authMode.wireValue,
+            apiKey: next.apiKey,
+            baseUrl: next.customBaseUrl,
+          ),
+        );
+      }
+    });
+
+    _sub = channel.events().listen(_onEvent, onError: (_) {});
+    ref.onDispose(() {
+      unawaited(_sub?.cancel());
+      _sub = null;
+    });
+
+    unawaited(_hydrate(channel));
+    return const LocalRuntimeState();
+  }
+
+  Future<void> _hydrate(RuntimeChannel channel) async {
+    final status = await channel.getStatus();
+    final logs = await channel.getLogs();
+    if (!ref.mounted) return;
+    state = state.copyWith(status: status, logs: logs);
+
+    final settings = ref.read(settingsProvider);
+    if (settings.loaded) {
+      await channel.setAuthConfig(
+        mode: settings.authMode.wireValue,
+        apiKey: settings.apiKey,
+        baseUrl: settings.customBaseUrl,
+      );
+    }
+
+    if (!_autoStartTried &&
+        settings.autoStartLocalEngine &&
+        status.phase == RuntimePhase.installed) {
+      _autoStartTried = true;
+      await start();
+    }
+  }
+
+  void _onEvent(RuntimeEvent event) {
+    if (!ref.mounted) return;
+    switch (event) {
+      case RuntimeStatusEvent(:final status):
+        state = state.copyWith(
+          status: status,
+          clearProgress: status.phase != RuntimePhase.installing,
+        );
+      case RuntimeProgressEvent(:final progress):
+        state = state.copyWith(progress: progress);
+      case RuntimeLogEvent(:final line):
+        final next = List<String>.from(state.logs)..add(line);
+        if (next.length > _maxLogs) {
+          next.removeRange(0, next.length - _maxLogs);
+        }
+        state = state.copyWith(logs: next);
+      case RuntimeOAuthUrlEvent(:final url):
+        state = state.copyWith(pendingOAuthUrl: url);
+      case RuntimeOAuthDoneEvent():
+        state = state.copyWith(clearOAuthUrl: true);
+    }
+  }
+
+  Future<void> installOrUpdate() async {
+    await ref.read(runtimeChannelProvider).install();
+  }
+
+  Future<void> start() async {
+    final settings = ref.read(settingsProvider);
+    final channel = ref.read(runtimeChannelProvider);
+    await channel.setAuthConfig(
+      mode: settings.authMode.wireValue,
+      apiKey: settings.apiKey,
+      baseUrl: settings.customBaseUrl,
+    );
+    await channel.start();
+  }
+
+  Future<void> stop() async {
+    await ref.read(runtimeChannelProvider).stop();
+  }
+
+  Future<void> reset({bool keepHome = true}) async {
+    await ref.read(runtimeChannelProvider).reset(keepHome: keepHome);
+  }
+
+  Future<void> setPreferProot(bool enabled) async {
+    await ref.read(runtimeChannelProvider).setPreferProot(enabled);
+  }
+
+  Future<void> startOAuthLogin() async {
+    state = state.copyWith(clearOAuthUrl: true);
+    await ref.read(runtimeChannelProvider).startOAuthLogin();
+  }
+
+  Future<void> submitOAuthCode(String code) async {
+    await ref.read(runtimeChannelProvider).submitOAuthCode(code);
+  }
+
+  Future<void> checkUpdate() async {
+    state = state.copyWith(checkingUpdate: true);
+    try {
+      final result = await ref.read(runtimeChannelProvider).checkUpdate();
+      if (!ref.mounted) return;
+      state = state.copyWith(updateCheck: result, checkingUpdate: false);
+    } catch (_) {
+      if (!ref.mounted) return;
+      state = state.copyWith(checkingUpdate: false);
+    }
+  }
+}
+
+final localRuntimeProvider =
+    NotifierProvider<LocalRuntimeController, LocalRuntimeState>(
+      LocalRuntimeController.new,
+    );

@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  dart-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Test acp_client
+        run: |
+          cd packages/acp_client
+          dart pub get
+          dart analyze
+          dart test
+      - name: Test agy_remote
+        run: |
+          cd packages/agy_remote
+          dart pub get
+          dart analyze
+          dart test
+
+  flutter-app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Analyze & test Flutter app
+        run: |
+          cd app
+          flutter pub get
+          flutter analyze
+          flutter test
+      - name: Build Android debug APK (verifies Kotlin & Gradle)
+        run: |
+          cd app
+          flutter build apk --debug --target-platform android-arm64
