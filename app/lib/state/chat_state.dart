@@ -73,13 +73,17 @@ class ChatState {
     this.turnStartedAt,
     this.lastActivityAt,
     this.livePhase = TurnLivePhase.waiting,
+    this.liveStatusLabel,
     this.turnChars = 0,
     this.thoughtChars = 0,
     this.answerChars = 0,
+    this.liveTokensPerSecond,
+    this.estimatedTurnTokens = 0,
     this.activeRetry,
     this.retryCount = 0,
     this.turnEvents = const [],
     this.turnLogs = const [],
+    this.backgroundRunningIds = const {},
     this.isSending = false,
     this.isLoadingSession = false,
     this.isPreparingModels = false,
@@ -111,13 +115,21 @@ class ChatState {
   final DateTime? turnStartedAt;
   final DateTime? lastActivityAt;
   final TurnLivePhase livePhase;
+  final String? liveStatusLabel;
   final int turnChars;
   final int thoughtChars;
   final int answerChars;
+  final double? liveTokensPerSecond;
+  final int estimatedTurnTokens;
   final TurnRetryInfo? activeRetry;
   final int retryCount;
   final List<TurnActivityLogEntry> turnEvents;
   final List<String> turnLogs;
+
+  /// Session IDs currently generating in the background while the user views
+  /// another conversation or workspace.
+  final Set<String> backgroundRunningIds;
+
   final bool isSending;
   final bool isLoadingSession;
   final bool isPreparingModels;
@@ -128,6 +140,14 @@ class ChatState {
   final String? modelError;
 
   bool get isBusy => isSending || transcript.isStreaming;
+
+  bool get hasAnyRunningSession => isBusy || backgroundRunningIds.isNotEmpty;
+
+  /// All session IDs currently running (foreground + parked background sessions).
+  Set<String> get runningSessionIds => {
+    if (isBusy && sessionId != null) sessionId!,
+    ...backgroundRunningIds,
+  };
 
   /// The live ACP session ID backing RPCs (active chat or pre-warmed draft).
   String? get activeRpcSessionId => sessionId ?? draftSessionId;
@@ -162,13 +182,17 @@ class ChatState {
     DateTime? Function()? turnStartedAt,
     DateTime? Function()? lastActivityAt,
     TurnLivePhase? livePhase,
+    String? Function()? liveStatusLabel,
     int? turnChars,
     int? thoughtChars,
     int? answerChars,
+    double? Function()? liveTokensPerSecond,
+    int? estimatedTurnTokens,
     TurnRetryInfo? Function()? activeRetry,
     int? retryCount,
     List<TurnActivityLogEntry>? turnEvents,
     List<String>? turnLogs,
+    Set<String>? backgroundRunningIds,
     bool? isSending,
     bool? isLoadingSession,
     bool? isPreparingModels,
@@ -209,13 +233,21 @@ class ChatState {
         ? this.lastActivityAt
         : lastActivityAt(),
     livePhase: livePhase ?? this.livePhase,
+    liveStatusLabel: liveStatusLabel == null
+        ? this.liveStatusLabel
+        : liveStatusLabel(),
     turnChars: turnChars ?? this.turnChars,
     thoughtChars: thoughtChars ?? this.thoughtChars,
     answerChars: answerChars ?? this.answerChars,
+    liveTokensPerSecond: liveTokensPerSecond == null
+        ? this.liveTokensPerSecond
+        : liveTokensPerSecond(),
+    estimatedTurnTokens: estimatedTurnTokens ?? this.estimatedTurnTokens,
     activeRetry: activeRetry == null ? this.activeRetry : activeRetry(),
     retryCount: retryCount ?? this.retryCount,
     turnEvents: turnEvents ?? this.turnEvents,
     turnLogs: turnLogs ?? this.turnLogs,
+    backgroundRunningIds: backgroundRunningIds ?? this.backgroundRunningIds,
     isSending: isSending ?? this.isSending,
     isLoadingSession: isLoadingSession ?? this.isLoadingSession,
     isPreparingModels: isPreparingModels ?? this.isPreparingModels,
@@ -227,9 +259,17 @@ class ChatState {
   );
 }
 
+class _ParkedSession {
+  _ParkedSession(this.snapshot) : lastTouched = DateTime.now();
+
+  ChatState snapshot;
+  DateTime lastTouched;
+}
+
 class ChatController extends Notifier<ChatState> {
   static const _maxTurnEvents = 16;
   static const _maxTurnLogs = 16;
+  static const _maxParkedSessions = 12;
 
   StreamSubscription<AcpSessionNotification>? _updateSub;
   StreamSubscription<PendingPermission>? _permSub;
@@ -242,9 +282,15 @@ class ChatController extends Notifier<ChatState> {
   /// tear down an in-flight first turn.
   String? _ownedSessionId;
   int _loadGeneration = 0;
-  int _turnGen = 0;
-  Completer<void>? _inFlightPromptDone;
-  String? _inFlightPromptSessionId;
+
+  /// Per-session state so switching conversations or workspaces NEVER interrupts
+  /// an in-flight turn on another session.
+  final Map<String, _ParkedSession> _parkedSessions = {};
+  final Map<String, int> _turnGenBySession = {};
+  final Map<String, TurnSpeedTracker> _speedTrackers = {};
+  final Map<String, Completer<void>> _inFlightPromptBySession = {};
+  int _pendingSendSeq = 0;
+  String? _pendingNewSessionKey;
 
   Future<String?>? _draftFuture;
   String? _draftFutureCwd;
@@ -264,6 +310,128 @@ class ChatController extends Notifier<ChatState> {
   }
 
   String _draftMcpSignature = '';
+
+  int _turnGenOf(String key) => _turnGenBySession[key] ?? 0;
+
+  int _bumpTurnGen(String key) {
+    final next = _turnGenOf(key) + 1;
+    _turnGenBySession[key] = next;
+    return next;
+  }
+
+  TurnSpeedTracker _speedTrackerOf(String sid) =>
+      _speedTrackers.putIfAbsent(sid, TurnSpeedTracker.new);
+
+  static bool _sameStringSet(Set<String> a, Set<String> b) =>
+      a.length == b.length && a.containsAll(b);
+
+  Set<String> _computeBackgroundRunningIds() => {
+    for (final entry in _parkedSessions.entries)
+      if (entry.value.snapshot.isBusy) entry.key,
+  };
+
+  void _syncBackgroundRunningIds() {
+    if (!ref.mounted) return;
+    final next = _computeBackgroundRunningIds();
+    if (!_sameStringSet(state.backgroundRunningIds, next)) {
+      state = state.copyWith(backgroundRunningIds: next);
+    }
+  }
+
+  ChatState? _sessionStateOf(String sid) {
+    if (state.sessionId == sid) return state;
+    return _parkedSessions[sid]?.snapshot;
+  }
+
+  void _updateSessionState(
+    String sid,
+    ChatState Function(ChatState current) transform,
+  ) {
+    if (!ref.mounted) return;
+    if (state.sessionId == sid) {
+      state = transform(state);
+      return;
+    }
+    final parked = _parkedSessions[sid];
+    if (parked == null) return;
+    final wasBusy = parked.snapshot.isBusy;
+    final next = transform(parked.snapshot);
+    parked.snapshot = next;
+    parked.lastTouched = DateTime.now();
+    if (wasBusy != next.isBusy) {
+      _syncBackgroundRunningIds();
+    }
+  }
+
+  void _parkActiveSession() {
+    final sid = state.sessionId;
+    if (sid == null || sid.isEmpty) return;
+    // Never park an unloaded shell unless it has active streaming/messages.
+    if (state.isLoadingSession &&
+        !state.isBusy &&
+        state.transcript.items.isEmpty) {
+      return;
+    }
+    _parkedSessions[sid] = _ParkedSession(
+      state.copyWith(
+        clearDraftSession: true,
+        backgroundRunningIds: const {},
+      ),
+    );
+    _evictIdleParkedSessions();
+  }
+
+  void _evictIdleParkedSessions() {
+    if (_parkedSessions.length <= _maxParkedSessions) return;
+    final idleKeys = _parkedSessions.entries
+        .where((e) => !e.value.snapshot.isBusy)
+        .toList()
+      ..sort((a, b) => a.value.lastTouched.compareTo(b.value.lastTouched));
+    for (final entry in idleKeys) {
+      if (_parkedSessions.length <= _maxParkedSessions) break;
+      for (final p in entry.value.snapshot.pendingPermissions) {
+        p.cancel();
+      }
+      _parkedSessions.remove(entry.key);
+      _speedTrackers.remove(entry.key);
+    }
+  }
+
+  void _clearAllParkedSessions() {
+    for (final entry in _parkedSessions.values) {
+      for (final p in entry.snapshot.pendingPermissions) {
+        p.cancel();
+      }
+    }
+    _parkedSessions.clear();
+    _turnGenBySession.clear();
+    _speedTrackers.clear();
+    _inFlightPromptBySession.clear();
+    _pendingNewSessionKey = null;
+  }
+
+  void _onDeletedSessionsChanged(List<String>? previous, List<String> next) {
+    if (_parkedSessions.isEmpty) return;
+    final conn = _activeConn;
+    var changed = false;
+    for (final sid in next) {
+      final parked = _parkedSessions.remove(sid);
+      if (parked == null) continue;
+      changed = true;
+      _bumpTurnGen(sid);
+      _speedTrackers.remove(sid);
+      _inFlightPromptBySession.remove(sid);
+      for (final p in parked.snapshot.pendingPermissions) {
+        p.cancel();
+      }
+      if (parked.snapshot.isBusy && conn != null) {
+        unawaited(conn.client.cancel(sid).catchError((_) {}));
+      }
+    }
+    if (changed) {
+      _syncBackgroundRunningIds();
+    }
+  }
 
   List<AcpMcpServerConfig> _sessionMcpServers(HostConnection conn) {
     final servers = <AcpMcpServerConfig>[];
@@ -332,14 +500,12 @@ class ChatController extends Notifier<ChatState> {
     _stderrSub = null;
     _activeConn = conn;
     _ownedSessionId = null;
-    _inFlightPromptDone = null;
-    _inFlightPromptSessionId = null;
+    _clearAllParkedSessions();
     _draftFuture = null;
     _draftFutureCwd = null;
     _cachedModes = null;
     _cachedConfigOptions = const [];
     _loadGeneration++;
-    _turnGen++;
 
     ref.onDispose(() {
       unawaited(_updateSub?.cancel());
@@ -351,6 +517,11 @@ class ChatController extends Notifier<ChatState> {
     ref.listen<String?>(
       sessionsProvider.select((s) => s.currentSessionId),
       _onSelectedSessionChanged,
+    );
+
+    ref.listen<List<String>>(
+      sessionsProvider.select((s) => s.deletedIds),
+      _onDeletedSessionsChanged,
     );
 
     ref.listen<String>(
@@ -366,7 +537,7 @@ class ChatController extends Notifier<ChatState> {
     ref.listen<(int, String?)>(
       localRuntimeProvider.select((s) => (s.logSeq, s.lastLogLine)),
       (prev, next) {
-        if (!state.isSending) return;
+        if (!state.hasAnyRunningSession) return;
         if (_activeConn?.isLocal != true) return;
         final line = next.$2;
         if (line == null || line.isEmpty) return;
@@ -381,7 +552,7 @@ class ChatController extends Notifier<ChatState> {
     _permSub = conn.client.permissionRequests.listen(_onPermissionRequest);
     _otherNotifSub = conn.client.otherNotifications.listen(_onOtherNotification);
     _stderrSub = conn.client.stderrLines.listen((line) {
-      if (!state.isSending) return;
+      if (!state.hasAnyRunningSession) return;
       _onProcessLogLine(line);
     });
 
@@ -420,18 +591,41 @@ class ChatController extends Notifier<ChatState> {
     // Self-originated promotion from new/draft -> active conversation: do NOT reload!
     if (next == _ownedSessionId) return;
 
+    // Park the currently visible conversation so any running turn continues
+    // uninterrupted in the background instead of being torn down.
+    _parkActiveSession();
+    _pendingNewSessionKey = null;
+
     if (next == null || next.isEmpty) {
       _ownedSessionId = null;
       _loadGeneration++;
-      _turnGen++;
       state = ChatState(
         transcript: ChatTranscript(
           modes: _cachedModes,
           configOptions: _cachedConfigOptions,
         ),
         isPreparingModels: _cachedConfigOptions.isEmpty,
+        backgroundRunningIds: _computeBackgroundRunningIds(),
       );
       unawaited(prepareDraftSession());
+      return;
+    }
+
+    // If this session is already parked in memory (e.g. still streaming in the
+    // background or recently viewed), restore it instantaneously without calling
+    // `session/load`, preserving live streaming chunks, speed metrics, and state.
+    final parked = _parkedSessions.remove(next);
+    if (parked != null) {
+      _discardDraftSession(conn);
+      _ownedSessionId = next;
+      _loadGeneration++;
+      final liveTps = parked.snapshot.isSending
+          ? _speedTrackers[next]?.liveTokensPerSecond(DateTime.now())
+          : null;
+      state = parked.snapshot.copyWith(
+        liveTokensPerSecond: () => liveTps,
+        backgroundRunningIds: _computeBackgroundRunningIds(),
+      );
       return;
     }
 
@@ -439,10 +633,11 @@ class ChatController extends Notifier<ChatState> {
     _discardDraftSession(conn);
     _ownedSessionId = next;
     final gen = ++_loadGeneration;
-    _turnGen++;
     final sessionInfo = ref.read(sessionsProvider).currentSession;
-    final String cwd =
-        sessionInfo?.cwd ?? ref.read(effectiveWorkingDirProvider);
+    final rawCwd = sessionInfo?.cwd.trim() ?? '';
+    final String cwd = rawCwd.isNotEmpty
+        ? rawCwd
+        : ref.read(effectiveWorkingDirProvider);
     state = ChatState(
       sessionId: next,
       sessionCwd: cwd,
@@ -453,6 +648,7 @@ class ChatController extends Notifier<ChatState> {
       sessionAgentMode: _sessionModes[next],
       sessionToolPermission: _sessionPermissions[next],
       allowAllForSession: _allowAllSessions.contains(next),
+      backgroundRunningIds: _computeBackgroundRunningIds(),
       isLoadingSession: true,
     );
     unawaited(_loadExistingSession(conn, next, cwd, gen));
@@ -463,8 +659,10 @@ class ChatController extends Notifier<ChatState> {
     if (conn == null) return;
     if (previous == next) return;
 
-    // Only rotate the silent draft session when on the fresh home screen.
-    if (state.sessionId == null && state.draftSessionCwd != next) {
+    // Only rotate the silent draft session when on the fresh idle home screen.
+    if (state.sessionId == null &&
+        !state.isSending &&
+        state.draftSessionCwd != next) {
       _discardDraftSession(conn);
       unawaited(prepareDraftSession(forceRefresh: true));
     }
@@ -472,7 +670,12 @@ class ChatController extends Notifier<ChatState> {
 
   void _onWorkspaceSelectionChanged(WorkspaceItem? previous, WorkspaceItem? next) {
     if (next == null || previous?.path == next.path) return;
-    if (state.isBusy) return;
+    // Switching workspace while a turn is running parks that turn in the
+    // background and opens a fresh conversation in the newly selected workspace.
+    if (state.sessionId == null && state.isSending) {
+      startNewChat();
+      return;
+    }
     final activeCwd = state.sessionCwd;
     if (state.sessionId != null && activeCwd != null) {
       final normActive = normalizeWorkspacePath(activeCwd);
@@ -750,9 +953,10 @@ class ChatController extends Notifier<ChatState> {
 
   void startNewChat() {
     final conn = _activeConn;
+    _parkActiveSession();
+    _pendingNewSessionKey = null;
     _ownedSessionId = null;
     _loadGeneration++;
-    _turnGen++;
     if (conn != null) {
       _discardDraftSession(conn);
     }
@@ -763,6 +967,7 @@ class ChatController extends Notifier<ChatState> {
         configOptions: _cachedConfigOptions,
       ),
       isPreparingModels: conn != null && _cachedConfigOptions.isEmpty,
+      backgroundRunningIds: _computeBackgroundRunningIds(),
     );
     if (conn != null) {
       unawaited(prepareDraftSession());
@@ -981,8 +1186,9 @@ class ChatController extends Notifier<ChatState> {
     }
 
     final quote = state.quotedText;
+    final desiredAgentMode = effectiveAgentMode();
     final bodyWithPlan =
-        effectiveAgentMode() == AgyAgentMode.plan &&
+        desiredAgentMode == AgyAgentMode.plan &&
             cleanBody.isNotEmpty &&
             !cleanBody.startsWith('/')
         ? '/plan $cleanBody'
@@ -997,21 +1203,42 @@ class ChatController extends Notifier<ChatState> {
       return;
     }
 
-    final myGen = ++_turnGen;
     final turnNow = DateTime.now();
+    final existingSid = state.sessionId;
+    final isFirstTurn = existingSid == null || existingSid.isEmpty;
+    final String cwd =
+        state.sessionCwd ?? ref.read(effectiveWorkingDirProvider);
+    final capturedAgentMode = state.sessionAgentMode;
+    final capturedToolPerm = state.sessionToolPermission;
+    final capturedAdditionalDirs = List<String>.from(state.additionalDirectories);
+    final capturedAllowAll = state.allowAllForSession;
+
+    final pendingKey = isFirstTurn ? '__pending_${++_pendingSendSeq}' : null;
+    final pendingGen = pendingKey != null ? _bumpTurnGen(pendingKey) : 0;
+    if (pendingKey != null) {
+      _pendingNewSessionKey = pendingKey;
+    }
+    var sid = existingSid;
+    var myGen = !isFirstTurn ? _bumpTurnGen(existingSid) : 0;
+
+    final initialEvents = <TurnActivityLogEntry>[
+      TurnActivityLogEntry(timestamp: turnNow, label: '已发送请求，等待模型响应'),
+    ];
+
     state = state.copyWith(
       isSending: true,
       turnStartedAt: () => turnNow,
       lastActivityAt: () => turnNow,
       livePhase: TurnLivePhase.waiting,
+      liveStatusLabel: () => null,
       turnChars: 0,
       thoughtChars: 0,
       answerChars: 0,
+      liveTokensPerSecond: () => null,
+      estimatedTurnTokens: 0,
       activeRetry: () => null,
       retryCount: 0,
-      turnEvents: [
-        TurnActivityLogEntry(timestamp: turnNow, label: '已发送请求，等待模型响应'),
-      ],
+      turnEvents: initialEvents,
       turnLogs: const [],
       attachments: const [],
       clearError: true,
@@ -1019,44 +1246,66 @@ class ChatController extends Notifier<ChatState> {
       authRequired: false,
     );
 
-    try {
-      var sid = state.sessionId;
-      final String cwd =
-          state.sessionCwd ?? ref.read(effectiveWorkingDirProvider);
-      final isFirstTurn = sid == null || sid.isEmpty;
+    final displayPrompt = [
+      if (stagedAttachments.isNotEmpty)
+        stagedAttachments
+            .map((a) => a.isImage ? '[图片: ${a.name}]' : '[附件: ${a.name}]')
+            .join(' '),
+      if (text.isNotEmpty) text,
+    ].join('\n');
 
+    final blocks = <AcpContentBlock>[
+      for (final a in stagedAttachments) a.toAcpBlock(),
+      if (text.isNotEmpty) AcpTextBlock(text),
+    ];
+
+    try {
       if (isFirstTurn) {
         // If a background draft pre-warm is currently running for this exact cwd,
         // wait for it rather than racing a second `session/new`.
         if (_draftFuture != null && _draftFutureCwd == cwd) {
           await _draftFuture;
-          if (!ref.mounted || _activeConn != conn || _turnGen != myGen) return;
+          if (!ref.mounted ||
+              _activeConn != conn ||
+              _turnGenOf(pendingKey!) != pendingGen) {
+            return;
+          }
         }
 
         final currentMcpServers = _sessionMcpServers(conn);
+        final stillOwningForegroundBeforeCreate =
+            _ownedSessionId == null && _pendingNewSessionKey == pendingKey;
         final canReuseDraft =
+            stillOwningForegroundBeforeCreate &&
             state.draftSessionId != null &&
             state.draftSessionId!.isNotEmpty &&
             state.draftSessionCwd == cwd &&
             _draftMcpSignature == _mcpSignature(currentMcpServers) &&
-            _sameStringList(
-              state.draftAdditionalDirs,
-              state.additionalDirectories,
-            );
+            _sameStringList(state.draftAdditionalDirs, capturedAdditionalDirs);
 
-        AcpSessionModeState? modes = state.transcript.modes;
-        List<AcpConfigOption> configs = state.transcript.configOptions;
+        AcpSessionModeState? modes = stillOwningForegroundBeforeCreate
+            ? state.transcript.modes
+            : _cachedModes;
+        List<AcpConfigOption> configs = stillOwningForegroundBeforeCreate
+            ? state.transcript.configOptions
+            : _cachedConfigOptions;
 
         if (canReuseDraft) {
           sid = state.draftSessionId!;
         } else {
-          _discardDraftSession(conn);
+          if (stillOwningForegroundBeforeCreate) {
+            _discardDraftSession(conn);
+          }
           final handle = await conn.client.newSession(
             cwd: cwd,
             mcpServers: currentMcpServers,
-            additionalDirectories: state.additionalDirectories,
+            additionalDirectories: capturedAdditionalDirs,
           );
-          if (!ref.mounted || _activeConn != conn || _turnGen != myGen) return;
+          if (!ref.mounted ||
+              _activeConn != conn ||
+              _turnGenOf(pendingKey!) != pendingGen) {
+            return;
+          }
           sid = handle.sessionId;
           modes = handle.modes ?? modes;
           configs = handle.configOptions.isNotEmpty
@@ -1071,105 +1320,226 @@ class ChatController extends Notifier<ChatState> {
             sid,
             configs,
           );
-          if (!ref.mounted || _activeConn != conn || _turnGen != myGen) return;
+          if (!ref.mounted ||
+              _activeConn != conn ||
+              _turnGenOf(pendingKey) != pendingGen) {
+            return;
+          }
           if (applied.isNotEmpty) {
             configs = applied;
             _cachedConfigOptions = applied;
           }
         }
 
-        // Own & commit this session BEFORE calling registerCreatedSession so
-        // `sessionsProvider.currentSessionId` changing NEVER triggers a reload!
-        _ownedSessionId = sid;
-        if (state.sessionAgentMode != null) {
-          _sessionModes[sid] = state.sessionAgentMode!;
+        myGen = _bumpTurnGen(sid);
+        _speedTrackerOf(sid).reset();
+        if (capturedAgentMode != null) {
+          _sessionModes[sid] = capturedAgentMode;
         }
-        if (state.sessionToolPermission != null) {
-          _sessionPermissions[sid] = state.sessionToolPermission!;
+        if (capturedToolPerm != null) {
+          _sessionPermissions[sid] = capturedToolPerm;
+        }
+        if (capturedAllowAll) {
+          _allowAllSessions.add(sid);
         }
 
-        state = state.copyWith(
-          sessionId: sid,
-          sessionCwd: cwd,
-          clearDraftSession: true,
-          transcript: state.transcript.copyWith(
-            modes: modes,
-            configOptions: configs,
-          ),
-        );
+        final stillForeground =
+            _ownedSessionId == null && _pendingNewSessionKey == pendingKey;
 
         final titleSeed = cleanBody.isNotEmpty
             ? cleanBody
             : stagedAttachments.map((a) => a.name).join(', ');
-        ref.read(sessionsProvider.notifier).registerCreatedSession(
-          AcpSessionInfo(
-            sessionId: sid,
-            cwd: cwd,
-            title: titleSeed.length > 36
-                ? '${titleSeed.substring(0, 36)}…'
-                : titleSeed,
-            updatedAt: DateTime.now(),
-          ),
+        final createdInfo = AcpSessionInfo(
+          sessionId: sid,
+          cwd: cwd,
+          title: titleSeed.length > 36
+              ? '${titleSeed.substring(0, 36)}…'
+              : titleSeed,
+          updatedAt: DateTime.now(),
         );
 
+        if (stillForeground) {
+          _pendingNewSessionKey = null;
+          // Own & commit this session BEFORE calling registerCreatedSession so
+          // `sessionsProvider.currentSessionId` changing NEVER triggers a reload!
+          _ownedSessionId = sid;
+          state = state.copyWith(
+            sessionId: sid,
+            sessionCwd: cwd,
+            clearDraftSession: true,
+            transcript: state.transcript
+                .copyWith(modes: modes, configOptions: configs)
+                .appendUserPrompt(displayPrompt),
+          );
+          ref
+              .read(sessionsProvider.notifier)
+              .registerCreatedSession(createdInfo, select: true);
+        } else {
+          // User switched conversations or workspaces while `session/new` was
+          // awaiting — park this new session and continue executing in background.
+          _parkedSessions[sid] = _ParkedSession(
+            ChatState(
+              sessionId: sid,
+              sessionCwd: cwd,
+              additionalDirectories: capturedAdditionalDirs,
+              transcript: ChatTranscript(
+                modes: modes,
+                configOptions: configs,
+              ).appendUserPrompt(displayPrompt),
+              sessionAgentMode: capturedAgentMode,
+              sessionToolPermission: capturedToolPerm,
+              allowAllForSession: capturedAllowAll,
+              turnStartedAt: turnNow,
+              lastActivityAt: turnNow,
+              livePhase: TurnLivePhase.waiting,
+              turnEvents: initialEvents,
+              isSending: true,
+            ),
+          );
+          _syncBackgroundRunningIds();
+          ref
+              .read(sessionsProvider.notifier)
+              .registerCreatedSession(createdInfo, select: false);
+        }
+
         // Apply non-standard execution mode on the ACP session if matched.
-        final desiredMode = effectiveAgentMode();
-        if (modes != null && desiredMode != AgyAgentMode.standard) {
+        if (modes != null && desiredAgentMode != AgyAgentMode.standard) {
           final match = modes.availableModes
               .where(
-                (m) => desiredMode.acpModeAliases.contains(m.id.toLowerCase()),
+                (m) => desiredAgentMode.acpModeAliases.contains(
+                  m.id.toLowerCase(),
+                ),
               )
               .firstOrNull;
           if (match != null && match.id != modes.currentModeId) {
-            await setMode(match.id);
+            try {
+              await conn.client.setMode(sid, match.id);
+              if (ref.mounted && _activeConn == conn) {
+                _updateSessionState(
+                  sid,
+                  (cur) => cur.copyWith(
+                    transcript: cur.transcript.applyUpdate(
+                      CurrentModeUpdate(match.id),
+                    ),
+                  ),
+                );
+              }
+            } catch (_) {}
           }
         }
+      } else {
+        if (!ref.mounted ||
+            _activeConn != conn ||
+            _turnGenOf(sid!) != myGen) {
+          return;
+        }
+        _speedTrackerOf(sid).reset();
+        _updateSessionState(
+          sid,
+          (cur) => cur.copyWith(
+            transcript: cur.transcript.appendUserPrompt(displayPrompt),
+          ),
+        );
       }
 
-      if (!ref.mounted || _ownedSessionId != sid || _turnGen != myGen) return;
-
-      final displayPrompt = [
-        if (stagedAttachments.isNotEmpty)
-          stagedAttachments
-              .map((a) => a.isImage ? '[图片: ${a.name}]' : '[附件: ${a.name}]')
-              .join(' '),
-        if (text.isNotEmpty) text,
-      ].join('\n');
-
-      state = state.copyWith(
-        transcript: state.transcript.appendUserPrompt(displayPrompt),
+      await _executePromptOnSession(
+        conn: conn,
+        sid: sid,
+        blocks: blocks,
+        myGen: myGen,
       );
+    } on AcpRpcException catch (e) {
+      if (!ref.mounted || _activeConn != conn) return;
+      if (isFirstTurn && pendingKey != null) {
+        if (_turnGenOf(pendingKey) != pendingGen) return;
+        if (_pendingNewSessionKey == pendingKey && state.sessionId == null) {
+          _pendingNewSessionKey = null;
+          state = state.copyWith(
+            transcript: state.transcript.finishTurn(AcpStopReason.unknown),
+            isSending: false,
+            turnStartedAt: () => null,
+            lastActivityAt: () => null,
+            livePhase: TurnLivePhase.waiting,
+      liveStatusLabel: () => null,
+            liveTokensPerSecond: () => null,
+            activeRetry: () => null,
+            authRequired: e.isAuthRequired,
+            error: e.isAuthRequired
+                ? 'Antigravity CLI 尚未登录或未配置 Gemini API Key，请前往「本机引擎 / 设置」完成认证。'
+                : e.message,
+          );
+        }
+      }
+    } catch (e) {
+      if (!ref.mounted || _activeConn != conn) return;
+      if (isFirstTurn && pendingKey != null) {
+        if (_turnGenOf(pendingKey) != pendingGen) return;
+        if (_pendingNewSessionKey == pendingKey && state.sessionId == null) {
+          _pendingNewSessionKey = null;
+          state = state.copyWith(
+            transcript: state.transcript.finishTurn(AcpStopReason.unknown),
+            isSending: false,
+            turnStartedAt: () => null,
+            lastActivityAt: () => null,
+            livePhase: TurnLivePhase.waiting,
+      liveStatusLabel: () => null,
+            liveTokensPerSecond: () => null,
+            activeRetry: () => null,
+            error: e.toString(),
+          );
+        }
+      }
+    }
+  }
 
-      final blocks = <AcpContentBlock>[
-        for (final a in stagedAttachments) a.toAcpBlock(),
-        if (text.isNotEmpty) AcpTextBlock(text),
-      ];
-
+  /// Executes `session/prompt` on [sid] and finalizes state whether [sid] is
+  /// still in the foreground or was parked into the background mid-turn.
+  Future<void> _executePromptOnSession({
+    required HostConnection conn,
+    required String sid,
+    required List<AcpContentBlock> blocks,
+    required int myGen,
+  }) async {
+    try {
       final result = await _sendPromptWithCancelSettle(conn, sid, blocks, myGen);
       if (result == null ||
           !ref.mounted ||
-          _ownedSessionId != sid ||
-          _turnGen != myGen) {
+          _activeConn != conn ||
+          _turnGenOf(sid) != myGen) {
         return;
       }
-      state = state.copyWith(
-        transcript: state.transcript.finishTurn(
-          result.stopReason,
-          usage: result.usage,
+
+      final metrics = _speedTrackers[sid]?.finalize(usage: result.usage);
+      _speedTrackers.remove(sid);
+
+      _updateSessionState(
+        sid,
+        (cur) => cur.copyWith(
+          transcript: cur.transcript.finishTurn(
+            result.stopReason,
+            usage: result.usage,
+            metrics: metrics,
+          ),
+          isSending: false,
+          turnStartedAt: () => null,
+          lastActivityAt: () => null,
+          livePhase: TurnLivePhase.waiting,
+      liveStatusLabel: () => null,
+          liveTokensPerSecond: () => null,
+          activeRetry: () => null,
         ),
-        isSending: false,
-        turnStartedAt: () => null,
-        lastActivityAt: () => null,
-        livePhase: TurnLivePhase.waiting,
-        activeRetry: () => null,
       );
 
       if (_isAppBackgrounded &&
           ref.read(settingsProvider).notifyOnTurnComplete) {
+        final snap = _sessionStateOf(sid);
+        final sessionInfo = ref
+            .read(sessionsProvider)
+            .sessions
+            .where((s) => s.sessionId == sid)
+            .firstOrNull;
         final sessionTitle =
-            state.transcript.title ??
-            ref.read(sessionsProvider).currentSession?.title ??
-            'AGY Go';
+            snap?.transcript.title ?? sessionInfo?.title ?? 'AGY Go';
         unawaited(
           ref.read(systemToolsProvider.notifier).notifyTurnEvent(
             title: '回复已完成 · $sessionTitle',
@@ -1179,37 +1549,92 @@ class ChatController extends Notifier<ChatState> {
         );
       }
 
-      if (state.queuedMessages.isNotEmpty) {
-        final nextMsg = state.queuedMessages.first;
-        state = state.copyWith(
-          queuedMessages: state.queuedMessages.sublist(1),
+      final after = _sessionStateOf(sid);
+      if (after != null && after.queuedMessages.isNotEmpty) {
+        final nextMsg = after.queuedMessages.first;
+        _updateSessionState(
+          sid,
+          (cur) => cur.copyWith(queuedMessages: cur.queuedMessages.sublist(1)),
         );
-        unawaited(send(nextMsg));
+        if (state.sessionId == sid) {
+          unawaited(send(nextMsg));
+        } else {
+          final nextGen = _bumpTurnGen(sid);
+          final nextNow = DateTime.now();
+          _speedTrackerOf(sid).reset();
+          _updateSessionState(
+            sid,
+            (cur) => cur.copyWith(
+              isSending: true,
+              turnStartedAt: () => nextNow,
+              lastActivityAt: () => nextNow,
+              livePhase: TurnLivePhase.waiting,
+      liveStatusLabel: () => null,
+              turnChars: 0,
+              thoughtChars: 0,
+              answerChars: 0,
+              liveTokensPerSecond: () => null,
+              estimatedTurnTokens: 0,
+              activeRetry: () => null,
+              retryCount: 0,
+              turnEvents: [
+                TurnActivityLogEntry(timestamp: nextNow, label: '已发送排队请求，等待模型响应'),
+              ],
+              turnLogs: const [],
+              clearError: true,
+              transcript: cur.transcript.appendUserPrompt(nextMsg),
+            ),
+          );
+          unawaited(
+            _executePromptOnSession(
+              conn: conn,
+              sid: sid,
+              blocks: [AcpTextBlock(nextMsg)],
+              myGen: nextGen,
+            ),
+          );
+        }
       }
     } on AcpRpcException catch (e) {
-      if (!ref.mounted || _turnGen != myGen) return;
-      state = state.copyWith(
-        transcript: state.transcript.finishTurn(AcpStopReason.unknown),
-        isSending: false,
-        turnStartedAt: () => null,
-        lastActivityAt: () => null,
-        livePhase: TurnLivePhase.waiting,
-        activeRetry: () => null,
-        authRequired: e.isAuthRequired,
-        error: e.isAuthRequired
-            ? 'Antigravity CLI 尚未登录或未配置 Gemini API Key，请前往「本机引擎 / 设置」完成认证。'
-            : e.message,
+      if (!ref.mounted || _activeConn != conn || _turnGenOf(sid) != myGen) {
+        return;
+      }
+      _speedTrackers.remove(sid);
+      _updateSessionState(
+        sid,
+        (cur) => cur.copyWith(
+          transcript: cur.transcript.finishTurn(AcpStopReason.unknown),
+          isSending: false,
+          turnStartedAt: () => null,
+          lastActivityAt: () => null,
+          livePhase: TurnLivePhase.waiting,
+      liveStatusLabel: () => null,
+          liveTokensPerSecond: () => null,
+          activeRetry: () => null,
+          authRequired: e.isAuthRequired,
+          error: e.isAuthRequired
+              ? 'Antigravity CLI 尚未登录或未配置 Gemini API Key，请前往「本机引擎 / 设置」完成认证。'
+              : e.message,
+        ),
       );
     } catch (e) {
-      if (!ref.mounted || _turnGen != myGen) return;
-      state = state.copyWith(
-        transcript: state.transcript.finishTurn(AcpStopReason.unknown),
-        isSending: false,
-        turnStartedAt: () => null,
-        lastActivityAt: () => null,
-        livePhase: TurnLivePhase.waiting,
-        activeRetry: () => null,
-        error: e.toString(),
+      if (!ref.mounted || _activeConn != conn || _turnGenOf(sid) != myGen) {
+        return;
+      }
+      _speedTrackers.remove(sid);
+      _updateSessionState(
+        sid,
+        (cur) => cur.copyWith(
+          transcript: cur.transcript.finishTurn(AcpStopReason.unknown),
+          isSending: false,
+          turnStartedAt: () => null,
+          lastActivityAt: () => null,
+          livePhase: TurnLivePhase.waiting,
+      liveStatusLabel: () => null,
+          liveTokensPerSecond: () => null,
+          activeRetry: () => null,
+          error: e.toString(),
+        ),
       );
     }
   }
@@ -1231,11 +1656,10 @@ class ChatController extends Notifier<ChatState> {
     List<AcpContentBlock> blocks,
     int myGen,
   ) async {
-    Completer<void>? priorDone =
-        (_inFlightPromptSessionId == sid &&
-            _inFlightPromptDone != null &&
-            !_inFlightPromptDone!.isCompleted)
-        ? _inFlightPromptDone
+    final existingDone = _inFlightPromptBySession[sid];
+    final Completer<void>? priorDone =
+        (existingDone != null && !existingDone.isCompleted)
+        ? existingDone
         : null;
 
     if (priorDone != null) {
@@ -1243,7 +1667,7 @@ class ChatController extends Notifier<ChatState> {
         const Duration(milliseconds: 400),
         onTimeout: () {},
       );
-      if (!ref.mounted || _ownedSessionId != sid || _turnGen != myGen) {
+      if (!ref.mounted || _activeConn != conn || _turnGenOf(sid) != myGen) {
         return null;
       }
     }
@@ -1252,20 +1676,18 @@ class ChatController extends Notifier<ChatState> {
     var loggedCancelWait = false;
 
     for (var attempt = 0; attempt <= cancelWaitMs.length; attempt++) {
-      if (!ref.mounted || _ownedSessionId != sid || _turnGen != myGen) {
+      if (!ref.mounted || _activeConn != conn || _turnGenOf(sid) != myGen) {
         return null;
       }
 
       final myDone = Completer<void>();
-      _inFlightPromptDone = myDone;
-      _inFlightPromptSessionId = sid;
+      _inFlightPromptBySession[sid] = myDone;
 
       try {
         final res = await conn.client.prompt(sid, blocks);
         if (!myDone.isCompleted) myDone.complete();
-        if (identical(_inFlightPromptDone, myDone)) {
-          _inFlightPromptDone = null;
-          _inFlightPromptSessionId = null;
+        if (identical(_inFlightPromptBySession[sid], myDone)) {
+          _inFlightPromptBySession.remove(sid);
         }
         return res;
       } on AcpRpcException catch (e) {
@@ -1273,25 +1695,26 @@ class ChatController extends Notifier<ChatState> {
         if (_isPromptCancellingError(e) && attempt < cancelWaitMs.length) {
           // Restore priorDone so subsequent loops still wake up the instant it settles.
           if (priorDone != null && !priorDone.isCompleted) {
-            _inFlightPromptDone = priorDone;
-            _inFlightPromptSessionId = sid;
-          } else if (identical(_inFlightPromptDone, myDone)) {
-            _inFlightPromptDone = null;
-            _inFlightPromptSessionId = null;
+            _inFlightPromptBySession[sid] = priorDone;
+          } else if (identical(_inFlightPromptBySession[sid], myDone)) {
+            _inFlightPromptBySession.remove(sid);
           }
 
-          if (!ref.mounted || _ownedSessionId != sid || _turnGen != myGen) {
+          if (!ref.mounted || _activeConn != conn || _turnGenOf(sid) != myGen) {
             return null;
           }
           if (!loggedCancelWait) {
             loggedCancelWait = true;
-            state = state.copyWith(
-              lastActivityAt: () => DateTime.now(),
-              turnEvents: _appendTurnEvent(
-                state.turnEvents,
-                TurnActivityLogEntry(
-                  timestamp: DateTime.now(),
-                  label: '正在等待上一轮中止完成，随后自动发送…',
+            _updateSessionState(
+              sid,
+              (cur) => cur.copyWith(
+                lastActivityAt: () => DateTime.now(),
+                turnEvents: _appendTurnEvent(
+                  cur.turnEvents,
+                  TurnActivityLogEntry(
+                    timestamp: DateTime.now(),
+                    label: '正在等待上一轮中止完成，随后自动发送…',
+                  ),
                 ),
               ),
             );
@@ -1313,9 +1736,8 @@ class ChatController extends Notifier<ChatState> {
           continue;
         }
 
-        if (identical(_inFlightPromptDone, myDone)) {
-          _inFlightPromptDone = null;
-          _inFlightPromptSessionId = null;
+        if (identical(_inFlightPromptBySession[sid], myDone)) {
+          _inFlightPromptBySession.remove(sid);
         }
         if (_isPromptCancellingError(e)) {
           throw AcpRpcException(
@@ -1328,9 +1750,8 @@ class ChatController extends Notifier<ChatState> {
         rethrow;
       } catch (_) {
         if (!myDone.isCompleted) myDone.complete();
-        if (identical(_inFlightPromptDone, myDone)) {
-          _inFlightPromptDone = null;
-          _inFlightPromptSessionId = null;
+        if (identical(_inFlightPromptBySession[sid], myDone)) {
+          _inFlightPromptBySession.remove(sid);
         }
         rethrow;
       }
@@ -1362,10 +1783,18 @@ class ChatController extends Notifier<ChatState> {
     setQuote(seedText);
   }
 
-  /// Immediately unlocks the UI, finishes any streaming cursor/pending tool calls,
-  /// and flushes the ACP `session/cancel` notification so follow-up prompts stay ordered.
+  /// Immediately unlocks the UI for the CURRENTLY VISIBLE session, finishes its
+  /// streaming cursor/pending tool calls, and flushes ACP `session/cancel`,
+  /// while leaving any parked background conversations completely untouched.
   Future<void> cancel() async {
-    _turnGen++;
+    final sid = state.sessionId;
+    if (sid != null && sid.isNotEmpty) {
+      _bumpTurnGen(sid);
+      _speedTrackers.remove(sid);
+    } else if (_pendingNewSessionKey != null) {
+      _bumpTurnGen(_pendingNewSessionKey!);
+      _pendingNewSessionKey = null;
+    }
     for (final p in state.pendingPermissions) {
       p.cancel();
     }
@@ -1376,10 +1805,11 @@ class ChatController extends Notifier<ChatState> {
       turnStartedAt: () => null,
       lastActivityAt: () => null,
       livePhase: TurnLivePhase.waiting,
+      liveStatusLabel: () => null,
+      liveTokensPerSecond: () => null,
       activeRetry: () => null,
     );
     final conn = _activeConn ?? ref.read(activeConnectionProvider).value;
-    final sid = state.sessionId;
     if (conn == null || sid == null) return;
     await conn.client
         .cancel(sid)
@@ -1394,6 +1824,8 @@ class ChatController extends Notifier<ChatState> {
       await conn.client.logout();
       _cachedModes = null;
       _cachedConfigOptions = const [];
+      _clearAllParkedSessions();
+      state = state.copyWith(clearSessionId: true, isSending: false);
       startNewChat();
       return true;
     } catch (e) {
@@ -1480,13 +1912,11 @@ class ChatController extends Notifier<ChatState> {
 
   void _onUpdate(AcpSessionNotification notification) {
     if (!ref.mounted) return;
-    final targetSid = state.activeRpcSessionId;
-    if (targetSid == null || notification.sessionId != targetSid) return;
+    final notifSid = notification.sessionId;
 
     // For a silent pre-warmed draft session, only ingest metadata updates
     // (configOptions / modes / availableCommands) — never stray message chunks.
-    final isDraftOnly = state.sessionId == null;
-    if (isDraftOnly) {
+    if (state.sessionId == null && state.draftSessionId == notifSid) {
       final update = notification.update;
       if (update is ConfigOptionUpdate) {
         _cachedConfigOptions = update.configOptions;
@@ -1502,11 +1932,14 @@ class ChatController extends Notifier<ChatState> {
       return;
     }
 
+    final current = _sessionStateOf(notifSid);
+    if (current == null) return;
+
     // Ignore stray late content/tool chunks when idle (e.g. arriving right after
     // the user tapped Stop or after a network failure), while still ingesting
     // metadata updates (config options, modes, session title, usage).
     final update = notification.update;
-    if (!state.isSending && !state.isLoadingSession) {
+    if (!current.isSending && !current.isLoadingSession) {
       final isMetadata =
           update is ConfigOptionUpdate ||
           update is CurrentModeUpdate ||
@@ -1519,7 +1952,10 @@ class ChatController extends Notifier<ChatState> {
     final now = DateTime.now();
     var addedAnswerChars = 0;
     var addedThoughtChars = 0;
-    var nextPhase = state.livePhase;
+    String? streamedText;
+    var nextPhase = current.livePhase;
+    var nextStatusLabel = current.liveStatusLabel;
+    var statusChanged = false;
     var recoveredFromRetry = false;
     TurnRetryInfo? retryUpdate;
 
@@ -1527,65 +1963,116 @@ class ChatController extends Notifier<ChatState> {
       case AgentMessageChunkUpdate(:final content):
         if (content case AcpTextBlock(:final text)) {
           addedAnswerChars = text.length;
+          streamedText = text;
         }
         nextPhase = TurnLivePhase.responding;
-        recoveredFromRetry = state.activeRetry != null;
+        nextStatusLabel = null;
+        statusChanged = true;
+        recoveredFromRetry = current.activeRetry != null;
       case AgentThoughtChunkUpdate(:final content):
         if (content case AcpTextBlock(:final text)) {
           addedThoughtChars = text.length;
+          streamedText = text;
         }
         nextPhase = TurnLivePhase.thinking;
-        recoveredFromRetry = state.activeRetry != null;
+        nextStatusLabel = null;
+        statusChanged = true;
+        recoveredFromRetry = current.activeRetry != null;
       case ToolCallCreatedUpdate():
       case ToolCallPatchedUpdate():
-        recoveredFromRetry = state.activeRetry != null;
+        recoveredFromRetry = current.activeRetry != null;
+      case PlanUpdate(:final entries):
+        final activePlan = entries
+            .where((p) => p.status.toLowerCase() == 'in_progress')
+            .firstOrNull;
+        if (activePlan != null && activePlan.content.trim().isNotEmpty) {
+          nextPhase = TurnLivePhase.working;
+          nextStatusLabel = activePlan.content.trim();
+          statusChanged = true;
+        }
+      case AgentStatusUpdate():
+        retryUpdate = parseRetryFromStatusUpdate(update, now: now);
+        if (retryUpdate == null) {
+          final parsed = parseLiveStatusFromMap(
+            kindOrMethod: update.kind,
+            payload: update.raw,
+          );
+          if (parsed != null) {
+            nextPhase = parsed.phase;
+            nextStatusLabel = parsed.label;
+            statusChanged = true;
+          }
+          recoveredFromRetry = current.activeRetry != null;
+        }
       case ConfigOptionUpdate(:final configOptions):
         _cachedConfigOptions = configOptions;
       case UnknownSessionUpdate():
         retryUpdate = parseRetryFromUnknownUpdate(update, now: now);
+        if (retryUpdate == null) {
+          final parsed = parseLiveStatusFromMap(
+            kindOrMethod: update.kind,
+            payload: update.raw,
+          );
+          if (parsed != null) {
+            nextPhase = parsed.phase;
+            nextStatusLabel = parsed.label;
+            statusChanged = true;
+          }
+        }
       default:
         break;
     }
 
-    final nextTranscript = state.transcript.applyUpdate(update);
+    final nextTranscript = current.transcript.applyUpdate(update);
     if (update case SessionInfoUpdate(:final title?)) {
-      final currentSid = state.sessionId;
-      if (currentSid != null) {
-        ref.read(sessionsProvider.notifier).updateSessionTitle(currentSid, title);
-      }
+      ref.read(sessionsProvider.notifier).updateSessionTitle(notifSid, title);
+    }
+
+    var nextLiveTps = current.liveTokensPerSecond;
+    var nextEstTokens = current.estimatedTurnTokens;
+    if (current.isSending && streamedText != null && streamedText.isNotEmpty) {
+      final tracker = _speedTrackerOf(notifSid);
+      tracker.recordChunk(streamedText, now);
+      nextLiveTps = tracker.liveTokensPerSecond(now);
+      nextEstTokens = tracker.totalEstimatedTokens.round();
     }
 
     if (update is ToolCallCreatedUpdate || update is ToolCallPatchedUpdate) {
       final last = nextTranscript.items.isNotEmpty
           ? nextTranscript.items.last
           : null;
-      final hasRunningTool =
-          last is AssistantTranscriptItem &&
-          last.toolCalls.any(
-            (t) =>
-                t.status == AcpToolStatus.inProgress ||
-                t.status == AcpToolStatus.pending,
-          );
-      nextPhase = hasRunningTool
-          ? TurnLivePhase.toolRunning
-          : TurnLivePhase.waiting;
+      final activeTools = last is AssistantTranscriptItem
+          ? last.toolCalls.where((t) => t.status.isActive).toList()
+          : const <AcpToolCall>[];
+      if (activeTools.isNotEmpty) {
+        nextPhase = phaseForToolKind(activeTools.last.kind);
+        nextStatusLabel = null;
+        statusChanged = true;
+        nextLiveTps = null;
+      } else {
+        // Tool batch completed: model is now analyzing the tool output for the next step.
+        nextPhase = TurnLivePhase.analyzing;
+        nextStatusLabel = '分析工具结果';
+        statusChanged = true;
+        nextLiveTps = null;
+      }
     }
 
-    var nextEvents = state.turnEvents;
-    if (state.isSending && recoveredFromRetry) {
+    var nextEvents = current.turnEvents;
+    if (current.isSending && recoveredFromRetry) {
       nextEvents = _appendTurnEvent(
         nextEvents,
         TurnActivityLogEntry(timestamp: now, label: '网络已恢复，继续输出'),
       );
-    } else if (state.isSending &&
-        state.thoughtChars == 0 &&
+    } else if (current.isSending &&
+        current.thoughtChars == 0 &&
         addedThoughtChars > 0) {
       nextEvents = _appendTurnEvent(
         nextEvents,
         TurnActivityLogEntry(timestamp: now, label: '开始接收模型思考'),
       );
-    } else if (state.isSending &&
-        state.answerChars == 0 &&
+    } else if (current.isSending &&
+        current.answerChars == 0 &&
         addedAnswerChars > 0) {
       nextEvents = _appendTurnEvent(
         nextEvents,
@@ -1594,60 +2081,155 @@ class ChatController extends Notifier<ChatState> {
     }
 
     final addedChars = addedAnswerChars + addedThoughtChars;
-    state = state.copyWith(
-      transcript: nextTranscript,
-      turnChars: state.turnChars + addedChars,
-      thoughtChars: state.thoughtChars + addedThoughtChars,
-      answerChars: state.answerChars + addedAnswerChars,
-      lastActivityAt: state.isSending ? () => now : null,
-      livePhase: state.isSending ? nextPhase : null,
-      activeRetry: recoveredFromRetry ? () => null : null,
-      turnEvents: nextEvents,
+    _updateSessionState(
+      notifSid,
+      (cur) => cur.copyWith(
+        transcript: nextTranscript,
+        turnChars: cur.turnChars + addedChars,
+        thoughtChars: cur.thoughtChars + addedThoughtChars,
+        answerChars: cur.answerChars + addedAnswerChars,
+        liveTokensPerSecond: cur.isSending ? () => nextLiveTps : null,
+        estimatedTurnTokens: cur.isSending ? nextEstTokens : null,
+        lastActivityAt: cur.isSending ? () => now : null,
+        livePhase: cur.isSending ? nextPhase : null,
+        liveStatusLabel: (cur.isSending && statusChanged)
+            ? () => nextStatusLabel
+            : null,
+        activeRetry: recoveredFromRetry ? () => null : null,
+        turnEvents: nextEvents,
+      ),
     );
 
-    if (state.isSending && retryUpdate != null) {
-      _recordLiveRetry(retryUpdate);
+    if (current.isSending && retryUpdate != null) {
+      _recordLiveRetry(retryUpdate, sessionId: notifSid);
     }
   }
 
+  /// Resolves which running session should receive a session-less notification
+  /// or process log line. Returns `null` when targeting the foreground pending
+  /// (pre-sessionId) turn or when ambiguous across multiple background sessions.
+  String? _resolveRunningTargetSessionId({String? explicitSessionId}) {
+    if (explicitSessionId != null &&
+        _sessionStateOf(explicitSessionId)?.isSending == true) {
+      return explicitSessionId;
+    }
+    if (state.isSending && state.sessionId != null) {
+      return state.sessionId;
+    }
+    if (!state.isSending && state.backgroundRunningIds.length == 1) {
+      return state.backgroundRunningIds.first;
+    }
+    return null;
+  }
+
   void _onOtherNotification(AcpRawNotification notif) {
-    if (!ref.mounted || !state.isSending) return;
+    if (!ref.mounted || !state.hasAnyRunningSession) return;
+    final explicitSid = notif.params['sessionId'] as String?;
+    final targetSid = _resolveRunningTargetSessionId(
+      explicitSessionId: explicitSid,
+    );
+    final foregroundPending =
+        targetSid == null && state.isSending && state.sessionId == null;
+    if (targetSid == null && !foregroundPending) return;
+
     final now = DateTime.now();
     final retry = parseRetryFromRawNotification(notif, now: now);
     if (retry != null) {
-      _recordLiveRetry(retry);
+      _recordLiveRetry(retry, sessionId: targetSid);
       return;
     }
+    final liveStatus = parseLiveStatusFromMap(
+      kindOrMethod: notif.method,
+      payload: notif.params,
+    );
     final methodLower = notif.method.toLowerCase();
-    if (methodLower.contains('progress') || methodLower.contains('status')) {
-      state = state.copyWith(lastActivityAt: () => now);
+    if (liveStatus != null ||
+        methodLower.contains('progress') ||
+        methodLower.contains('status')) {
+      if (targetSid != null) {
+        _updateSessionState(
+          targetSid,
+          (cur) => cur.copyWith(
+            lastActivityAt: () => now,
+            livePhase: liveStatus?.phase,
+            liveStatusLabel: liveStatus != null ? () => liveStatus.label : null,
+          ),
+        );
+      } else if (foregroundPending) {
+        state = state.copyWith(
+          lastActivityAt: () => now,
+          livePhase: liveStatus?.phase,
+          liveStatusLabel: liveStatus != null ? () => liveStatus.label : null,
+        );
+      }
     }
   }
 
   void _onProcessLogLine(String rawLine) {
-    if (!ref.mounted || !state.isSending) return;
+    if (!ref.mounted || !state.hasAnyRunningSession) return;
     final cleaned = cleanEngineLogLine(rawLine);
     if (cleaned.isEmpty) return;
+
+    final targetSid = _resolveRunningTargetSessionId();
+    final foregroundPending =
+        targetSid == null && state.isSending && state.sessionId == null;
+    if (targetSid == null && !foregroundPending) return;
 
     final lower = cleaned.toLowerCase();
     final isNoise =
         lower.startsWith('[bridge]') || lower.startsWith('[installer]');
     if (!isNoise) {
-      final nextLogs = [...state.turnLogs, cleaned];
-      if (nextLogs.length > _maxTurnLogs) {
-        nextLogs.removeRange(0, nextLogs.length - _maxTurnLogs);
+      if (targetSid != null) {
+        _updateSessionState(targetSid, (cur) {
+          final nextLogs = [...cur.turnLogs, cleaned];
+          if (nextLogs.length > _maxTurnLogs) {
+            nextLogs.removeRange(0, nextLogs.length - _maxTurnLogs);
+          }
+          return cur.copyWith(turnLogs: nextLogs);
+        });
+      } else if (foregroundPending) {
+        final nextLogs = [...state.turnLogs, cleaned];
+        if (nextLogs.length > _maxTurnLogs) {
+          nextLogs.removeRange(0, nextLogs.length - _maxTurnLogs);
+        }
+        state = state.copyWith(turnLogs: nextLogs);
       }
-      state = state.copyWith(turnLogs: nextLogs);
     }
 
     final retry = parseRetryFromLogLine(rawLine);
     if (retry != null) {
-      _recordLiveRetry(retry);
+      _recordLiveRetry(retry, sessionId: targetSid);
     }
   }
 
-  void _recordLiveRetry(TurnRetryInfo retry) {
-    if (!ref.mounted || !state.isSending) return;
+  void _recordLiveRetry(TurnRetryInfo retry, {String? sessionId}) {
+    if (!ref.mounted) return;
+    if (sessionId != null) {
+      final target = _sessionStateOf(sessionId);
+      if (target == null || !target.isSending) return;
+      _updateSessionState(sessionId, (cur) {
+        final nextEvents = _appendTurnEvent(
+          cur.turnEvents,
+          TurnActivityLogEntry(
+            timestamp: retry.timestamp,
+            label: retry.summary,
+            detail: retry.rawMessage,
+            isWarning: true,
+          ),
+        );
+        return cur.copyWith(
+          livePhase: TurnLivePhase.retrying,
+          activeRetry: () => retry,
+          retryCount: cur.retryCount + 1,
+          lastActivityAt: () => retry.timestamp,
+          liveTokensPerSecond: () => null,
+          turnEvents: nextEvents,
+        );
+      });
+      return;
+    }
+
+    if (!state.isSending) return;
     final nextEvents = _appendTurnEvent(
       state.turnEvents,
       TurnActivityLogEntry(
@@ -1662,6 +2244,7 @@ class ChatController extends Notifier<ChatState> {
       activeRetry: () => retry,
       retryCount: state.retryCount + 1,
       lastActivityAt: () => retry.timestamp,
+      liveTokensPerSecond: () => null,
       turnEvents: nextEvents,
     );
   }
@@ -1679,14 +2262,19 @@ class ChatController extends Notifier<ChatState> {
 
   void _onPermissionRequest(PendingPermission pending) {
     if (!ref.mounted) return;
-    final currentSid = state.sessionId;
-    if (currentSid != null && pending.request.sessionId != currentSid) return;
+    final reqSid = pending.request.sessionId;
+    final target = _sessionStateOf(reqSid);
+    if (target == null) return;
 
-    final perm = effectiveToolPermission();
-    final mode = effectiveAgentMode();
+    final settings = ref.read(settingsProvider);
+    final perm =
+        target.sessionToolPermission ??
+        _sessionPermissions[reqSid] ??
+        settings.toolPermission;
+    final mode =
+        target.sessionAgentMode ?? _sessionModes[reqSid] ?? settings.agentMode;
     final autoChat =
-        state.allowAllForSession ||
-        (currentSid != null && _allowAllSessions.contains(currentSid));
+        target.allowAllForSession || _allowAllSessions.contains(reqSid);
 
     var shouldAutoAllow = perm == AgyToolPermission.alwaysProceed || autoChat;
 
@@ -1711,11 +2299,14 @@ class ChatController extends Notifier<ChatState> {
       }
     }
 
-    state = state.copyWith(
-      pendingPermissions: [...state.pendingPermissions, pending],
+    _updateSessionState(
+      reqSid,
+      (cur) => cur.copyWith(
+        pendingPermissions: [...cur.pendingPermissions, pending],
+      ),
     );
 
-    if (_isAppBackgrounded && ref.read(settingsProvider).notifyOnApproval) {
+    if (_isAppBackgrounded && settings.notifyOnApproval) {
       unawaited(
         ref.read(systemToolsProvider.notifier).notifyTurnEvent(
           title: '等待你的审批确认',

@@ -91,10 +91,57 @@ void main() {
       expect(res, isNotNull);
       expect(res!.kind, LiveActivityKind.running);
       expect(res.title, '添加汉化');
-      expect(res.chip, '干活中');
+      expect(res.chip, '分析中');
       expect(res.text, '读取 · www/js/plugins.js');
       expect(res.text.contains('../'), isFalse);
       expect(res.sinceMs, started.millisecondsSinceEpoch);
+
+      // Edit tool surfaces 编辑中 chip
+      final editChat = ChatState(
+        sessionId: 's1',
+        sessionCwd: '/storage/emulated/0/game/冬日狂想曲',
+        transcript: ChatTranscript(
+          items: [
+            AssistantTranscriptItem(
+              id: 'a2',
+              timestamp: started,
+              isStreaming: true,
+              toolCalls: const [
+                AcpToolCall(
+                  toolCallId: 'tc2',
+                  title: 'Edit www/js/plugins.js',
+                  kind: AcpToolKind.edit,
+                  status: AcpToolStatus.inProgress,
+                ),
+              ],
+            ),
+          ],
+        ),
+        isSending: true,
+        turnStartedAt: started,
+      );
+      final editRes = deriveLiveActivity(
+        chat: editChat,
+        phone: idlePhone,
+        sessionTitle: '添加汉化',
+        settings: settings,
+        foreground: false,
+      );
+      expect(editRes?.chip, '编辑中');
+
+      // Background parked running conversation keeps Live Activity alive
+      final bgRes = deriveLiveActivity(
+        chat: const ChatState(
+          sessionId: 's2',
+          backgroundRunningIds: {'s1'},
+        ),
+        phone: idlePhone,
+        sessionTitle: '空闲会话',
+        settings: settings,
+        foreground: false,
+      );
+      expect(bgRes?.kind, LiveActivityKind.running);
+      expect(bgRes?.chip, '后台运行');
     });
 
     test('prioritizes waiting approval and phone approval over running', () {

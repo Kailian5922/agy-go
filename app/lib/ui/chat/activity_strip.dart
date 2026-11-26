@@ -69,10 +69,12 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
           startedAt: c.turnStartedAt,
           lastActivityAt: c.lastActivityAt,
           livePhase: c.livePhase,
+          liveStatusLabel: c.liveStatusLabel,
           activeRetry: c.activeRetry,
           chars: c.turnChars,
           thoughtChars: c.thoughtChars,
           answerChars: c.answerChars,
+          liveTokensPerSecond: c.liveTokensPerSecond,
           sessionCwd: c.sessionCwd,
           plan: c.transcript.plan,
           lastItem: c.transcript.items.isNotEmpty
@@ -94,11 +96,7 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
     final activeTools = chat.lastItem is AssistantTranscriptItem
         ? (chat.lastItem as AssistantTranscriptItem)
               .toolCalls
-              .where(
-                (t) =>
-                    t.status == AcpToolStatus.inProgress ||
-                    t.status == AcpToolStatus.pending,
-              )
+              .where((t) => t.status.isActive)
               .toList()
         : const <AcpToolCall>[];
 
@@ -111,8 +109,10 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
         .firstOrNull;
 
     String? activeToolLabel;
+    AcpToolKind? activeToolKind;
     if (activeTools.isNotEmpty) {
       final tc = activeTools.last;
+      activeToolKind = tc.kind;
       final formatted = formatToolSummary(tc, workspaceCwd: chat.sessionCwd);
       activeToolLabel = formatted.isNotEmpty
           ? formatted
@@ -129,8 +129,11 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
             answerChars: chat.answerChars,
             hasActiveTool: activeTools.isNotEmpty,
             activeToolLabel: activeToolLabel,
+            activeToolKind: activeToolKind,
+            liveStatusLabel: chat.liveStatusLabel,
             activePlanLabel: currentPlan?.content,
             now: _now,
+            liveTokensPerSecond: chat.liveTokensPerSecond,
             inline: widget.inline,
           )
         : null;
@@ -148,12 +151,6 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
 
     final elapsed = chat.isBusy && chat.startedAt != null
         ? _formatElapsed(chat.startedAt!)
-        : null;
-    final secs = chat.startedAt != null
-        ? _now.difference(chat.startedAt!).inSeconds
-        : 0;
-    final rate = !widget.inline && chat.isBusy && chat.chars > 0 && secs > 0
-        ? '${(chat.chars / secs).round()} 字/秒'
         : null;
 
     final capsule = SmoothSize(
@@ -203,15 +200,6 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
                         elapsed,
                         style: AppType.monoLabel(
                           color: isWarnTone ? dsh.warning : dsh.textTertiary,
-                        ),
-                      ),
-                    ],
-                    if (rate != null) ...[
-                      const SizedBox(width: 6),
-                      Text(
-                        rate,
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: dsh.textTertiary,
                         ),
                       ),
                     ],
@@ -302,9 +290,11 @@ class _TurnAlertBannerState extends ConsumerState<TurnAlertBanner> {
           startedAt: c.turnStartedAt,
           lastActivityAt: c.lastActivityAt,
           livePhase: c.livePhase,
+          liveStatusLabel: c.liveStatusLabel,
           activeRetry: c.activeRetry,
           thoughtChars: c.thoughtChars,
           answerChars: c.answerChars,
+          liveTokensPerSecond: c.liveTokensPerSecond,
           sessionCwd: c.sessionCwd,
           lastItem: c.transcript.items.isNotEmpty
               ? c.transcript.items.last
@@ -319,17 +309,14 @@ class _TurnAlertBannerState extends ConsumerState<TurnAlertBanner> {
     final activeTools = chat.lastItem is AssistantTranscriptItem
         ? (chat.lastItem as AssistantTranscriptItem)
               .toolCalls
-              .where(
-                (t) =>
-                    t.status == AcpToolStatus.inProgress ||
-                    t.status == AcpToolStatus.pending,
-              )
+              .where((t) => t.status.isActive)
               .toList()
         : const <AcpToolCall>[];
 
     final activeToolLabel = activeTools.isNotEmpty
         ? formatToolSummary(activeTools.last, workspaceCwd: chat.sessionCwd)
         : null;
+    final activeToolKind = activeTools.isNotEmpty ? activeTools.last.kind : null;
 
     final health = deriveTurnHealth(
       startedAt: chat.startedAt,
@@ -340,8 +327,11 @@ class _TurnAlertBannerState extends ConsumerState<TurnAlertBanner> {
       answerChars: chat.answerChars,
       hasActiveTool: activeTools.isNotEmpty,
       activeToolLabel: activeToolLabel,
+      activeToolKind: activeToolKind,
+      liveStatusLabel: chat.liveStatusLabel,
       activePlanLabel: null,
       now: _now,
+      liveTokensPerSecond: chat.liveTokensPerSecond,
     );
 
     if (!health.showAlertBanner) return const SizedBox.shrink();
@@ -520,17 +510,12 @@ class _PlanActivitySheetBodyState
         ? chat.transcript.items.last
         : null;
     final activeTools = lastItem is AssistantTranscriptItem
-        ? lastItem.toolCalls
-              .where(
-                (t) =>
-                    t.status == AcpToolStatus.inProgress ||
-                    t.status == AcpToolStatus.pending,
-              )
-              .toList()
+        ? lastItem.toolCalls.where((t) => t.status.isActive).toList()
         : const <AcpToolCall>[];
     final activeToolLabel = activeTools.isNotEmpty
         ? formatToolSummary(activeTools.last, workspaceCwd: chat.sessionCwd)
         : null;
+    final activeToolKind = activeTools.isNotEmpty ? activeTools.last.kind : null;
 
     final health = chat.isBusy
         ? deriveTurnHealth(
@@ -542,11 +527,14 @@ class _PlanActivitySheetBodyState
             answerChars: chat.answerChars,
             hasActiveTool: activeTools.isNotEmpty,
             activeToolLabel: activeToolLabel,
+            activeToolKind: activeToolKind,
+            liveStatusLabel: chat.liveStatusLabel,
             activePlanLabel: plan
                 .where((p) => p.status.toLowerCase() == 'in_progress')
                 .firstOrNull
                 ?.content,
             now: _now,
+            liveTokensPerSecond: chat.liveTokensPerSecond,
             inline: false,
           )
         : null;
@@ -554,6 +542,17 @@ class _PlanActivitySheetBodyState
     final elapsedSecs = chat.turnStartedAt != null
         ? _now.difference(chat.turnStartedAt!).inSeconds.clamp(0, 86400)
         : 0;
+    final liveSpeedText =
+        chat.liveTokensPerSecond != null && chat.liveTokensPerSecond! > 0
+        ? formatTokensPerSecond(chat.liveTokensPerSecond!)
+        : null;
+    final throughputParts = <String>[
+      if (liveSpeedText != null) '速度 $liveSpeedText',
+      if (chat.estimatedTurnTokens > 0) '约 ${chat.estimatedTurnTokens} tok',
+      '思考 ${formatCharCount(chat.thoughtChars)}',
+      '正文 ${formatCharCount(chat.answerChars)}',
+      '重试 ${chat.retryCount} 次',
+    ];
     final displayLogs = chat.turnLogs.isNotEmpty
         ? chat.turnLogs.reversed.take(8).toList()
         : runtimeLogs.reversed
@@ -608,8 +607,8 @@ class _PlanActivitySheetBodyState
                   ListPageRow(
                     icon: AppIcons.askAi,
                     title: '实时吞吐统计',
-                    subtitle:
-                        '思考 ${formatCharCount(chat.thoughtChars)} · 正文 ${formatCharCount(chat.answerChars)} · 本轮重试 ${chat.retryCount} 次',
+                    subtitle: throughputParts.join(' · '),
+                    subtitleMaxLines: 2,
                     chevron: false,
                   ),
                   if (chat.activeRetry != null)

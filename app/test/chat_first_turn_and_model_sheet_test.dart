@@ -711,7 +711,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 50));
 
-      expect(find.text('思考与生成中…'), findsOneWidget);
+      expect(find.text('Working…'), findsOneWidget);
       expect(find.text('完全放行'), findsOneWidget);
 
       final actRect = tester.getRect(find.byType(ActivityStrip));

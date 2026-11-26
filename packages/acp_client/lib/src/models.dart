@@ -575,18 +575,85 @@ enum AcpToolKind {
   switchMode,
   other;
 
-  static AcpToolKind parse(Object? raw) => switch (raw) {
-    'read' => read,
-    'edit' => edit,
-    'delete' => delete,
-    'move' => move,
-    'search' => search,
-    'execute' => execute,
-    'think' => think,
-    'fetch' => fetch,
-    'switch_mode' => switchMode,
-    _ => other,
-  };
+  static AcpToolKind parse(Object? raw) {
+    final normalized = raw is String ? raw.trim().toLowerCase() : '';
+    return switch (normalized) {
+      'read' || 'view' || 'read_file' || 'view_file' => read,
+      'edit' || 'write' || 'patch' || 'replace' || 'file_edit' => edit,
+      'delete' || 'remove' || 'rm' => delete,
+      'move' || 'rename' || 'mv' => move,
+      'search' || 'grep' || 'glob' || 'find' => search,
+      'execute' || 'exec' || 'run' || 'bash' || 'shell' || 'terminal' || 'command' => execute,
+      'think' || 'reason' || 'thinking' => think,
+      'fetch' || 'web' || 'web_search' || 'http' => fetch,
+      'switch_mode' || 'switchmode' => switchMode,
+      _ => other,
+    };
+  }
+
+  /// Infers tool kind from explicit [rawKind], falling back to programmatic [name]
+  /// or human-readable [title] when an ACP server omits or sends `other`.
+  static AcpToolKind infer({Object? rawKind, String? name, String? title}) {
+    final parsed = parse(rawKind);
+    if (parsed != other) return parsed;
+    final probe = '${name ?? ''} ${title ?? ''}'.trim().toLowerCase();
+    if (probe.isEmpty) return other;
+    if (probe.contains('replace_file') ||
+        probe.contains('write_to_file') ||
+        probe.contains('write_file') ||
+        probe.contains('edit_file') ||
+        probe.contains('apply_patch') ||
+        probe.contains('str_replace') ||
+        probe.startsWith('edit ') ||
+        probe.startsWith('write ') ||
+        probe.startsWith('update ') ||
+        probe.startsWith('patch ') ||
+        probe.startsWith('create ')) {
+      return edit;
+    }
+    if (probe.contains('delete_file') ||
+        probe.contains('remove_file') ||
+        probe.startsWith('delete ')) {
+      return delete;
+    }
+    if (probe.contains('move_file') ||
+        probe.contains('rename_file') ||
+        probe.startsWith('move ') ||
+        probe.startsWith('rename ')) {
+      return move;
+    }
+    if (probe.contains('read_file') ||
+        probe.contains('view_file') ||
+        probe.contains('list_dir') ||
+        probe.contains('view_file_outline') ||
+        probe.startsWith('read ') ||
+        probe.startsWith('view ') ||
+        probe.startsWith('open ') ||
+        probe.startsWith('list ')) {
+      return read;
+    }
+    if (probe.contains('grep') ||
+        probe.contains('glob') ||
+        probe.contains('find_by_name') ||
+        probe.contains('codebase_search') ||
+        probe.startsWith('search ') ||
+        probe.startsWith('find ')) {
+      return search;
+    }
+    if (probe.contains('run_command') ||
+        probe.contains('bash') ||
+        probe.contains('shell') ||
+        probe.contains('terminal') ||
+        probe.startsWith('run ')) {
+      return execute;
+    }
+    if (probe.contains('read_url') ||
+        probe.contains('web_search') ||
+        probe.contains('fetch')) {
+      return fetch;
+    }
+    return other;
+  }
 }
 
 enum AcpToolStatus {
@@ -597,15 +664,24 @@ enum AcpToolStatus {
   failed,
   cancelled;
 
-  static AcpToolStatus parse(Object? raw) => switch (raw) {
-    'pending' => pending,
-    'in_progress' => inProgress,
-    'paused' => paused,
-    'completed' => completed,
-    'failed' => failed,
-    'cancelled' => cancelled,
-    _ => pending,
-  };
+  static AcpToolStatus? parseNullable(Object? raw) {
+    if (raw is! String) return null;
+    return switch (raw.trim().toLowerCase()) {
+      'pending' || 'queued' => pending,
+      'in_progress' || 'inprogress' || 'running' || 'working' || 'executing' || 'started' =>
+        inProgress,
+      'paused' || 'waiting' || 'waiting_for_approval' => paused,
+      'completed' || 'complete' || 'done' || 'success' || 'succeeded' => completed,
+      'failed' || 'fail' || 'error' || 'errored' => failed,
+      'cancelled' || 'canceled' || 'aborted' => cancelled,
+      _ => null,
+    };
+  }
+
+  static AcpToolStatus parse(Object? raw) => parseNullable(raw) ?? pending;
+
+  bool get isActive =>
+      this == pending || this == inProgress || this == paused;
 
   bool get isTerminal =>
       this == completed || this == failed || this == cancelled;
@@ -628,12 +704,29 @@ sealed class AcpToolContent {
   const AcpToolContent();
 
   static AcpToolContent? fromJson(Map<String, Object?> json) {
-    switch (_asString(json['type'])) {
-      case 'diff':
+    switch (_asString(json['type']).toLowerCase()) {
+      case 'diff' || 'file_change' || 'edit':
+        final path =
+            _asNullableString(json['path']) ??
+            _asNullableString(json['filePath']) ??
+            _asNullableString(json['file_path']) ??
+            '';
+        final oldText =
+            _asNullableString(json['oldText']) ??
+            _asNullableString(json['old_text']) ??
+            _asNullableString(json['oldString']) ??
+            _asNullableString(json['old_string']);
+        final newText =
+            _asNullableString(json['newText']) ??
+            _asNullableString(json['new_text']) ??
+            _asNullableString(json['newString']) ??
+            _asNullableString(json['new_string']) ??
+            _asNullableString(json['content']) ??
+            '';
         return AcpDiffToolContent(
-          path: _asString(json['path']),
-          oldText: _asNullableString(json['oldText']),
-          newText: _asString(json['newText']),
+          path: path,
+          oldText: oldText,
+          newText: newText,
         );
       case 'terminal':
         return AcpTerminalToolContent(terminalId: _asString(json['terminalId']));
@@ -646,6 +739,25 @@ sealed class AcpToolContent {
         }
         return null;
       default:
+        if (json['oldText'] is String ||
+            json['newText'] is String ||
+            json['old_text'] is String ||
+            json['new_text'] is String) {
+          return AcpDiffToolContent(
+            path:
+                _asNullableString(json['path']) ??
+                _asNullableString(json['filePath']) ??
+                _asNullableString(json['file_path']) ??
+                '',
+            oldText:
+                _asNullableString(json['oldText']) ??
+                _asNullableString(json['old_text']),
+            newText:
+                _asNullableString(json['newText']) ??
+                _asNullableString(json['new_text']) ??
+                '',
+          );
+        }
         if (json['text'] is String) {
           return AcpBlockToolContent(AcpTextBlock(json['text']! as String));
         }
@@ -698,11 +810,13 @@ class AcpToolCall {
         if (item != null) parsedContent.add(item);
       }
     }
+    final title = _asString(json['title']);
+    final name = _asNullableString(json['name']);
     return AcpToolCall(
       toolCallId: _asString(json['toolCallId']),
-      title: _asString(json['title']),
-      name: _asNullableString(json['name']),
-      kind: AcpToolKind.parse(json['kind']),
+      title: title,
+      name: name,
+      kind: AcpToolKind.infer(rawKind: json['kind'], name: name, title: title),
       status: AcpToolStatus.parse(json['status']),
       locations: _asList(json['locations'])
           .whereType<Map>()
@@ -724,8 +838,119 @@ class AcpToolCall {
   final Object? rawInput;
   final Object? rawOutput;
 
+  /// All file diffs associated with this tool call: prefers explicit ACP
+  /// [AcpDiffToolContent] blocks and falls back to live edit arguments in
+  /// [rawInput] so file changes appear immediately even while `in_progress`.
+  List<AcpDiffToolContent> get effectiveDiffs {
+    final explicit = [
+      for (final c in content)
+        if (c is AcpDiffToolContent) c,
+    ];
+    if (explicit.isNotEmpty) return explicit;
+    return _extractDiffsFromRawInput();
+  }
+
+  /// Whether this tool call edits, creates, moves, or deletes files.
+  bool get modifiesFiles =>
+      kind == AcpToolKind.edit ||
+      kind == AcpToolKind.delete ||
+      kind == AcpToolKind.move ||
+      effectiveDiffs.isNotEmpty;
+
+  List<AcpDiffToolContent> _extractDiffsFromRawInput() {
+    if (rawInput is! Map) return const [];
+    final input = rawInput! as Map;
+    String resolvePath() {
+      for (final key in const [
+        'TargetFile',
+        'target_file',
+        'file_path',
+        'filePath',
+        'filepath',
+        'path',
+        'AbsolutePath',
+      ]) {
+        final v = input[key];
+        if (v is String && v.trim().isNotEmpty) return v.trim();
+      }
+      if (locations.isNotEmpty && locations.first.path.trim().isNotEmpty) {
+        return locations.first.path.trim();
+      }
+      return '';
+    }
+
+    final path = resolvePath();
+
+    // Multi-chunk edits (`ReplacementChunks` / `edits`).
+    final chunks = input['ReplacementChunks'] ?? input['edits'];
+    if (chunks is List && chunks.isNotEmpty) {
+      final out = <AcpDiffToolContent>[];
+      for (final c in chunks.whereType<Map>()) {
+        final oldText =
+            _asNullableString(c['TargetContent']) ??
+            _asNullableString(c['old_string']) ??
+            _asNullableString(c['oldString']) ??
+            _asNullableString(c['old_text']) ??
+            _asNullableString(c['oldText']);
+        final newText =
+            _asNullableString(c['ReplacementContent']) ??
+            _asNullableString(c['new_string']) ??
+            _asNullableString(c['newString']) ??
+            _asNullableString(c['new_text']) ??
+            _asNullableString(c['newText']);
+        if (oldText != null || newText != null) {
+          out.add(
+            AcpDiffToolContent(
+              path: path,
+              oldText: oldText,
+              newText: newText ?? '',
+            ),
+          );
+        }
+      }
+      if (out.isNotEmpty) return out;
+    }
+
+    // Single replace edit (`TargetContent`/`ReplacementContent`, `old_string`/`new_string`, etc.).
+    final oldText =
+        _asNullableString(input['TargetContent']) ??
+        _asNullableString(input['old_string']) ??
+        _asNullableString(input['oldString']) ??
+        _asNullableString(input['old_str']) ??
+        _asNullableString(input['old_text']) ??
+        _asNullableString(input['oldText']);
+    final newText =
+        _asNullableString(input['ReplacementContent']) ??
+        _asNullableString(input['new_string']) ??
+        _asNullableString(input['newString']) ??
+        _asNullableString(input['new_str']) ??
+        _asNullableString(input['new_text']) ??
+        _asNullableString(input['newText']);
+    if (oldText != null || newText != null) {
+      return [
+        AcpDiffToolContent(
+          path: path,
+          oldText: oldText,
+          newText: newText ?? '',
+        ),
+      ];
+    }
+
+    // Whole-file write/create (`CodeContent` / `content` on edit tools).
+    if (kind == AcpToolKind.edit && path.isNotEmpty) {
+      final body =
+          _asNullableString(input['CodeContent']) ??
+          _asNullableString(input['file_text']) ??
+          _asNullableString(input['content']);
+      if (body != null && body.isNotEmpty) {
+        return [AcpDiffToolContent(path: path, oldText: null, newText: body)];
+      }
+    }
+    return const [];
+  }
+
   AcpToolCall mergePatch(Map<String, Object?> patch) {
-    final patchContent = patch['content'] is List
+    final parsedPatchContent = patch['content'] is List
         ? [
             for (final raw in _asList(patch['content']))
               if (raw is Map)
@@ -733,23 +958,59 @@ class AcpToolCall {
           ]
         : null;
 
-    return AcpToolCall(
-      toolCallId: toolCallId,
-      title: _asNullableString(patch['title']) ?? title,
-      name: _asNullableString(patch['name']) ?? name,
-      kind: patch.containsKey('kind') ? AcpToolKind.parse(patch['kind']) : kind,
-      status: patch.containsKey('status')
-          ? AcpToolStatus.parse(patch['status'])
-          : status,
-      locations: patch['locations'] is List
-          ? _asList(patch['locations'])
+    // Preserve earlier content/diffs when a status-only patch sends an empty
+    // content array or omits previously sent diff blocks.
+    List<AcpToolContent> mergedContent;
+    if (parsedPatchContent == null || parsedPatchContent.isEmpty) {
+      mergedContent = content;
+    } else {
+      final patchHasDiff = parsedPatchContent.any((c) => c is AcpDiffToolContent);
+      final existingDiffs = [
+        for (final c in content)
+          if (c is AcpDiffToolContent) c,
+      ];
+      if (!patchHasDiff && existingDiffs.isNotEmpty) {
+        mergedContent = [...existingDiffs, ...parsedPatchContent];
+      } else {
+        mergedContent = parsedPatchContent;
+      }
+    }
+
+    final patchLocations = patch['locations'] is List
+        ? _asList(patch['locations'])
               .whereType<Map>()
               .map((m) => AcpToolLocation.fromJson(Map<String, Object?>.from(m)))
               .toList()
+        : null;
+
+    final nextTitle = (_asNullableString(patch['title']) ?? '').isNotEmpty
+        ? patch['title']! as String
+        : title;
+    final nextName = (_asNullableString(patch['name']) ?? '').isNotEmpty
+        ? patch['name']! as String
+        : name;
+    final parsedStatus = AcpToolStatus.parseNullable(patch['status']);
+    final explicitKind = patch.containsKey('kind')
+        ? AcpToolKind.parse(patch['kind'])
+        : AcpToolKind.other;
+    final nextKind = explicitKind != AcpToolKind.other
+        ? explicitKind
+        : (kind != AcpToolKind.other
+              ? kind
+              : AcpToolKind.infer(name: nextName, title: nextTitle));
+
+    return AcpToolCall(
+      toolCallId: toolCallId,
+      title: nextTitle,
+      name: nextName,
+      kind: nextKind,
+      status: parsedStatus ?? status,
+      locations: (patchLocations != null && patchLocations.isNotEmpty)
+          ? patchLocations
           : locations,
-      content: patchContent ?? content,
-      rawInput: patch.containsKey('rawInput') ? patch['rawInput'] : rawInput,
-      rawOutput: patch.containsKey('rawOutput') ? patch['rawOutput'] : rawOutput,
+      content: mergedContent,
+      rawInput: patch['rawInput'] ?? rawInput,
+      rawOutput: patch['rawOutput'] ?? rawOutput,
     );
   }
 }
@@ -881,6 +1142,10 @@ class AcpUsageInfo {
   const AcpUsageInfo({
     this.usedTokens,
     this.sizeTokens,
+    this.inputTokens,
+    this.outputTokens,
+    this.thoughtTokens,
+    this.totalTokens,
     this.costAmount,
     this.costCurrency,
   });
@@ -890,6 +1155,24 @@ class AcpUsageInfo {
     return AcpUsageInfo(
       usedTokens: _asInt(json['used']),
       sizeTokens: _asInt(json['size']),
+      inputTokens:
+          _asInt(json['inputTokens']) ??
+          _asInt(json['input_tokens']) ??
+          _asInt(json['promptTokens']) ??
+          _asInt(json['prompt_tokens']),
+      outputTokens:
+          _asInt(json['outputTokens']) ??
+          _asInt(json['output_tokens']) ??
+          _asInt(json['completionTokens']) ??
+          _asInt(json['completion_tokens']),
+      thoughtTokens:
+          _asInt(json['thoughtTokens']) ??
+          _asInt(json['thought_tokens']) ??
+          _asInt(json['thinkingTokens']) ??
+          _asInt(json['thinking_tokens']) ??
+          _asInt(json['reasoningTokens']) ??
+          _asInt(json['reasoning_tokens']),
+      totalTokens: _asInt(json['totalTokens']) ?? _asInt(json['total_tokens']),
       costAmount: (cost['amount'] as num?)?.toDouble(),
       costCurrency: _asNullableString(cost['currency']),
     );
@@ -897,8 +1180,18 @@ class AcpUsageInfo {
 
   final int? usedTokens;
   final int? sizeTokens;
+  final int? inputTokens;
+  final int? outputTokens;
+  final int? thoughtTokens;
+  final int? totalTokens;
   final double? costAmount;
   final String? costCurrency;
+
+  /// Total tokens generated by the model in this turn (answer + thinking), when provided.
+  int? get generatedTokens {
+    if (outputTokens == null && thoughtTokens == null) return null;
+    return (outputTokens ?? 0) + (thoughtTokens ?? 0);
+  }
 }
 
 enum AcpStopReason {
@@ -1005,6 +1298,31 @@ sealed class AcpSessionUpdate {
         );
       case 'usage_update':
         return UsageSessionUpdate(AcpUsageInfo.fromJson(json));
+      case 'status' ||
+          'status_update' ||
+          'session_status' ||
+          'agent_status' ||
+          'progress' ||
+          'step_update' ||
+          'notice' ||
+          'activity':
+        final statusText =
+            _asNullableString(json['status']) ??
+            _asNullableString(json['state']) ??
+            _asNullableString(json['phase']) ??
+            _asNullableString(json['title']) ??
+            kind;
+        final detailText =
+            _asNullableString(json['message']) ??
+            _asNullableString(json['detail']) ??
+            _asNullableString(json['text']) ??
+            _asNullableString(json['description']);
+        return AgentStatusUpdate(
+          kind: kind,
+          status: statusText,
+          detail: detailText,
+          raw: json,
+        );
       default:
         return UnknownSessionUpdate(kind: kind, raw: json);
     }
@@ -1066,6 +1384,20 @@ final class SessionInfoUpdate extends AcpSessionUpdate {
 final class UsageSessionUpdate extends AcpSessionUpdate {
   const UsageSessionUpdate(this.usage);
   final AcpUsageInfo usage;
+}
+
+final class AgentStatusUpdate extends AcpSessionUpdate {
+  const AgentStatusUpdate({
+    required this.kind,
+    required this.status,
+    this.detail,
+    this.raw = const {},
+  });
+
+  final String kind;
+  final String status;
+  final String? detail;
+  final Map<String, Object?> raw;
 }
 
 final class UnknownSessionUpdate extends AcpSessionUpdate {

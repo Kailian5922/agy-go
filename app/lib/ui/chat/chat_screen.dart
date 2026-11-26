@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
 
+import 'package:acp_client/acp_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -107,6 +108,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           sessionId: s.sessionId,
           title: s.transcript.title,
           isBusy: s.isBusy,
+          livePhase: s.livePhase,
+          activeToolKind: s.transcript.items.isNotEmpty &&
+                  s.transcript.items.last is AssistantTranscriptItem
+              ? (s.transcript.items.last as AssistantTranscriptItem)
+                    .toolCalls
+                    .where((t) => t.status.isActive)
+                    .lastOrNull
+                    ?.kind
+              : null,
+          backgroundRunningCount: s.backgroundRunningIds.length,
           hasPlan: s.transcript.plan.isNotEmpty,
           permissions: s.pendingPermissions,
           error: s.error,
@@ -128,7 +139,20 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (chat.permissions.isNotEmpty || phoneApprovals.isNotEmpty) {
       headerStatus = const HeaderStatus(StatusTone.warn, '等你确认');
     } else if (chat.isBusy) {
-      headerStatus = const HeaderStatus(StatusTone.busy, '生成中');
+      headerStatus = HeaderStatus(
+        chat.livePhase == TurnLivePhase.retrying
+            ? StatusTone.warn
+            : StatusTone.busy,
+        headerStatusLabelForPhase(
+          chat.livePhase,
+          activeToolKind: chat.activeToolKind,
+        ),
+      );
+    } else if (chat.backgroundRunningCount > 0) {
+      headerStatus = HeaderStatus(
+        StatusTone.busy,
+        '后台 ${chat.backgroundRunningCount} 个运行中',
+      );
     } else if (connected) {
       headerStatus = HeaderStatus(StatusTone.ok, hosts.activeLabel());
     } else if (connAsync.isLoading || runtime.phase == RuntimePhase.starting) {

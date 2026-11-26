@@ -188,6 +188,7 @@ class WorkspacesState {
 /// Android PRoot/native bind synchronization.
 class WorkspacesController extends Notifier<WorkspacesState> {
   static const _maxRecent = 4;
+  static int _idSeq = 0;
   String _storageKey = '';
   int _gen = 0;
   final Map<String, WorkspacesState> _cache = {};
@@ -420,7 +421,7 @@ class WorkspacesController extends Notifier<WorkspacesState> {
         ? title!.trim()
         : _folderName(clean);
     final item = WorkspaceItem(
-      id: 'ws_${DateTime.now().microsecondsSinceEpoch}',
+      id: 'ws_${DateTime.now().microsecondsSinceEpoch}_${++_idSeq}',
       path: clean,
       title: name,
       createdAt: DateTime.now(),

@@ -189,6 +189,17 @@ class _OutputViewerPageState extends State<OutputViewerPage> {
   }
 }
 
+/// Counts logical lines in a diff side without double-counting a single trailing newline.
+int countDiffLines(String? text) {
+  if (text == null || text.isEmpty) return 0;
+  final normalized = text.replaceAll('\r\n', '\n');
+  final trimmed = normalized.endsWith('\n')
+      ? normalized.substring(0, normalized.length - 1)
+      : normalized;
+  if (trimmed.isEmpty) return 1;
+  return trimmed.split('\n').length;
+}
+
 /// A collected file diff item shown in [DiffViewerPage].
 class DiffEntry {
   const DiffEntry({
@@ -203,9 +214,8 @@ class DiffEntry {
   final String newText;
   final String? toolTitle;
 
-  int get addedLines => newText.isEmpty ? 0 : newText.split('\n').length;
-  int get removedLines =>
-      (oldText == null || oldText!.isEmpty) ? 0 : oldText!.split('\n').length;
+  int get addedLines => countDiffLines(newText);
+  int get removedLines => countDiffLines(oldText);
 
   String toUnifiedText() {
     final buf = StringBuffer()
@@ -234,25 +244,22 @@ List<DiffEntry> collectTranscriptDiffs(
   for (final item in transcript.items) {
     if (item is! AssistantTranscriptItem) continue;
     for (final tc in item.toolCalls) {
-      for (final block in tc.content) {
-        if (block case AcpDiffToolContent(
-          :final path,
-          :final oldText,
-          :final newText,
-        )) {
-          out.add(
-            DiffEntry(
-              path: displayToolPath(path, workspaceCwd: workspaceCwd),
-              oldText: oldText,
-              newText: newText,
-              toolTitle: formatToolSummary(
-                tc,
-                workspaceCwd: workspaceCwd,
-                compact: false,
-              ),
+      for (final block in tc.effectiveDiffs) {
+        final rawPath = block.path.isNotEmpty
+            ? block.path
+            : (tc.locations.isNotEmpty ? tc.locations.first.path : tc.title);
+        out.add(
+          DiffEntry(
+            path: displayToolPath(rawPath, workspaceCwd: workspaceCwd),
+            oldText: block.oldText,
+            newText: block.newText,
+            toolTitle: formatToolSummary(
+              tc,
+              workspaceCwd: workspaceCwd,
+              compact: false,
             ),
-          );
-        }
+          ),
+        );
       }
     }
   }
@@ -272,22 +279,22 @@ class DiffViewerPage extends StatefulWidget {
     String? workspaceCwd,
   }) {
     final entries = <DiffEntry>[
-      for (final block in tc.content)
-        if (block case AcpDiffToolContent(
-          :final path,
-          :final oldText,
-          :final newText,
-        ))
-          DiffEntry(
-            path: displayToolPath(path, workspaceCwd: workspaceCwd),
-            oldText: oldText,
-            newText: newText,
-            toolTitle: formatToolSummary(
-              tc,
-              workspaceCwd: workspaceCwd,
-              compact: false,
-            ),
+      for (final block in tc.effectiveDiffs)
+        DiffEntry(
+          path: displayToolPath(
+            block.path.isNotEmpty
+                ? block.path
+                : (tc.locations.isNotEmpty ? tc.locations.first.path : tc.title),
+            workspaceCwd: workspaceCwd,
           ),
+          oldText: block.oldText,
+          newText: block.newText,
+          toolTitle: formatToolSummary(
+            tc,
+            workspaceCwd: workspaceCwd,
+            compact: false,
+          ),
+        ),
     ];
     final cleanTitle = formatToolSummary(
       tc,

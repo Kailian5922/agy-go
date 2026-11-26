@@ -336,5 +336,205 @@ void main() {
       expect(received.single.method, r'$/progress');
       expect(received.single.params['message'], 'retrying attempt 2/5 in 4s');
     });
+
+    test('AcpUsageInfo parses output/thought tokens and finishTurn attaches AcpTurnMetrics', () {
+      final snake = AcpUsageInfo.fromJson({
+        'used': 4096,
+        'size': 128000,
+        'input_tokens': 1000,
+        'output_tokens': 240,
+        'thought_tokens': 160,
+        'total_tokens': 1400,
+      });
+      expect(snake.inputTokens, 1000);
+      expect(snake.outputTokens, 240);
+      expect(snake.thoughtTokens, 160);
+      expect(snake.generatedTokens, 400);
+
+      final camel = AcpUsageInfo.fromJson({
+        'completionTokens': 85,
+        'reasoningTokens': 35,
+      });
+      expect(camel.generatedTokens, 120);
+
+      var t = const ChatTranscript().appendUserPrompt('hello');
+      t = t.applyUpdate(
+        const AgentMessageChunkUpdate(AcpTextBlock('world response')),
+      );
+      const metrics = AcpTurnMetrics(
+        tokensPerSecond: 52.4,
+        tokens: 400,
+        generationSeconds: 7.63,
+        estimated: false,
+      );
+      t = t.finishTurn(AcpStopReason.endTurn, usage: snake, metrics: metrics);
+      final assistant = t.items.last as AssistantTranscriptItem;
+      expect(assistant.isStreaming, isFalse);
+      expect(assistant.metrics, isNotNull);
+      expect(assistant.metrics!.tokensPerSecond, closeTo(52.4, 0.01));
+      expect(assistant.metrics!.tokens, 400);
+      expect(assistant.metrics!.estimated, isFalse);
+    });
+
+    test('AcpToolCall preserves status/diffs across partial patches, infers kind, and extracts live rawInput diffs', () {
+      // Kind inferred from name/title when omitted by backend
+      final inferredEdit = AcpToolCall.fromJson({
+        'toolCallId': 'edit-1',
+        'name': 'replace_file_content',
+        'title': 'Edit lib/main.dart',
+        'status': 'working',
+        'rawInput': {
+          'TargetFile': '/repo/lib/main.dart',
+          'TargetContent': 'final a = 1;\n',
+          'ReplacementContent': 'final a = 2;\nfinal b = 3;\n',
+        },
+      });
+      expect(inferredEdit.kind, AcpToolKind.edit);
+      expect(inferredEdit.status, AcpToolStatus.inProgress);
+      expect(inferredEdit.modifiesFiles, isTrue);
+      expect(inferredEdit.effectiveDiffs.length, 1);
+      expect(inferredEdit.effectiveDiffs.single.path, '/repo/lib/main.dart');
+      expect(inferredEdit.effectiveDiffs.single.oldText, 'final a = 1;\n');
+      expect(
+        inferredEdit.effectiveDiffs.single.newText,
+        'final a = 2;\nfinal b = 3;\n',
+      );
+
+      // Partial patch with null status & empty content/locations must NOT reset status or wipe content!
+      final withExplicitDiff = inferredEdit.mergePatch({
+        'status': 'in_progress',
+        'locations': [
+          {'path': '/repo/lib/main.dart', 'line': 10},
+        ],
+        'content': [
+          {
+            'type': 'diff',
+            'path': '/repo/lib/main.dart',
+            'old_text': 'final a = 1;\n',
+            'new_text': 'final a = 2;\n',
+          },
+        ],
+      });
+      final afterPartialPatch = withExplicitDiff.mergePatch({
+        'status': null,
+        'content': const <Object?>[],
+        'locations': const <Object?>[],
+        'rawOutput': 'patched 1 hunk',
+      });
+      expect(afterPartialPatch.status, AcpToolStatus.inProgress);
+      expect(afterPartialPatch.locations.length, 1);
+      expect(afterPartialPatch.effectiveDiffs.length, 1);
+      expect(afterPartialPatch.rawOutput, 'patched 1 hunk');
+
+      // Multi-chunk ReplacementChunks in rawInput also yields live diffs
+      final multiChunk = AcpToolCall.fromJson({
+        'toolCallId': 'edit-2',
+        'name': 'multi_replace_file_content',
+        'title': 'Multi-edit app.dart',
+        'status': 'in_progress',
+        'rawInput': {
+          'TargetFile': '/repo/lib/app.dart',
+          'ReplacementChunks': [
+            {
+              'TargetContent': 'old1',
+              'ReplacementContent': 'new1',
+            },
+            {
+              'TargetContent': 'old2',
+              'ReplacementContent': 'new2',
+            },
+          ],
+        },
+      });
+      expect(multiChunk.effectiveDiffs.length, 2);
+      expect(multiChunk.effectiveDiffs[0].newText, 'new1');
+      expect(multiChunk.effectiveDiffs[1].newText, 'new2');
+    });
+
+    test('AgentStatusUpdate parses status updates and ChatTranscript keeps interleaved timeline chronological', () {
+      final statusUpdate = AcpSessionUpdate.fromJson({
+        'sessionUpdate': 'status_update',
+        'phase': 'analyzing',
+        'message': 'Scanning workspace files',
+      });
+      expect(statusUpdate, isA<AgentStatusUpdate>());
+      final s = statusUpdate as AgentStatusUpdate;
+      expect(s.status, 'analyzing');
+      expect(s.detail, 'Scanning workspace files');
+
+      var t = const ChatTranscript().appendUserPrompt('帮我修改文件');
+      t = t.applyUpdate(
+        const AgentThoughtChunkUpdate(AcpTextBlock('大思考第一段：先看代码结构')),
+      );
+      t = t.applyUpdate(
+        const ToolCallCreatedUpdate(
+          AcpToolCall(
+            toolCallId: 'tc-read',
+            title: '读取 lib/main.dart',
+            kind: AcpToolKind.read,
+            status: AcpToolStatus.inProgress,
+          ),
+        ),
+      );
+      t = t.applyUpdate(
+        const ToolCallPatchedUpdate(
+          toolCallId: 'tc-read',
+          patch: {'status': 'completed'},
+        ),
+      );
+      t = t.applyUpdate(
+        const AgentThoughtChunkUpdate(AcpTextBlock('小思考：定位到需要修改的位置')),
+      );
+      t = t.applyUpdate(
+        const ToolCallCreatedUpdate(
+          AcpToolCall(
+            toolCallId: 'tc-edit',
+            title: '编辑 lib/main.dart',
+            kind: AcpToolKind.edit,
+            status: AcpToolStatus.inProgress,
+          ),
+        ),
+      );
+      t = t.applyUpdate(
+        const AgentMessageChunkUpdate(AcpTextBlock('已经帮你完成了修改。')),
+      );
+
+      final assistant = t.items.last as AssistantTranscriptItem;
+      expect(assistant.timeline.length, 5);
+      expect(assistant.timeline[0], isA<ThoughtTimelineEntry>());
+      expect(
+        (assistant.timeline[0] as ThoughtTimelineEntry).text,
+        '大思考第一段：先看代码结构',
+      );
+      expect(assistant.timeline[1], isA<ToolTimelineEntry>());
+      expect((assistant.timeline[1] as ToolTimelineEntry).toolCallId, 'tc-read');
+      expect(assistant.timeline[2], isA<ThoughtTimelineEntry>());
+      expect(
+        (assistant.timeline[2] as ThoughtTimelineEntry).text,
+        '小思考：定位到需要修改的位置',
+      );
+      expect(assistant.timeline[3], isA<ToolTimelineEntry>());
+      expect((assistant.timeline[3] as ToolTimelineEntry).toolCallId, 'tc-edit');
+      expect(assistant.timeline[4], isA<MessageTimelineEntry>());
+      expect(
+        (assistant.timeline[4] as MessageTimelineEntry).text,
+        '已经帮你完成了修改。',
+      );
+
+      // Directly constructed items without explicit timeline still synthesize cleanly.
+      final legacy = AssistantTranscriptItem(
+        id: 'legacy-1',
+        timestamp: DateTime(2026),
+        thought: 'legacy thought',
+        text: 'legacy reply',
+        toolCalls: const [
+          AcpToolCall(toolCallId: 'tc-old', title: 'read'),
+        ],
+      );
+      expect(legacy.effectiveTimeline.length, 3);
+      expect(legacy.effectiveTimeline[0], isA<ThoughtTimelineEntry>());
+      expect(legacy.effectiveTimeline[1], isA<ToolTimelineEntry>());
+      expect(legacy.effectiveTimeline[2], isA<MessageTimelineEntry>());
+    });
   });
 }

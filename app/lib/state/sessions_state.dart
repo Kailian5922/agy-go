@@ -139,8 +139,12 @@ class SessionsController extends Notifier<SessionsState> {
     );
 
     final conn = ref.watch(activeConnectionProvider.select((a) => a.value));
-    if (conn == null) return const SessionsState();
-    unawaited(_refreshFor(conn));
+    if (conn == null || !conn.initResult.capabilities.canListSessions) {
+      return const SessionsState();
+    }
+    Future<void>.microtask(() {
+      if (ref.mounted) unawaited(_refreshFor(conn));
+    });
     return const SessionsState(loading: true);
   }
 
@@ -447,7 +451,7 @@ class SessionsController extends Notifier<SessionsState> {
     }
   }
 
-  void registerCreatedSession(AcpSessionInfo info) {
+  void registerCreatedSession(AcpSessionInfo info, {bool select = true}) {
     final normCwd = info.cwd.trim().isEmpty
         ? ''
         : normalizeWorkspacePath(info.cwd);
@@ -481,7 +485,7 @@ class SessionsController extends Notifier<SessionsState> {
 
     state = state.copyWith(
       sessions: next,
-      currentSessionId: info.sessionId,
+      currentSessionId: select ? info.sessionId : state.currentSessionId,
       deletedIds: state.deletedIds.where((id) => id != info.sessionId).toList(),
       sessionWorkspaces: nextWorkspaces,
       collapsedWorkspaceKeys: nextCollapsed,

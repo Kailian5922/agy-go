@@ -18,6 +18,44 @@ final class UserTranscriptItem extends TranscriptItem {
   final String text;
 }
 
+/// Per-turn generation throughput metrics attached to a completed assistant reply.
+class AcpTurnMetrics {
+  const AcpTurnMetrics({
+    required this.tokensPerSecond,
+    required this.tokens,
+    required this.generationSeconds,
+    this.estimated = true,
+  });
+
+  final double tokensPerSecond;
+  final int tokens;
+  final double generationSeconds;
+  final bool estimated;
+}
+
+/// Chronological segment inside a single assistant turn so interleaved
+/// thinking ("大思考" / "小思考"), tool calls ("小编辑"), and messages stay
+/// in their true real-time order instead of flattening all thoughts to the top.
+sealed class AssistantTimelineEntry {
+  const AssistantTimelineEntry({required this.id});
+  final String id;
+}
+
+final class ThoughtTimelineEntry extends AssistantTimelineEntry {
+  const ThoughtTimelineEntry({required super.id, required this.text});
+  final String text;
+}
+
+final class ToolTimelineEntry extends AssistantTimelineEntry {
+  const ToolTimelineEntry({required super.id, required this.toolCallId});
+  final String toolCallId;
+}
+
+final class MessageTimelineEntry extends AssistantTimelineEntry {
+  const MessageTimelineEntry({required super.id, required this.text});
+  final String text;
+}
+
 final class AssistantTranscriptItem extends TranscriptItem {
   const AssistantTranscriptItem({
     required super.id,
@@ -25,33 +63,62 @@ final class AssistantTranscriptItem extends TranscriptItem {
     this.thought = '',
     this.text = '',
     this.toolCalls = const [],
+    this.timeline = const [],
     this.isStreaming = false,
     this.stopReason,
+    this.metrics,
   });
 
   final String thought;
   final String text;
   final List<AcpToolCall> toolCalls;
+  final List<AssistantTimelineEntry> timeline;
   final bool isStreaming;
   final AcpStopReason? stopReason;
+  final AcpTurnMetrics? metrics;
 
   bool get hasActivity =>
       thought.isNotEmpty || toolCalls.isNotEmpty;
+
+  /// Chronological entries for rendering: uses the recorded [timeline] when
+  /// present, or synthesizes an equivalent sequence for directly-constructed items.
+  List<AssistantTimelineEntry> get effectiveTimeline {
+    if (timeline.isNotEmpty) return timeline;
+    return [
+      if (thought.isNotEmpty)
+        ThoughtTimelineEntry(id: '${id}_thought', text: thought),
+      for (final tc in toolCalls)
+        ToolTimelineEntry(id: '${id}_tc_${tc.toolCallId}', toolCallId: tc.toolCallId),
+      if (text.isNotEmpty)
+        MessageTimelineEntry(id: '${id}_msg', text: text),
+    ];
+  }
+
+  AcpToolCall? toolCallById(String toolCallId) {
+    for (final tc in toolCalls) {
+      if (tc.toolCallId == toolCallId) return tc;
+    }
+    return null;
+  }
 
   AssistantTranscriptItem copyWith({
     String? thought,
     String? text,
     List<AcpToolCall>? toolCalls,
+    List<AssistantTimelineEntry>? timeline,
     bool? isStreaming,
     AcpStopReason? stopReason,
+    AcpTurnMetrics? metrics,
   }) => AssistantTranscriptItem(
     id: id,
     timestamp: timestamp,
     thought: thought ?? this.thought,
     text: text ?? this.text,
     toolCalls: toolCalls ?? this.toolCalls,
+    timeline: timeline ?? this.timeline,
     isStreaming: isStreaming ?? this.isStreaming,
     stopReason: stopReason ?? this.stopReason,
+    metrics: metrics ?? this.metrics,
   );
 }
 
@@ -125,46 +192,53 @@ class ChatTranscript {
 
   /// Marks all streaming assistant items finished when `session/prompt` resolves,
   /// errors, or is cancelled by the user.
-  ChatTranscript finishTurn(AcpStopReason stopReason, {AcpUsageInfo? usage}) {
-    final terminalToolStatus = stopReason == AcpStopReason.cancelled
-        ? AcpToolStatus.cancelled
-        : stopReason == AcpStopReason.unknown
-        ? AcpToolStatus.failed
-        : null;
+  ChatTranscript finishTurn(
+    AcpStopReason stopReason, {
+    AcpUsageInfo? usage,
+    AcpTurnMetrics? metrics,
+  }) {
+    final terminalToolStatus = switch (stopReason) {
+      AcpStopReason.cancelled => AcpToolStatus.cancelled,
+      AcpStopReason.unknown => AcpToolStatus.failed,
+      _ => AcpToolStatus.completed,
+    };
 
     var changed = false;
     final nextItems = [
-      for (final item in items)
-        if (item is AssistantTranscriptItem && item.isStreaming)
+      for (var i = 0; i < items.length; i++)
+        if (items[i] is AssistantTranscriptItem &&
+            (items[i] as AssistantTranscriptItem).isStreaming)
           () {
+            final item = items[i] as AssistantTranscriptItem;
             changed = true;
-            final nextTools = terminalToolStatus == null
-                ? item.toolCalls
-                : [
-                    for (final tc in item.toolCalls)
-                      if (!tc.status.isTerminal)
-                        AcpToolCall(
-                          toolCallId: tc.toolCallId,
-                          title: tc.title,
-                          name: tc.name,
-                          kind: tc.kind,
-                          status: terminalToolStatus,
-                          locations: tc.locations,
-                          content: tc.content,
-                          rawInput: tc.rawInput,
-                          rawOutput: tc.rawOutput,
-                        )
-                      else
-                        tc,
-                  ];
+            final nextTools = [
+              for (final tc in item.toolCalls)
+                if (!tc.status.isTerminal)
+                  AcpToolCall(
+                    toolCallId: tc.toolCallId,
+                    title: tc.title,
+                    name: tc.name,
+                    kind: tc.kind,
+                    status: terminalToolStatus,
+                    locations: tc.locations,
+                    content: tc.content,
+                    rawInput: tc.rawInput,
+                    rawOutput: tc.rawOutput,
+                  )
+                else
+                  tc,
+            ];
             return item.copyWith(
               isStreaming: false,
               stopReason: stopReason,
               toolCalls: nextTools,
+              metrics: i == items.length - 1
+                  ? (metrics ?? item.metrics)
+                  : item.metrics,
             );
           }()
         else
-          item,
+          items[i],
     ];
     return copyWith(
       items: changed ? nextItems : items,
@@ -177,10 +251,31 @@ class ChatTranscript {
     var changed = false;
     final nextItems = [
       for (final item in items)
-        if (item is AssistantTranscriptItem && item.isStreaming)
+        if (item is AssistantTranscriptItem &&
+            (item.isStreaming ||
+                item.toolCalls.any((tc) => !tc.status.isTerminal)))
           () {
             changed = true;
-            return item.copyWith(isStreaming: false);
+            return item.copyWith(
+              isStreaming: false,
+              toolCalls: [
+                for (final tc in item.toolCalls)
+                  if (!tc.status.isTerminal)
+                    AcpToolCall(
+                      toolCallId: tc.toolCallId,
+                      title: tc.title,
+                      name: tc.name,
+                      kind: tc.kind,
+                      status: AcpToolStatus.completed,
+                      locations: tc.locations,
+                      content: tc.content,
+                      rawInput: tc.rawInput,
+                      rawOutput: tc.rawOutput,
+                    )
+                  else
+                    tc,
+              ],
+            );
           }()
         else
           item,
@@ -226,18 +321,66 @@ class ChatTranscript {
       case AgentMessageChunkUpdate(:final content):
         final chunkText = _blockText(content);
         if (chunkText.isEmpty) return this;
-        return _updateLastAssistant(
-          ts,
-          (a) => a.copyWith(text: '${a.text}$chunkText'),
-        );
+        return _updateLastAssistant(ts, (a) {
+          final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
+          if (nextTimeline.isNotEmpty &&
+              nextTimeline.last is MessageTimelineEntry) {
+            final prev = nextTimeline.last as MessageTimelineEntry;
+            nextTimeline[nextTimeline.length - 1] = MessageTimelineEntry(
+              id: prev.id,
+              text: '${prev.text}$chunkText',
+            );
+          } else {
+            nextTimeline.add(
+              MessageTimelineEntry(
+                id: '${a.id}_msg_${nextTimeline.length}',
+                text: chunkText,
+              ),
+            );
+          }
+          final sep =
+              a.text.isNotEmpty &&
+                  a.timeline.isNotEmpty &&
+                  a.timeline.last is! MessageTimelineEntry
+              ? '\n\n'
+              : '';
+          return a.copyWith(
+            text: '${a.text}$sep$chunkText',
+            timeline: nextTimeline,
+          );
+        });
 
       case AgentThoughtChunkUpdate(:final content):
         final chunkText = _blockText(content);
         if (chunkText.isEmpty) return this;
-        return _updateLastAssistant(
-          ts,
-          (a) => a.copyWith(thought: '${a.thought}$chunkText'),
-        );
+        return _updateLastAssistant(ts, (a) {
+          final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
+          final startingNewThoughtBlock =
+              nextTimeline.isNotEmpty &&
+              nextTimeline.last is! ThoughtTimelineEntry;
+          if (nextTimeline.isNotEmpty &&
+              nextTimeline.last is ThoughtTimelineEntry) {
+            final prev = nextTimeline.last as ThoughtTimelineEntry;
+            nextTimeline[nextTimeline.length - 1] = ThoughtTimelineEntry(
+              id: prev.id,
+              text: '${prev.text}$chunkText',
+            );
+          } else {
+            nextTimeline.add(
+              ThoughtTimelineEntry(
+                id: '${a.id}_th_${nextTimeline.length}',
+                text: chunkText,
+              ),
+            );
+          }
+          final sep = a.thought.isNotEmpty && startingNewThoughtBlock
+              ? '\n\n'
+              : '';
+          return a.copyWith(
+            thought: '${a.thought}$sep$chunkText',
+            timeline: nextTimeline,
+          );
+        });
 
       case ToolCallCreatedUpdate(:final toolCall):
         return _updateLastAssistant(ts, (a) {
@@ -250,7 +393,19 @@ class ChatTranscript {
           } else {
             nextTools.add(toolCall);
           }
-          return a.copyWith(toolCalls: nextTools);
+          final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
+          final hasEntry = nextTimeline.any(
+            (e) => e is ToolTimelineEntry && e.toolCallId == toolCall.toolCallId,
+          );
+          if (!hasEntry) {
+            nextTimeline.add(
+              ToolTimelineEntry(
+                id: '${a.id}_tc_${toolCall.toolCallId}',
+                toolCallId: toolCall.toolCallId,
+              ),
+            );
+          }
+          return a.copyWith(toolCalls: nextTools, timeline: nextTimeline);
         });
 
       case ToolCallPatchedUpdate(:final toolCallId, :final patch):
@@ -264,7 +419,19 @@ class ChatTranscript {
           } else {
             nextTools.add(AcpToolCall.fromJson(patch));
           }
-          return a.copyWith(toolCalls: nextTools);
+          final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
+          final hasEntry = nextTimeline.any(
+            (e) => e is ToolTimelineEntry && e.toolCallId == toolCallId,
+          );
+          if (!hasEntry) {
+            nextTimeline.add(
+              ToolTimelineEntry(
+                id: '${a.id}_tc_$toolCallId',
+                toolCallId: toolCallId,
+              ),
+            );
+          }
+          return a.copyWith(toolCalls: nextTools, timeline: nextTimeline);
         });
 
       case PlanUpdate(:final entries):
@@ -291,6 +458,7 @@ class ChatTranscript {
       case UsageSessionUpdate(:final usage):
         return copyWith(usage: usage);
 
+      case AgentStatusUpdate():
       case UnknownSessionUpdate():
         return this;
     }

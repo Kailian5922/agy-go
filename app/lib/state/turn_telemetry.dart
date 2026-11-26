@@ -3,9 +3,10 @@ import 'package:acp_client/acp_client.dart';
 /// Current active stage within an in-flight turn.
 enum TurnLivePhase {
   waiting,
+  analyzing,
   thinking,
+  working,
   responding,
-  toolRunning,
   retrying,
 }
 
@@ -123,6 +124,140 @@ String formatCharCount(int chars) {
   return '${(chars / 1000).toStringAsFixed(1)}k字';
 }
 
+/// Estimates LLM token count for mixed CJK + ASCII/code text.
+/// CJK characters average ~0.68 tokens/char and ASCII/Latin/code averages ~0.25 tokens/char.
+double estimateTokenCount(String text) {
+  if (text.isEmpty) return 0;
+  var cjk = 0;
+  var other = 0;
+  for (var i = 0; i < text.length; i++) {
+    final code = text.codeUnitAt(i);
+    if ((code >= 0x4E00 && code <= 0x9FFF) ||
+        (code >= 0x3400 && code <= 0x4DBF) ||
+        (code >= 0x3000 && code <= 0x303F) ||
+        (code >= 0x3040 && code <= 0x30FF) ||
+        (code >= 0xAC00 && code <= 0xD7AF) ||
+        (code >= 0xFF00 && code <= 0xFFEF)) {
+      cjk++;
+    } else {
+      other++;
+    }
+  }
+  return cjk * 0.68 + other * 0.25;
+}
+
+/// Formats tokens/second cleanly (`48.6 tok/s`, `124 tok/s`, or compact `49 tok/s`).
+String formatTokensPerSecond(double tps, {bool compact = false}) {
+  if (tps <= 0 || !tps.isFinite) return '';
+  if (compact || tps >= 100) {
+    return '${tps.round()} tok/s';
+  }
+  return '${tps.toStringAsFixed(1)} tok/s';
+}
+
+/// Tracks real-time sliding-window and active-generation tokens/second for a turn,
+/// excluding long tool-execution or network-stall pauses so generation speed stays accurate.
+class TurnSpeedTracker {
+  static const _window = Duration(seconds: 5);
+  static const _maxActiveGapSec = 1.5;
+
+  final List<({DateTime time, double tokens})> _samples = [];
+  double _totalEstimatedTokens = 0;
+  double _activeSeconds = 0;
+  DateTime? _firstChunkAt;
+  DateTime? _lastChunkAt;
+
+  double get totalEstimatedTokens => _totalEstimatedTokens;
+
+  void reset() {
+    _samples.clear();
+    _totalEstimatedTokens = 0;
+    _activeSeconds = 0;
+    _firstChunkAt = null;
+    _lastChunkAt = null;
+  }
+
+  /// Records a streamed thought or answer text chunk.
+  void recordChunk(String text, DateTime now) {
+    final est = estimateTokenCount(text);
+    if (est <= 0) return;
+
+    if (_firstChunkAt == null) {
+      _firstChunkAt = now;
+    } else if (_lastChunkAt != null) {
+      final gapSec = now.difference(_lastChunkAt!).inMilliseconds / 1000.0;
+      if (gapSec > 0) {
+        _activeSeconds += gapSec > _maxActiveGapSec ? _maxActiveGapSec : gapSec;
+      }
+    }
+    _lastChunkAt = now;
+    _totalEstimatedTokens += est;
+
+    _samples.add((time: now, tokens: est));
+    final cutoff = now.subtract(_window);
+    while (_samples.length > 1 && _samples.first.time.isBefore(cutoff)) {
+      _samples.removeAt(0);
+    }
+  }
+
+  /// Returns live tokens/second while chunks are actively flowing (null if idle/silent >= 8s).
+  double? liveTokensPerSecond(DateTime now) {
+    if (_lastChunkAt == null || _totalEstimatedTokens < 1.0) return null;
+    if (now.difference(_lastChunkAt!).inMilliseconds >= 8000) return null;
+
+    final cutoff = now.subtract(_window);
+    var windowTokens = 0.0;
+    DateTime? earliest;
+    var count = 0;
+    for (final s in _samples) {
+      if (s.time.isBefore(cutoff)) continue;
+      earliest ??= s.time;
+      windowTokens += s.tokens;
+      count++;
+    }
+
+    if (count >= 2 && earliest != null) {
+      final spanSec = _lastChunkAt!.difference(earliest).inMilliseconds / 1000.0;
+      if (spanSec >= 0.35) {
+        return (windowTokens / spanSec).clamp(0.1, 9999.0);
+      }
+    }
+
+    if (_activeSeconds >= 0.25) {
+      return (_totalEstimatedTokens / _activeSeconds).clamp(0.1, 9999.0);
+    }
+    if (_firstChunkAt != null) {
+      final elapsedSec = now.difference(_firstChunkAt!).inMilliseconds / 1000.0;
+      if (elapsedSec >= 0.3) {
+        return (_totalEstimatedTokens / elapsedSec).clamp(0.1, 9999.0);
+      }
+    }
+    return null;
+  }
+
+  /// Computes final per-turn speed metrics, preferring server-reported generated tokens when available.
+  AcpTurnMetrics? finalize({AcpUsageInfo? usage, DateTime? now}) {
+    final serverTokens = usage?.generatedTokens;
+    final hasServer = serverTokens != null && serverTokens > 0;
+    final tokens = hasServer ? serverTokens : _totalEstimatedTokens.round();
+    if (tokens <= 0) return null;
+
+    var genSec = _activeSeconds;
+    if (genSec < 0.2 && _firstChunkAt != null) {
+      final end = _lastChunkAt ?? now ?? DateTime.now();
+      genSec = end.difference(_firstChunkAt!).inMilliseconds / 1000.0;
+    }
+    if (genSec < 0.2) genSec = 0.2;
+
+    return AcpTurnMetrics(
+      tokensPerSecond: (tokens / genSec).clamp(0.1, 9999.0),
+      tokens: tokens,
+      generationSeconds: genSec,
+      estimated: !hasServer,
+    );
+  }
+}
+
 /// Extracts the latest [maxLines] non-empty lines from long reasoning text so
 /// collapsed live thinking previews always move forward instead of freezing on line 1.
 String tailPreviewLines(String raw, {int maxLines = 3}) {
@@ -149,7 +284,35 @@ String latestThoughtHeadline(String raw) {
   return lines.last;
 }
 
-/// Evaluates whether the active turn is streaming smoothly, retrying, waiting, or potentially stalled.
+/// Maps an active ACP tool kind to the semantic live phase shown in the UI
+/// (`分析中` for read/search/fetch, `思考中` for think, `Working / 编辑中` for edits & commands).
+TurnLivePhase phaseForToolKind(AcpToolKind kind) => switch (kind) {
+  AcpToolKind.read || AcpToolKind.search || AcpToolKind.fetch =>
+    TurnLivePhase.analyzing,
+  AcpToolKind.think => TurnLivePhase.thinking,
+  _ => TurnLivePhase.working,
+};
+
+/// Concise top-header status text reflecting real-time agent activity.
+String headerStatusLabelForPhase(
+  TurnLivePhase phase, {
+  AcpToolKind? activeToolKind,
+}) => switch (phase) {
+  TurnLivePhase.retrying => '重试中',
+  TurnLivePhase.analyzing => '分析中',
+  TurnLivePhase.thinking => '思考中',
+  TurnLivePhase.working =>
+    (activeToolKind == AcpToolKind.edit ||
+            activeToolKind == AcpToolKind.delete ||
+            activeToolKind == AcpToolKind.move)
+        ? '编辑中'
+        : 'Working',
+  TurnLivePhase.responding => '生成中',
+  TurnLivePhase.waiting => 'Working',
+};
+
+/// Evaluates whether the active turn is analyzing, working, thinking, streaming,
+/// retrying, waiting, or potentially stalled.
 TurnHealth deriveTurnHealth({
   required DateTime? startedAt,
   required DateTime? lastActivityAt,
@@ -161,6 +324,9 @@ TurnHealth deriveTurnHealth({
   required String? activeToolLabel,
   required String? activePlanLabel,
   required DateTime now,
+  AcpToolKind? activeToolKind,
+  String? liveStatusLabel,
+  double? liveTokensPerSecond,
   bool inline = true,
 }) {
   final anchor = lastActivityAt ?? startedAt ?? now;
@@ -179,21 +345,27 @@ TurnHealth deriveTurnHealth({
     );
   }
 
-  // 2. Active tool call running locally/remotely.
+  // 2. Active tool call running locally/remotely — clearly distinguish 分析中 / 编辑中 / Working.
   if (hasActiveTool) {
     final label = (activeToolLabel != null && activeToolLabel.isNotEmpty)
         ? activeToolLabel
-        : '正在执行工具…';
+        : '执行工具';
+    final prefix = switch (activeToolKind) {
+      AcpToolKind.read || AcpToolKind.search || AcpToolKind.fetch => '分析中',
+      AcpToolKind.edit || AcpToolKind.delete || AcpToolKind.move => '编辑中',
+      AcpToolKind.think => '思考中',
+      _ => 'Working',
+    };
     final warnLongTool = silentSecs >= 180;
     return TurnHealth(
       tone: warnLongTool ? TurnHealthTone.suspectedStall : TurnHealthTone.active,
       silentSeconds: silentSecs,
       pillText: warnLongTool
           ? '工具已等待 ${formatCompactDuration(silentSecs)}'
-          : label,
+          : '$prefix · $label',
       detailHeadline: warnLongTool
           ? '工具运行已超过 ${formatChineseDuration(silentSecs)} 未返回结果'
-          : '正在执行：$label',
+          : '$prefix：$label',
       bannerText: warnLongTool
           ? '工具「$label」已 ${formatChineseDuration(silentSecs)} 无输出，可点右侧停止或查看日志'
           : null,
@@ -217,52 +389,113 @@ TurnHealth deriveTurnHealth({
   if (silentSecs >= 15) {
     final compact = formatCompactDuration(silentSecs);
     final full = formatChineseDuration(silentSecs);
-    final waitLabel = phase == TurnLivePhase.thinking || thoughtChars > 0
-        ? '深度思考中 · $compact前更新'
-        : '等待响应 · $compact';
+    final (waitLabel, waitHeadline) = switch (phase) {
+      TurnLivePhase.analyzing => (
+        '分析中 · $compact前更新',
+        '正在分析工具结果与上下文（距上次输出 $full）',
+      ),
+      TurnLivePhase.working => (
+        'Working · $compact前更新',
+        '正在执行任务步骤（距上次输出 $full）',
+      ),
+      TurnLivePhase.thinking => (
+        '深度思考中 · $compact前更新',
+        '深度思考中（距上次输出 $full）',
+      ),
+      _ when thoughtChars > 0 => (
+        '深度思考中 · $compact前更新',
+        '深度思考中（距上次输出 $full）',
+      ),
+      _ => (
+        'Working · $compact',
+        '等待模型返回下一步内容（已等待 $full）',
+      ),
+    };
     return TurnHealth(
       tone: TurnHealthTone.waiting,
       silentSeconds: silentSecs,
       pillText: waitLabel,
-      detailHeadline: phase == TurnLivePhase.thinking || thoughtChars > 0
-          ? '深度思考中（距上次输出 $full）'
-          : '等待模型返回下一步内容（已等待 $full）',
+      detailHeadline: waitHeadline,
     );
   }
 
-  // 5. Actively streaming (< 15s since last chunk/event).
-  if (activePlanLabel != null && activePlanLabel.isNotEmpty && phase == TurnLivePhase.waiting) {
+  final hasSpeed = liveTokensPerSecond != null && liveTokensPerSecond > 0;
+  final compactSpeed = hasSpeed
+      ? formatTokensPerSecond(liveTokensPerSecond, compact: true)
+      : null;
+  final fullSpeed = hasSpeed
+      ? formatTokensPerSecond(liveTokensPerSecond)
+      : null;
+  final cleanStatus = liveStatusLabel?.trim();
+  final hasStatus = cleanStatus != null && cleanStatus.isNotEmpty;
+
+  // 5. Actively running (< 15s since last chunk/event).
+  if (phase == TurnLivePhase.responding) {
+    final pillSuffix = compactSpeed != null
+        ? ' · $compactSpeed'
+        : (answerChars > 0 ? ' · ${formatCharCount(answerChars)}' : '…');
+    final speedPart = fullSpeed != null ? '$fullSpeed · ' : '';
     return TurnHealth(
       tone: TurnHealthTone.active,
       silentSeconds: silentSecs,
-      pillText: activePlanLabel,
-      detailHeadline: '执行计划：$activePlanLabel',
+      pillText: '生成中$pillSuffix',
+      detailHeadline: '正在实时输出回复（$speedPart已 ${formatCharCount(answerChars)}）',
     );
   }
-  if (phase == TurnLivePhase.responding) {
-    final suffix = answerChars > 0 ? ' · ${formatCharCount(answerChars)}' : '…';
+  if (phase == TurnLivePhase.analyzing) {
+    final detail = hasStatus ? cleanStatus : null;
     return TurnHealth(
       tone: TurnHealthTone.active,
       silentSeconds: silentSecs,
-      pillText: '生成中$suffix',
-      detailHeadline: '正在实时流式输出回复（已 ${formatCharCount(answerChars)}）',
+      pillText: detail != null ? '分析中 · $detail' : '分析中…',
+      detailHeadline: detail != null
+          ? '正在分析：$detail'
+          : '正在分析文件与工具返回结果…',
+    );
+  }
+  if (phase == TurnLivePhase.working) {
+    final detail = hasStatus
+        ? cleanStatus
+        : (activePlanLabel != null && activePlanLabel.isNotEmpty
+              ? activePlanLabel
+              : null);
+    return TurnHealth(
+      tone: TurnHealthTone.active,
+      silentSeconds: silentSecs,
+      pillText: detail != null ? 'Working · $detail' : 'Working…',
+      detailHeadline: detail != null ? 'Working：$detail' : '正在推进当前任务…',
     );
   }
   if (phase == TurnLivePhase.thinking || thoughtChars > 0) {
-    final suffix = thoughtChars > 0 ? ' · ${formatCharCount(thoughtChars)}' : '…';
+    final pillSuffix = compactSpeed != null
+        ? ' · $compactSpeed'
+        : (thoughtChars > 0 ? ' · ${formatCharCount(thoughtChars)}' : '…');
+    final speedPart = fullSpeed != null ? '$fullSpeed · ' : '';
     return TurnHealth(
       tone: TurnHealthTone.active,
       silentSeconds: silentSecs,
-      pillText: '思考中$suffix',
-      detailHeadline: '正在实时思考（已 ${formatCharCount(thoughtChars)}，${formatLastSignalAge(silentSecs)}更新）',
+      pillText: '思考中$pillSuffix',
+      detailHeadline:
+          '正在实时思考（$speedPart已 ${formatCharCount(thoughtChars)}，${formatLastSignalAge(silentSecs)}更新）',
+    );
+  }
+
+  if (activePlanLabel != null && activePlanLabel.isNotEmpty) {
+    return TurnHealth(
+      tone: TurnHealthTone.active,
+      silentSeconds: silentSecs,
+      pillText: 'Working · $activePlanLabel',
+      detailHeadline: '执行计划：$activePlanLabel',
     );
   }
 
   return TurnHealth(
     tone: TurnHealthTone.active,
     silentSeconds: silentSecs,
-    pillText: inline ? '思考与生成中…' : 'Antigravity 思考与生成中…',
-    detailHeadline: '已发送请求，等待模型开始响应…',
+    pillText: hasStatus
+        ? cleanStatus
+        : (inline ? 'Working…' : 'Antigravity Working…'),
+    detailHeadline: hasStatus ? cleanStatus : '已发送请求，模型正在接入与分析…',
   );
 }
 
@@ -402,6 +635,18 @@ TurnRetryInfo? parseRetryFromLogLine(String rawLine, {DateTime? now}) {
   );
 }
 
+/// Parses retry/network status info from an [AgentStatusUpdate] payload.
+TurnRetryInfo? parseRetryFromStatusUpdate(
+  AgentStatusUpdate update, {
+  DateTime? now,
+}) {
+  return _parseRetryFromMap(
+    kindOrMethod: update.kind,
+    payload: update.raw,
+    now: now,
+  );
+}
+
 /// Parses retry/network status info from an unknown ACP `session/update` payload.
 TurnRetryInfo? parseRetryFromUnknownUpdate(
   UnknownSessionUpdate update, {
@@ -424,6 +669,101 @@ TurnRetryInfo? parseRetryFromRawNotification(
     payload: notif.params,
     now: now,
   );
+}
+
+/// Extracts real-time semantic phase (`分析中` / `Working` / `思考中` / `生成中`)
+/// and optional concise label from an ACP status/progress notification payload.
+({TurnLivePhase phase, String? label})? parseLiveStatusFromMap({
+  required String kindOrMethod,
+  required Map<String, Object?> payload,
+}) {
+  final pieces = <String>[];
+  String? bestLabel;
+  void consider(Object? raw, {bool preferLabel = false}) {
+    if (raw is! String) return;
+    final clean = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (clean.isEmpty) return;
+    pieces.add(clean);
+    if (preferLabel && bestLabel == null) {
+      bestLabel = clean.length > 48 ? '${clean.substring(0, 48)}…' : clean;
+    }
+  }
+
+  consider(payload['message'], preferLabel: true);
+  consider(payload['detail'], preferLabel: true);
+  consider(payload['title'], preferLabel: true);
+  consider(payload['status']);
+  consider(payload['state']);
+  consider(payload['phase']);
+  consider(payload['text']);
+
+  final nestedVal = payload['value'];
+  if (nestedVal is Map) {
+    consider(nestedVal['message'], preferLabel: true);
+    consider(nestedVal['title'], preferLabel: true);
+    consider(nestedVal['status']);
+    consider(nestedVal['kind']);
+  }
+
+  if (pieces.isEmpty) return null;
+  final probe = '$kindOrMethod ${pieces.join(' ')}'.toLowerCase();
+
+  final TurnLivePhase phase;
+  if (probe.contains('analyz') ||
+      probe.contains('analys') ||
+      probe.contains('inspect') ||
+      probe.contains('review') ||
+      probe.contains('search') ||
+      probe.contains('reading') ||
+      probe.contains('scan') ||
+      probe.contains('分析') ||
+      probe.contains('阅读') ||
+      probe.contains('检索')) {
+    phase = TurnLivePhase.analyzing;
+  } else if (probe.contains('think') ||
+      probe.contains('reason') ||
+      probe.contains('plan') ||
+      probe.contains('思考') ||
+      probe.contains('规划')) {
+    phase = TurnLivePhase.thinking;
+  } else if (probe.contains('respond') ||
+      probe.contains('generat') ||
+      probe.contains('writ') ||
+      probe.contains('answer') ||
+      probe.contains('生成') ||
+      probe.contains('回复')) {
+    phase = TurnLivePhase.responding;
+  } else if (probe.contains('work') ||
+      probe.contains('edit') ||
+      probe.contains('patch') ||
+      probe.contains('run') ||
+      probe.contains('exec') ||
+      probe.contains('tool') ||
+      probe.contains('task') ||
+      probe.contains('busy') ||
+      probe.contains('progress') ||
+      probe.contains('in_progress') ||
+      probe.contains('编辑') ||
+      probe.contains('执行') ||
+      probe.contains('修改')) {
+    phase = TurnLivePhase.working;
+  } else {
+    return null;
+  }
+
+  // Avoid echoing generic raw enum words ("working", "analyzing") as redundant detail.
+  final labelLower = bestLabel?.toLowerCase() ?? '';
+  final redundant =
+      labelLower == 'working' ||
+      labelLower == 'analyzing' ||
+      labelLower == 'thinking' ||
+      labelLower == 'running' ||
+      labelLower == 'in_progress' ||
+      labelLower == 'busy' ||
+      labelLower == 'status' ||
+      labelLower == 'progress';
+
+  return (phase: phase, label: redundant ? null : bestLabel);
 }
 
 TurnRetryInfo? _parseRetryFromMap({

@@ -892,7 +892,9 @@ class _SessionList extends ConsumerWidget {
 
     final colors = DshColors.of(context);
     final theme = Theme.of(context);
-    final chatBusy = ref.watch(chatProvider.select((c) => c.isBusy));
+    final runningSessionIds = ref.watch(
+      chatProvider.select((c) => c.runningSessionIds),
+    );
 
     return RefreshIndicator(
       onRefresh: () => ref.read(sessionsProvider.notifier).refresh(),
@@ -984,10 +986,9 @@ class _SessionList extends ConsumerWidget {
                                       pinned: sessionsState.isPinned(
                                         s.sessionId,
                                       ),
-                                      busy:
-                                          chatBusy &&
-                                          s.sessionId ==
-                                              sessionsState.currentSessionId,
+                                      busy: runningSessionIds.contains(
+                                        s.sessionId,
+                                      ),
                                       onTap: () {
                                         if (selecting) {
                                           onToggleSelect(s.sessionId);

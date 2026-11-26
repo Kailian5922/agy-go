@@ -132,7 +132,9 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
     ref.watch(liveActivityBridgeProvider);
     final settings = ref.watch(settingsProvider);
     final foreground = ref.watch(appForegroundProvider);
-    final chatBusy = ref.watch(chatProvider.select((c) => c.isBusy));
+    final chatBusy = ref.watch(
+      chatProvider.select((c) => c.hasAnyRunningSession),
+    );
     final reduced = WidgetsBinding
         .instance
         .platformDispatcher

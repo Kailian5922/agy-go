@@ -13,18 +13,24 @@ import 'diff_and_output_page.dart';
 import 'tool_format.dart';
 
 /// 32dp single-line tool call row mirroring DSH Go's ToolRow, expanding
-/// smoothly into a JetBrains Mono code/diff well.
+/// smoothly into a JetBrains Mono code/diff well, with optional live inline
+/// diff preview for real-time file edits.
 class ToolCallCard extends StatefulWidget {
   const ToolCallCard({
     super.key,
     required this.toolCall,
     this.workspaceCwd,
+    this.showLiveDiffPreview = false,
   });
 
   final AcpToolCall toolCall;
 
   /// Active session / workspace working directory used to shorten file paths.
   final String? workspaceCwd;
+
+  /// When true, renders a compact 4-line inline diff snippet underneath the
+  /// row while the edit is live so file changes are immediately visible.
+  final bool showLiveDiffPreview;
 
   @override
   State<ToolCallCard> createState() => _ToolCallCardState();
@@ -67,22 +73,31 @@ class _ToolCallCardState extends State<ToolCallCard> {
     _ => 6,
   };
 
-  (int added, int removed)? _diffCounts(AcpToolCall tc) {
+  (int added, int removed)? _diffCounts(List<AcpDiffToolContent> diffs) {
+    if (diffs.isEmpty) return null;
     var added = 0;
     var removed = 0;
-    var found = false;
-    for (final c in tc.content) {
-      if (c case AcpDiffToolContent(:final oldText, :final newText)) {
-        found = true;
-        if (oldText != null && oldText.isNotEmpty) {
-          removed += oldText.split('\n').length;
-        }
-        if (newText.isNotEmpty) {
-          added += newText.split('\n').length;
-        }
+    for (final c in diffs) {
+      removed += countDiffLines(c.oldText);
+      added += countDiffLines(c.newText);
+    }
+    return (added, removed);
+  }
+
+  String? _rawOutputText(AcpToolCall tc) {
+    final raw = tc.rawOutput;
+    if (raw == null) return null;
+    if (raw is String) {
+      final trimmed = raw.trim();
+      return trimmed.isEmpty ? null : trimmed;
+    }
+    if (raw is Map) {
+      for (final key in const ['output', 'stdout', 'text', 'message', 'error']) {
+        final v = raw[key];
+        if (v is String && v.trim().isNotEmpty) return v.trim();
       }
     }
-    return found ? (added, removed) : null;
+    return null;
   }
 
   @override
@@ -94,42 +109,56 @@ class _ToolCallCardState extends State<ToolCallCard> {
     final dark = theme.brightness == Brightness.dark;
     final cwd = widget.workspaceCwd;
 
-    final hasDetails = tc.content.isNotEmpty || tc.locations.isNotEmpty;
+    final diffs = tc.effectiveDiffs;
+    final nonDiffBlocks = [
+      for (final b in tc.content)
+        if (b is! AcpDiffToolContent) b,
+    ];
+    final fallbackOutput = nonDiffBlocks.isEmpty ? _rawOutputText(tc) : null;
+    final hasDetails =
+        diffs.isNotEmpty ||
+        nonDiffBlocks.isNotEmpty ||
+        tc.locations.isNotEmpty ||
+        fallbackOutput != null;
     final summary = formatToolSummary(tc, workspaceCwd: cwd);
     final tintIdx = _tint(tc.kind);
     final badgeBg = dsh.identity[tintIdx % dsh.identity.length];
     final badgeFg = dsh.onIdentity[tintIdx % dsh.onIdentity.length];
-    final counts = _diffCounts(tc);
+    final counts = _diffCounts(diffs);
     final failed = tc.status == AcpToolStatus.failed;
     final summaryColor = failed ? dsh.danger : dsh.textTertiary;
 
-    // Mirror DSH Go's ToolRow: completed normal rows stay visually quiet on the
-    // right edge (giving maximum room to file paths), while running / failed /
-    // diff-bearing rows display concise trailing indicators.
+    Widget buildDiffCountsBadge((int, int) c) => Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (c.$1 > 0 || c.$2 == 0)
+          Text('+${c.$1}', style: AppType.monoLabel(color: dsh.success)),
+        if (c.$1 > 0 && c.$2 > 0) const SizedBox(width: 4),
+        if (c.$2 > 0)
+          Text('−${c.$2}', style: AppType.monoLabel(color: dsh.danger)),
+      ],
+    );
+
+    // Show live +N/-M counts immediately (even while in_progress!) alongside
+    // the spinner so real-time file changes are unmistakable at a glance.
     final Widget? statusWidget = switch (tc.status) {
-      AcpToolStatus.inProgress => SizedBox.square(
-        dimension: 13,
-        child: CircularProgressIndicator(
-          strokeWidth: 1.7,
-          color: scheme.primary,
-        ),
-      ),
-      AcpToolStatus.completed when counts != null => Row(
+      AcpToolStatus.inProgress => Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (counts.$1 > 0)
-            Text(
-              '+${counts.$1}',
-              style: AppType.monoLabel(color: dsh.success),
+          if (counts != null) ...[
+            buildDiffCountsBadge(counts),
+            const SizedBox(width: 6),
+          ],
+          SizedBox.square(
+            dimension: 13,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.7,
+              color: scheme.primary,
             ),
-          if (counts.$1 > 0 && counts.$2 > 0) const SizedBox(width: 4),
-          if (counts.$2 > 0)
-            Text(
-              '−${counts.$2}',
-              style: AppType.monoLabel(color: dsh.danger),
-            ),
+          ),
         ],
       ),
+      AcpToolStatus.completed when counts != null => buildDiffCountsBadge(counts),
       AcpToolStatus.completed => null,
       AcpToolStatus.failed => Icon(
         AppIcons.failed,
@@ -141,7 +170,16 @@ class _ToolCallCardState extends State<ToolCallCard> {
         size: 14,
         color: dsh.textTertiary,
       ),
-      _ => Icon(AppIcons.waiting, size: 14, color: dsh.warning),
+      _ => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (counts != null) ...[
+            buildDiffCountsBadge(counts),
+            const SizedBox(width: 6),
+          ],
+          Icon(AppIcons.waiting, size: 14, color: dsh.warning),
+        ],
+      ),
     };
 
     final isMonoSummary =
@@ -151,6 +189,9 @@ class _ToolCallCardState extends State<ToolCallCard> {
         tc.kind == AcpToolKind.delete ||
         tc.kind == AcpToolKind.move ||
         tc.kind == AcpToolKind.search;
+
+    final showCompactLiveDiff =
+        widget.showLiveDiffPreview && !_expanded && diffs.isNotEmpty;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -232,6 +273,26 @@ class _ToolCallCardState extends State<ToolCallCard> {
             ),
           ),
         ),
+        if (showCompactLiveDiff)
+          Padding(
+            padding: const EdgeInsets.only(left: 30, top: 2, bottom: 6),
+            child: GestureDetector(
+              onTap: () => setState(() => _expanded = true),
+              child: DecoratedBox(
+                decoration: ShapeDecoration(
+                  color: dsh.codeWellBg,
+                  shape: AppShape.outlined(dsh.codeWellBorder, radius: 10),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 6,
+                  ),
+                  child: _CompactLiveDiffPreview(diff: diffs.first),
+                ),
+              ),
+            ),
+          ),
         ExpandReveal(
           open: _expanded && hasDetails,
           child: Padding(
@@ -289,18 +350,17 @@ class _ToolCallCardState extends State<ToolCallCard> {
                           );
                         },
                       ),
-                    for (final block in tc.content)
+                    for (final diff in diffs)
+                      _DiffWell(
+                        path: displayToolPath(
+                          diff.path.isNotEmpty ? diff.path : summary,
+                          workspaceCwd: cwd,
+                        ),
+                        oldText: diff.oldText,
+                        newText: diff.newText,
+                      ),
+                    for (final block in nonDiffBlocks)
                       switch (block) {
-                        AcpDiffToolContent(
-                          :final path,
-                          :final oldText,
-                          :final newText,
-                        ) =>
-                          _DiffWell(
-                            path: displayToolPath(path, workspaceCwd: cwd),
-                            oldText: oldText,
-                            newText: newText,
-                          ),
                         AcpBlockToolContent(:final block) => Padding(
                           padding: const EdgeInsets.only(top: 4),
                           child: SelectableText(
@@ -317,9 +377,19 @@ class _ToolCallCardState extends State<ToolCallCard> {
                             style: AppType.monoLabel(color: dsh.textTertiary),
                           ),
                         ),
+                        AcpDiffToolContent() => const SizedBox.shrink(),
                       },
+                    if (fallbackOutput != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: SelectableText(
+                          fallbackOutput,
+                          style: AppType.monoSmall(color: dsh.codeWellFg),
+                        ),
+                      ),
                     if (counts != null ||
-                        tc.content.any((b) => b is AcpBlockToolContent)) ...[
+                        nonDiffBlocks.any((b) => b is AcpBlockToolContent) ||
+                        fallbackOutput != null) ...[
                       const SizedBox(height: 8),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.end,
@@ -344,7 +414,8 @@ class _ToolCallCardState extends State<ToolCallCard> {
                                 ),
                               ),
                             ),
-                          if (tc.content.any((b) => b is AcpBlockToolContent))
+                          if (nonDiffBlocks.any((b) => b is AcpBlockToolContent) ||
+                              fallbackOutput != null)
                             TextButton.icon(
                               style: TextButton.styleFrom(
                                 visualDensity: VisualDensity.compact,
@@ -356,12 +427,16 @@ class _ToolCallCardState extends State<ToolCallCard> {
                               icon: const Icon(AppIcons.openExternal, size: 14),
                               label: const Text('完整输出'),
                               onPressed: () {
-                                final fullText = tc.content
-                                    .whereType<AcpBlockToolContent>()
-                                    .map((b) => b.block is AcpTextBlock
-                                        ? (b.block as AcpTextBlock).text
-                                        : b.block.toString())
-                                    .join('\n\n');
+                                final fullText = nonDiffBlocks.isNotEmpty
+                                    ? nonDiffBlocks
+                                          .whereType<AcpBlockToolContent>()
+                                          .map(
+                                            (b) => b.block is AcpTextBlock
+                                                ? (b.block as AcpTextBlock).text
+                                                : b.block.toString(),
+                                          )
+                                          .join('\n\n')
+                                    : (fallbackOutput ?? '');
                                 Navigator.of(context).push(
                                   MaterialPageRoute<void>(
                                     builder: (_) => OutputViewerPage(
@@ -391,6 +466,72 @@ class _ToolCallCardState extends State<ToolCallCard> {
             ),
           ),
         ),
+      ],
+    );
+  }
+}
+
+class _CompactLiveDiffPreview extends StatelessWidget {
+  const _CompactLiveDiffPreview({required this.diff});
+
+  final AcpDiffToolContent diff;
+
+  @override
+  Widget build(BuildContext context) {
+    final dsh = DshColors.of(context);
+    final oldLines = (diff.oldText ?? '').isEmpty
+        ? const <String>[]
+        : diff.oldText!.split('\n');
+    final newLines = diff.newText.isEmpty
+        ? const <String>[]
+        : diff.newText.split('\n');
+    final delPreview = oldLines.take(2).toList();
+    final addPreview = newLines.take(3).toList();
+    final remaining =
+        (oldLines.length - delPreview.length) +
+        (newLines.length - addPreview.length);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final line in delPreview)
+          Container(
+            color: dsh.diffDelBg,
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+            child: Text(
+              '- $line',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppType.monoSmall(
+                color: dsh.diffDelFg,
+              ).copyWith(fontSize: 11),
+            ),
+          ),
+        for (final line in addPreview)
+          Container(
+            color: dsh.diffAddBg,
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+            child: Text(
+              '+ $line',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppType.monoSmall(
+                color: dsh.diffAddFg,
+              ).copyWith(fontSize: 11),
+            ),
+          ),
+        if (remaining > 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: Text(
+              '… 还有 $remaining 行改动，点击展开',
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: dsh.textTertiary,
+                fontSize: 10.5,
+              ),
+            ),
+          ),
       ],
     );
   }

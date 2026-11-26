@@ -322,13 +322,7 @@ LiveActivityPayload? deriveLiveActivity({
         ? chat.transcript.items.last
         : null;
     final activeTool = lastItem is AssistantTranscriptItem
-        ? lastItem.toolCalls
-              .where(
-                (t) =>
-                    t.status == AcpToolStatus.inProgress ||
-                    t.status == AcpToolStatus.pending,
-              )
-              .lastOrNull
+        ? lastItem.toolCalls.where((t) => t.status.isActive).lastOrNull
         : null;
     final activePlan = chat.transcript.plan
         .where((p) => p.status.toLowerCase() == 'in_progress')
@@ -346,9 +340,23 @@ LiveActivityPayload? deriveLiveActivity({
       );
       final verb = _toolVerb(activeTool.kind);
       line = summary.isNotEmpty ? '$verb · $summary' : '正在$verb…';
-      chip = '干活中';
+      chip = switch (activeTool.kind) {
+        AcpToolKind.read || AcpToolKind.search || AcpToolKind.fetch => '分析中',
+        AcpToolKind.edit || AcpToolKind.delete || AcpToolKind.move => '编辑中',
+        _ => '干活中',
+      };
     } else if (activePlan != null && activePlan.content.trim().isNotEmpty) {
       line = activePlan.content.trim();
+      chip = '干活中';
+    } else if (chat.livePhase == TurnLivePhase.analyzing) {
+      line = chat.liveStatusLabel?.trim().isNotEmpty == true
+          ? '分析中 · ${chat.liveStatusLabel!.trim()}'
+          : '正在分析文件与工具结果…';
+      chip = '分析中';
+    } else if (chat.livePhase == TurnLivePhase.working) {
+      line = chat.liveStatusLabel?.trim().isNotEmpty == true
+          ? 'Working · ${chat.liveStatusLabel!.trim()}'
+          : 'Working…';
       chip = '干活中';
     } else {
       line = '正在思考与生成…';
@@ -364,6 +372,20 @@ LiveActivityPayload? deriveLiveActivity({
       accentColor: accentColor,
       sinceMs: chat.turnStartedAt?.millisecondsSinceEpoch,
       sessionId: chat.sessionId,
+    );
+  }
+
+  // 3b. Parked background conversation(s) still running while user browses another chat/workspace.
+  if (chat.backgroundRunningIds.isNotEmpty) {
+    final count = chat.backgroundRunningIds.length;
+    return LiveActivityPayload(
+      kind: LiveActivityKind.running,
+      title: 'AGY Go',
+      text: count == 1 ? '后台有 1 个对话正在运行…' : '后台有 $count 个对话正在运行…',
+      chip: '后台运行',
+      publicText: 'AGY Go 后台对话运行中',
+      accentColor: accentColor,
+      sessionId: chat.backgroundRunningIds.first,
     );
   }
 
@@ -437,7 +459,7 @@ final liveActivityBridgeProvider = Provider<void>((ref) {
 
   // Detect running -> idle transitions while backgrounded to flash 「完成」 / 「出错」.
   ref.listen<({bool isBusy, String? error})>(
-    chatProvider.select((c) => (isBusy: c.isBusy, error: c.error)),
+    chatProvider.select((c) => (isBusy: c.hasAnyRunningSession, error: c.error)),
     (prev, next) {
       if (prev == null) return;
       if (!prev.isBusy && next.isBusy) {
