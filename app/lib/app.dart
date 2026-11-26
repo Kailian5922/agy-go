@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'state/live_activity_state.dart';
 import 'state/settings_state.dart';
 import 'ui/common/side_insets.dart';
 import 'ui/shell/home_shell.dart';
@@ -45,6 +46,15 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final fg = state == AppLifecycleState.resumed;
+    ref.read(appForegroundProvider.notifier).setForeground(fg);
+    if (fg) {
+      ref.invalidate(liveActivityStatusProvider);
+    }
   }
 
   @override
@@ -100,6 +110,7 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
 
   @override
   Widget build(BuildContext context) {
+    ref.watch(liveActivityBridgeProvider);
     final settings = ref.watch(settingsProvider);
     final reduced = WidgetsBinding
         .instance

@@ -21,6 +21,9 @@ import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.github.kailian5922.agy_go.MainActivity
+import io.github.kailian5922.agy_go.R
+import io.github.kailian5922.agy_go.notify.LiveActivity
+import io.github.kailian5922.agy_go.notify.LiveContent
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -34,6 +37,7 @@ import kotlin.concurrent.thread
  * - Status bar immersion toggle
  * - Native gallery / camera / document pickers (for multimodal ACP attachments & wallpaper)
  * - Background turn-finished & approval-needed local notifications
+ * - Android 16+ Live Activity / capsule notifications (HyperOS / ColorOS / MagicOS / Pixel)
  * - FileProvider PNG/text sharing (for Conversation Share Cards & Markdown/JSON exports)
  * - Self-update APK download + optional SHA-256 verification + PackageInstaller handoff
  * - Chinese ROM background keep-alive diagnostics & direct vendor settings intents
@@ -53,6 +57,7 @@ class SystemPlugin(
 
     init {
         channel.setMethodCallHandler(this)
+        LiveActivity.refresh(context)
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -71,6 +76,46 @@ class SystemPlugin(
                 val urgent = call.argument<Boolean>("urgent") ?: false
                 postTurnNotification(title, body, urgent)
                 result.success(true)
+            }
+            "updateLiveActivity" -> {
+                val enabled = call.argument<Boolean>("enabled") != false
+                val content = LiveContent.fromMap(call.argument<Map<*, *>>("activity"))
+                LiveActivity.update(context, enabled = enabled, content = content)
+                result.success(true)
+            }
+            "getLiveActivityStatus" -> {
+                thread(name = "agy-live-status", isDaemon = true) {
+                    val status = runCatching { LiveActivity.status(context) }.getOrNull()
+                    mainHandler.post { result.success(status) }
+                }
+            }
+            "openLiveActivitySettings" -> {
+                val opened = startFirstIntent(
+                    listOf(
+                        LiveActivity.settingsIntent(context),
+                        LiveActivity.appNotificationSettingsIntent(context),
+                        appDetailsIntent(),
+                    ),
+                )
+                result.success(opened)
+            }
+            "openNotificationSettings" -> {
+                val opened = startFirstIntent(
+                    listOf(
+                        LiveActivity.appNotificationSettingsIntent(context),
+                        appDetailsIntent(),
+                    ),
+                )
+                result.success(opened)
+            }
+            "previewLiveActivity" -> {
+                val accentColor = (call.argument<Any>("accentColor") as? Number)?.toInt()
+                thread(name = "agy-live-preview", isDaemon = true) {
+                    val posted = runCatching {
+                        LiveActivity.postPreview(context, accentColor)
+                    }.getOrDefault(false)
+                    mainHandler.post { result.success(posted) }
+                }
             }
             "getDeviceInfo" -> {
                 val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -363,7 +408,7 @@ class SystemPlugin(
             val notif = builder
                 .setContentTitle(title)
                 .setContentText(body)
-                .setSmallIcon(context.applicationInfo.icon)
+                .setSmallIcon(R.drawable.ic_stat_agy)
                 .setAutoCancel(true)
                 .setContentIntent(pi)
                 .build()
@@ -466,12 +511,28 @@ class SystemPlugin(
         return false
     }
 
+    private fun appDetailsIntent(): Intent = Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.parse("package:${context.packageName}"),
+    )
+
+    private fun startFirstIntent(intents: List<Intent>): Boolean {
+        val host = activityProvider()
+        for (intent in intents) {
+            val ok = runCatching {
+                if (host != null) {
+                    host.startActivity(intent)
+                } else {
+                    context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+            }.isSuccess
+            if (ok) return true
+        }
+        return false
+    }
+
     private fun openAppDetails() {
-        val intent = Intent(
-            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-            Uri.parse("package:${context.packageName}"),
-        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
-        context.startActivity(intent)
+        startFirstIntent(listOf(appDetailsIntent()))
     }
 
     fun dispose() {

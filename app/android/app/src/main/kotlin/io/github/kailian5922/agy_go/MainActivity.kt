@@ -10,6 +10,7 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.github.kailian5922.agy_go.notify.LiveActivity
 import io.github.kailian5922.agy_go.pet.PetPlugin
 import io.github.kailian5922.agy_go.phone.PhonePlugin
 import io.github.kailian5922.agy_go.runtime.RuntimePlugin
@@ -35,8 +36,9 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         applyStatusBarVisibility()
-        // Re-check MANAGE_EXTERNAL_STORAGE / legacy storage grants after returning from system Settings.
+        // Re-check MANAGE_EXTERNAL_STORAGE / legacy storage grants & live activity promotion after returning from Settings.
         runtimePlugin?.onResume()
+        LiveActivity.refresh(applicationContext)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

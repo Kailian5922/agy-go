@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../runtime/runtime_models.dart';
 import '../../state/agy_config_state.dart';
 import '../../state/hosts_state.dart';
+import '../../state/live_activity_state.dart';
 import '../../state/pet_state.dart';
 import '../../state/phone_state.dart';
 import '../../state/runtime_state.dart';
@@ -276,9 +277,11 @@ class SettingsScreen extends ConsumerWidget {
             SettingsTile(
               icon: AppIcons.notifications,
               tint: SettingsHues.general,
-              title: '后台通知提醒',
+              title: '通知与胶囊提醒',
               value: Text(
-                settings.notifyOnApproval || settings.notifyOnTurnComplete
+                settings.liveActivityEnabled ||
+                        settings.notifyOnApproval ||
+                        settings.notifyOnTurnComplete
                     ? '已开启'
                     : '已关闭',
               ),
@@ -976,23 +979,150 @@ class PermissionPage extends ConsumerWidget {
   }
 }
 
-/// Notification settings for background turn completion & urgent permission prompts.
-class NotificationSettingsPage extends ConsumerWidget {
+/// Notification & Android 16+ Live Activity (capsule / island) settings, mirroring DSH Go.
+class NotificationSettingsPage extends ConsumerStatefulWidget {
   const NotificationSettingsPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<NotificationSettingsPage> createState() =>
+      _NotificationSettingsPageState();
+}
+
+class _NotificationSettingsPageState
+    extends ConsumerState<NotificationSettingsPage> {
+  AppLifecycleListener? _lifecycle;
+
+  @override
+  void initState() {
+    super.initState();
+    _lifecycle = AppLifecycleListener(
+      onResume: () {
+        ref.invalidate(liveActivityStatusProvider);
+        unawaited(
+          ref
+              .read(liveActivityChannelProvider)
+              .push(ref.read(liveActivityPushProvider)),
+        );
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _lifecycle?.dispose();
+    super.dispose();
+  }
+
+  Future<void> _openLiveSettings() async {
+    final opened = await ref
+        .read(liveActivityChannelProvider)
+        .openLiveSettings();
+    if (mounted && !opened) {
+      showBriefNotice(context, '无法直接打开系统页面，请在系统设置中手动开启实时活动');
+    }
+  }
+
+  Future<void> _openNotificationSettings() async {
+    final opened = await ref
+        .read(liveActivityChannelProvider)
+        .openNotificationSettings();
+    if (mounted && !opened) {
+      showBriefNotice(context, '无法打开系统通知设置');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
     final notifier = ref.read(settingsProvider.notifier);
+    final liveAsync = ref.watch(liveActivityStatusProvider);
+    final live = liveAsync.value;
+    final dsh = DshColors.of(context);
+    final theme = Theme.of(context);
+
+    // Avoid flashing "不支持" before the system answers or on non-Android test hosts.
+    final liveSupported = live == null || live.unknown || live.supported;
+    final liveBlocked =
+        settings.liveActivityEnabled &&
+        live != null &&
+        !live.unknown &&
+        live.needsPromotionPermission;
+    final systemNotifOff =
+        live != null && !live.unknown && live.blockedBySystemNotifications;
 
     return AppPage.list(
-      title: '后台通知提醒',
-      subtitle: const Text('切出应用或锁屏运行长任务时及时提醒你回来查看或审批'),
+      title: '通知与胶囊提醒',
+      subtitle: const Text('实时活动胶囊、灵动岛 / 流体云进度展示，以及后台完成与审批提醒'),
       children: [
+        if (systemNotifOff)
+          _NotificationBanner(
+            icon: AppIcons.notificationsOff,
+            title: '系统通知已被关闭',
+            text: '请先在系统设置中允许 AGY Go 发送通知，否则后台提醒与状态栏胶囊均无法显示。',
+            actionLabel: '前往开启',
+            onAction: () => unawaited(_openNotificationSettings()),
+          ),
+        if (liveBlocked)
+          _NotificationBanner(
+            icon: AppIcons.notificationsOff,
+            title: '系统没有允许实时活动',
+            text: '请在系统设置里为 AGY Go 打开「实时活动」（部分机型叫「在流体云中显示」或「超级岛通知」）。',
+            actionLabel: '前往开启',
+            onAction: () => unawaited(_openLiveSettings()),
+          ),
         SettingsSection(
-          title: '通知事件',
+          title: '实时活动（胶囊通知）',
           footer: const Text(
-            '仅在 AGY Go 退到后台或锁屏时推送 Android 系统通知；在前台聊天时不会打扰。',
+            'Android 16 实时活动（Live Updates）：小米 HyperOS 3.1+（超级岛）、OPPO / 一加 ColorOS 16（流体云）、荣耀 MagicOS 10（灵动胶囊）和 Pixel 会自动放进状态栏胶囊或灵动岛；vivo 原子岛和三星 Now Bar 目前仅对厂商合作应用开放。',
+          ),
+          children: [
+            SettingsSwitchTile(
+              icon: AppIcons.providers,
+              tint: SettingsHues.ai,
+              title: '显示实时活动',
+              subtitle: liveSupported
+                  ? '干活、等你确认、操作手机时，显示在状态栏胶囊和锁屏上；支持的手机会自动进入灵动岛'
+                  : '这台手机的系统还不支持 Android 16 实时活动（当前 API ${live.sdk}）',
+              value: settings.liveActivityEnabled && liveSupported,
+              onChanged: liveSupported
+                  ? (v) => unawaited(notifier.setLiveActivityEnabled(v))
+                  : null,
+            ),
+            if (live != null && !live.unknown)
+              SettingsTile(
+                icon: live.allowed
+                    ? AppIcons.done
+                    : live.supported
+                    ? AppIcons.warning
+                    : AppIcons.info,
+                tint: live.allowed ? 4 : SettingsHues.general,
+                title: '系统胶囊状态',
+                value: Text(
+                  live.allowed
+                      ? (live.xiaomiFocus
+                            ? '已就绪（HyperOS 焦点）'
+                            : '已就绪（Live Updates）')
+                      : live.supported
+                      ? '待系统开启'
+                      : '暂不支持',
+                  style: TextStyle(
+                    color: live.allowed
+                        ? dsh.success
+                        : live.supported
+                        ? dsh.warning
+                        : dsh.textTertiary,
+                  ),
+                ),
+                onTap: live.supported
+                    ? () => unawaited(_openLiveSettings())
+                    : null,
+              ),
+          ],
+        ),
+        SettingsSection(
+          title: '后台通知事件',
+          footer: const Text(
+            '仅在 AGY Go 退到后台或锁屏时推送常规系统提醒；前台聊天时不会打扰。',
           ),
           children: [
             SettingsSwitchTile(
@@ -1014,13 +1144,55 @@ class NotificationSettingsPage extends ConsumerWidget {
           ],
         ),
         SettingsSection(
-          title: '调试',
+          title: '系统设置与调试',
+          footer: Text(
+            '锁屏隐藏敏感内容时，系统只显示脱敏摘要（如「AGY Go 正在干活」），不会暴露对话标题与内容。',
+            style: theme.textTheme.bodySmall?.copyWith(color: dsh.textTertiary),
+          ),
           children: [
+            SettingsTile(
+              icon: AppIcons.configure,
+              tint: SettingsHues.general,
+              title: '打开系统实时活动设置',
+              subtitle: '在系统设置中放行「实时活动 / 流体云 / 超级岛」开关',
+              onTap: () => unawaited(_openLiveSettings()),
+            ),
             SettingsTile(
               icon: AppIcons.notifications,
               tint: SettingsHues.general,
-              title: '发送测试通知',
-              subtitle: '检查系统通知栏与权限是否正常放行',
+              title: '打开系统通知设置',
+              subtitle: '管理通知渠道、横幅和锁屏显示方式',
+              onTap: () => unawaited(_openNotificationSettings()),
+            ),
+            SettingsTile(
+              icon: AppIcons.providers,
+              tint: SettingsHues.ai,
+              title: '发送测试胶囊通知（10 秒）',
+              subtitle: '立即在状态栏胶囊 / 灵动岛预览实时活动效果',
+              onTap: () async {
+                final accentColor =
+                    AppAccent.fromId(settings.accent).seed.toARGB32();
+                final ok = await ref
+                    .read(liveActivityChannelProvider)
+                    .preview(accentColor: accentColor);
+                if (!context.mounted) return;
+                if (ok) {
+                  showBriefNotice(context, '已发送 10 秒实时活动胶囊，可下拉或切回桌面查看');
+                } else {
+                  showBriefNotice(
+                    context,
+                    live?.supported == true
+                        ? '系统尚未允许实时活动，请先点击上方「前往开启」'
+                        : '当前系统不支持实时活动胶囊（需 Android 16+ 或 HyperOS 焦点权限）',
+                  );
+                }
+              },
+            ),
+            SettingsTile(
+              icon: AppIcons.notificationsOn,
+              tint: SettingsHues.general,
+              title: '发送测试普通通知',
+              subtitle: '检查常规通知栏提醒与权限是否正常放行',
               onTap: () async {
                 await ref.read(systemToolsProvider.notifier).notifyTurnEvent(
                   title: 'AGY Go 通知测试',
@@ -1033,6 +1205,85 @@ class NotificationSettingsPage extends ConsumerWidget {
           ],
         ),
       ],
+    );
+  }
+}
+
+class _NotificationBanner extends StatelessWidget {
+  const _NotificationBanner({
+    required this.icon,
+    required this.title,
+    required this.text,
+    required this.actionLabel,
+    required this.onAction,
+  });
+
+  final IconData icon;
+  final String title;
+  final String text;
+  final String actionLabel;
+  final VoidCallback onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final dsh = DshColors.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+      child: GlassSurface(
+        tier: GlassTier.card,
+        borderRadius: AppShape.radiusLg,
+        style: DshSurfaces.of(context).card.copyWith(
+          hairline: dsh.warning.withValues(alpha: 0.45),
+        ),
+        padding: const EdgeInsets.fromLTRB(14, 12, 12, 10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Icon(icon, size: 18, color: dsh.warning),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      color: theme.colorScheme.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    text,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: dsh.textTertiary,
+                      height: 1.45,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      style: TextButton.styleFrom(
+                        foregroundColor: dsh.warning,
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                      ),
+                      iconAlignment: IconAlignment.end,
+                      icon: const Icon(AppIcons.forward, size: 15),
+                      onPressed: onAction,
+                      label: Text(actionLabel),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
