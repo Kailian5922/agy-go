@@ -118,16 +118,39 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
             SettingsSection(
               title: '上下文与用量',
               children: [
-                if (usage.usedTokens != null)
-                  InfoRow(label: '已用 Token', value: '${usage.usedTokens}'),
-                if (usage.sizeTokens != null)
-                  InfoRow(label: '上下文上限', value: '${usage.sizeTokens}'),
+                if (usage.effectiveUsedTokens != null)
+                  InfoRow(
+                    label: '已用上下文',
+                    value: usage.sizeTokens != null && usage.sizeTokens! > 0
+                        ? '${formatContextTokens(usage.effectiveUsedTokens!)} / ${formatContextTokens(usage.sizeTokens!)} (${formatContextPercent((usage.effectiveUsedTokens! / usage.sizeTokens!).clamp(0.0, 1.0))})'
+                        : formatContextTokens(usage.effectiveUsedTokens!),
+                    mono: true,
+                  ),
+                if (usage.inputTokens != null)
+                  InfoRow(
+                    label: '本轮输入',
+                    value: formatContextTokens(usage.inputTokens!),
+                    mono: true,
+                  ),
+                if (usage.outputTokens != null)
+                  InfoRow(
+                    label: '本轮输出',
+                    value: formatContextTokens(usage.outputTokens!),
+                    mono: true,
+                  ),
+                if (usage.thoughtTokens != null && usage.thoughtTokens! > 0)
+                  InfoRow(
+                    label: '本轮思考',
+                    value: formatContextTokens(usage.thoughtTokens!),
+                    mono: true,
+                  ),
                 if (usage.costAmount != null)
                   InfoRow(
                     label: '估算费用',
                     value:
                         '${usage.costAmount!.toStringAsFixed(4)} ${usage.costCurrency ?? ''}'
                             .trim(),
+                    mono: true,
                   ),
               ],
             ),

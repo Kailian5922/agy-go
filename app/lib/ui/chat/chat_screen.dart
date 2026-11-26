@@ -19,7 +19,6 @@ import '../../state/workspaces_state.dart';
 import '../common/status_dot.dart';
 import '../engine/engine_screen.dart';
 import '../phone/phone_control_screen.dart';
-import '../shell/drawer_destination.dart';
 import '../shell/sessions_drawer.dart';
 import '../theme/theme.dart';
 import 'activity_strip.dart';

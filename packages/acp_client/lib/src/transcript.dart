@@ -243,7 +243,7 @@ class ChatTranscript {
     ];
     return copyWith(
       items: changed ? nextItems : items,
-      usage: usage ?? this.usage,
+      usage: usage == null ? this.usage : (this.usage?.merge(usage) ?? usage),
     );
   }
 
@@ -458,7 +458,7 @@ class ChatTranscript {
         return copyWith(title: title ?? this.title);
 
       case UsageSessionUpdate(:final usage):
-        return copyWith(usage: usage);
+        return copyWith(usage: this.usage?.merge(usage) ?? usage);
 
       case AgentStatusUpdate():
       case UnknownSessionUpdate():

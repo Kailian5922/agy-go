@@ -548,6 +548,131 @@ class _FullDiffCard extends StatelessWidget {
   }
 }
 
+/// Formats token counts cleanly (`999` / `8.4K` / `128K` / `1.05M`), matching DSH Go.
+String formatContextTokens(int n) {
+  String trimZeros(String text) {
+    if (!text.contains('.')) return text;
+    var end = text.length;
+    while (text[end - 1] == '0') {
+      end--;
+    }
+    if (text[end - 1] == '.') end--;
+    return text.substring(0, end);
+  }
+
+  final sign = n < 0 ? '-' : '';
+  final value = n.abs();
+  if (value < 1000) return '$sign$value';
+  if (value < 1000000) {
+    final k = value / 1000;
+    final text = trimZeros(k >= 100 ? k.toStringAsFixed(0) : k.toStringAsFixed(1));
+    if (text != '1000') return '$sign${text}K';
+  }
+  return '$sign${trimZeros((value / 1000000).toStringAsFixed(2))}M';
+}
+
+/// Formats context fill ratio (`<1%` when >0 and <1%, otherwise `12%`).
+String formatContextPercent(double fraction) {
+  if (fraction > 0 && fraction < 0.01) return '<1%';
+  return '${(fraction * 100).round()}%';
+}
+
+/// Context usage color: <60% primary, 60–85% warning, >85% danger.
+Color contextUsageTone(BuildContext context, double fraction) {
+  final dsh = DshColors.of(context);
+  if (fraction > 0.85) return dsh.danger;
+  if (fraction >= 0.6) return dsh.warning;
+  return Theme.of(context).colorScheme.primary;
+}
+
+/// Compact DSH Go-style context usage ring + percentage rendered beside the
+/// send button in [ComposerBar]. Tapping opens [showContextUsageSheet].
+class ContextRing extends StatelessWidget {
+  const ContextRing({super.key, required this.fraction, this.onTap});
+
+  final double fraction;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final tone = contextUsageTone(context, fraction);
+    final pct = formatContextPercent(fraction);
+    return Tooltip(
+      message: '上下文已用 $pct，点击查看详情',
+      child: Semantics(
+        button: onTap != null,
+        label: '上下文已用 $pct，查看用量',
+        excludeSemantics: true,
+        onTap: onTap,
+        child: InkResponse(
+          onTap: onTap,
+          radius: 26,
+          child: SizedBox(
+            height: 36,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CustomPaint(
+                    size: const Size.square(15),
+                    painter: _ContextRingPainter(
+                      fraction: fraction,
+                      track: colors.onSurface.withValues(alpha: 0.12),
+                      fill: tone,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    pct,
+                    style: AppType.monoLabel(
+                      color: fraction >= 0.6
+                          ? tone
+                          : DshColors.of(context).textTertiary,
+                      weight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ContextRingPainter extends CustomPainter {
+  const _ContextRingPainter({
+    required this.fraction,
+    required this.track,
+    required this.fill,
+  });
+
+  final double fraction;
+  final Color track;
+  final Color fill;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const stroke = 2.2;
+    final rect = (Offset.zero & size).deflate(stroke / 2);
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..strokeCap = StrokeCap.round;
+    canvas.drawArc(rect, 0, 6.283185307179586, false, paint..color = track);
+    final clamped = fraction.clamp(0.0, 1.0);
+    final sweep = (clamped < 0.02 ? 0.02 : clamped) * 6.283185307179586;
+    canvas.drawArc(rect, -1.5707963267948966, sweep, false, paint..color = fill);
+  }
+
+  @override
+  bool shouldRepaint(_ContextRingPainter old) =>
+      old.fraction != fraction || old.track != track || old.fill != fill;
+}
+
 /// Context, Subscription Quota & Token Usage sheet (`/context`, `/usage`, `/quota`) with 1-tap `/compact`.
 Future<void> showContextUsageSheet(BuildContext context, WidgetRef ref) {
   return showAppSheet<void>(
@@ -576,12 +701,6 @@ class _ContextUsageSheetBodyState
     });
   }
 
-  String _fmtTokens(int n) {
-    if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(2)}M';
-    if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}K';
-    return '$n';
-  }
-
   @override
   Widget build(BuildContext context) {
     final chat = ref.watch(chatProvider);
@@ -592,9 +711,11 @@ class _ContextUsageSheetBodyState
     final scheme = theme.colorScheme;
     final dsh = DshColors.of(context);
 
-    final used = usage?.usedTokens ?? 0;
-    final limit = usage?.sizeTokens ?? 0;
-    final ratio = limit > 0 ? (used / limit).clamp(0.0, 1.0) : null;
+    final used = usage?.effectiveUsedTokens;
+    final limit = usage?.sizeTokens;
+    final ratio = (used != null && limit != null && limit > 0)
+        ? (used / limit).clamp(0.0, 1.0)
+        : null;
     final toolCount = chat.transcript.items
         .whereType<AssistantTranscriptItem>()
         .fold<int>(0, (s, item) => s + item.toolCalls.length);
@@ -627,13 +748,9 @@ class _ContextUsageSheetBodyState
                           ),
                         ),
                         Text(
-                          '${_fmtTokens(used)} / ${_fmtTokens(limit)} (${(ratio * 100).round()}%)',
+                          '${formatContextTokens(used!)} / ${formatContextTokens(limit!)} (${formatContextPercent(ratio)})',
                           style: AppType.monoLabel(
-                            color: ratio > 0.85
-                                ? dsh.danger
-                                : ratio > 0.65
-                                ? dsh.warning
-                                : scheme.primary,
+                            color: contextUsageTone(context, ratio),
                           ),
                         ),
                       ],
@@ -647,11 +764,7 @@ class _ContextUsageSheetBodyState
                         backgroundColor: scheme.onSurface.withValues(
                           alpha: 0.08,
                         ),
-                        color: ratio > 0.85
-                            ? dsh.danger
-                            : ratio > 0.65
-                            ? dsh.warning
-                            : scheme.primary,
+                        color: contextUsageTone(context, ratio),
                       ),
                     ),
                   ],
@@ -664,16 +777,42 @@ class _ContextUsageSheetBodyState
                   label: '消息 / 工具调用',
                   value: '${chat.transcript.items.length} 条 · $toolCount 次工具',
                 ),
-                if (usage?.usedTokens != null)
+                if (used != null)
                   InfoRow(
-                    label: '已用 Token',
-                    value: '${usage!.usedTokens}',
+                    label: '已用上下文',
+                    value: limit != null && limit > 0
+                        ? '${formatContextTokens(used)} / ${formatContextTokens(limit)}'
+                        : formatContextTokens(used),
+                    mono: true,
+                  )
+                else
+                  const InfoRow(
+                    label: '上下文用量',
+                    value: '等待引擎返回用量数据',
+                  ),
+                if (usage?.inputTokens != null)
+                  InfoRow(
+                    label: '本轮输入',
+                    value: formatContextTokens(usage!.inputTokens!),
                     mono: true,
                   ),
-                if (usage?.sizeTokens != null)
+                if (usage?.outputTokens != null)
                   InfoRow(
-                    label: '窗口上限',
-                    value: '${usage!.sizeTokens}',
+                    label: '本轮输出',
+                    value: formatContextTokens(usage!.outputTokens!),
+                    mono: true,
+                  ),
+                if (usage?.thoughtTokens != null && usage!.thoughtTokens! > 0)
+                  InfoRow(
+                    label: '本轮思考',
+                    value: formatContextTokens(usage.thoughtTokens!),
+                    mono: true,
+                  ),
+                if (usage?.cachedReadTokens != null &&
+                    usage!.cachedReadTokens! > 0)
+                  InfoRow(
+                    label: '缓存命中',
+                    value: formatContextTokens(usage.cachedReadTokens!),
                     mono: true,
                   ),
                 if (usage?.costAmount != null)

@@ -565,6 +565,15 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
     final showStop = widget.isBusy && !canSubmit && !voice.isListening;
     final showMic = !widget.isBusy && !canSubmit && !voice.isListening;
     final isMidTurnSend = widget.isBusy && canSubmit && !voice.isListening;
+    final contextFraction = ref.watch(
+      chatProvider.select((c) {
+        final u = c.transcript.usage;
+        final used = u?.effectiveUsedTokens;
+        final size = u?.sizeTokens;
+        if (used == null || size == null || size <= 0) return null;
+        return (used / size).clamp(0.0, 1.0);
+      }),
+    );
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(
@@ -1054,6 +1063,17 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                                           ),
                                     ),
                                   ),
+                                ),
+                              ),
+                            ],
+                            if (contextFraction != null &&
+                                !isMidTurnSend &&
+                                !voice.isListening) ...[
+                              const SizedBox(width: 2),
+                              ContextRing(
+                                fraction: contextFraction,
+                                onTap: () => unawaited(
+                                  showContextUsageSheet(context, ref),
                                 ),
                               ),
                             ],

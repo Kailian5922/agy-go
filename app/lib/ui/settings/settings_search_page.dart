@@ -88,10 +88,10 @@ final _catalog = <_SettingSearchEntry>[
   ),
   _SettingSearchEntry(
     title: '工作区管理',
-    subtitle: '挂载本机目录、手机存储、下载、文档、相册与分组',
+    subtitle: '挂载本机目录、手机存储与分组',
     group: 'AI 与工作区',
     icon: AppIcons.workspace,
-    keywords: ['workspace', 'folder', 'download', '下载', '目录', '挂载', '工作区'],
+    keywords: ['workspace', 'folder', 'storage', '目录', '挂载', '工作区'],
     builder: (_) => const WorkspacesPage(),
   ),
   _SettingSearchEntry(

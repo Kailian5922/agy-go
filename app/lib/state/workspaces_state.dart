@@ -557,30 +557,6 @@ const phoneStoragePresets = <PhoneStoragePreset>[
     relativePath: '',
     subtitle: '手机内部存储根目录',
   ),
-  PhoneStoragePreset(
-    id: 'phone-download',
-    title: '下载',
-    relativePath: 'Download',
-    subtitle: '手机存储/Download',
-  ),
-  PhoneStoragePreset(
-    id: 'phone-documents',
-    title: '文档',
-    relativePath: 'Documents',
-    subtitle: '手机存储/Documents',
-  ),
-  PhoneStoragePreset(
-    id: 'phone-dcim',
-    title: '相册',
-    relativePath: 'DCIM',
-    subtitle: '手机存储/DCIM',
-  ),
-  PhoneStoragePreset(
-    id: 'phone-pictures',
-    title: '图片',
-    relativePath: 'Pictures',
-    subtitle: '手机存储/Pictures',
-  ),
 ];
 
 final workspacesProvider =

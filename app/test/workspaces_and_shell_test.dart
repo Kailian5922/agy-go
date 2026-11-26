@@ -1,5 +1,6 @@
 import 'package:acp_client/acp_client.dart';
 import 'package:agy_go/app.dart';
+import 'package:agy_go/state/drawer_view_state.dart';
 import 'package:agy_go/state/sessions_state.dart';
 import 'package:agy_go/state/settings_state.dart';
 import 'package:agy_go/state/workspaces_state.dart';
@@ -55,7 +56,7 @@ void main() {
 
       final ctrl = container.read(workspacesProvider.notifier);
       final dl = await ctrl.add('/storage/emulated/0/Download');
-      expect(dl.displayTitle, '下载');
+      expect(dl.displayTitle, 'Download');
       final storage = await ctrl.add('/storage/emulated/0');
       expect(storage.displayTitle, '手机存储');
 
@@ -101,7 +102,7 @@ void main() {
   });
 
   group('DSH Go UI surfaces render cleanly', () {
-    testWidgets('WorkspacesPage renders phone storage and Download quick mounts', (
+    testWidgets('WorkspacesPage renders only 手机存储 quick mount without media/download shortcuts', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -113,15 +114,10 @@ void main() {
       expect(find.text('手机存储与快捷挂载'), findsOneWidget);
       expect(find.text('允许 agy 访问手机存储'), findsOneWidget);
       expect(find.text('手机存储'), findsOneWidget);
-      expect(find.text('下载 (Download)'), findsOneWidget);
-      await tester.scrollUntilVisible(
-        find.text('图片 (Pictures)'),
-        300,
-        scrollable: find.byType(Scrollable).first,
-      );
-      expect(find.text('文档 (Documents)'), findsOneWidget);
-      expect(find.text('相册 (DCIM)'), findsOneWidget);
-      expect(find.text('图片 (Pictures)'), findsOneWidget);
+      expect(find.text('下载 (Download)'), findsNothing);
+      expect(find.text('文档 (Documents)'), findsNothing);
+      expect(find.text('相册 (DCIM)'), findsNothing);
+      expect(find.text('图片 (Pictures)'), findsNothing);
     });
 
     testWidgets('SettingsScreen renders hub overview and storage entry', (
@@ -271,31 +267,61 @@ void main() {
     );
 
     testWidgets(
-      'SessionsDrawer displays workspaces with nested conversations underneath and toggles collapse on tap',
+      'SessionsDrawer mirrors DSH Go layout: workspace scope switcher, status filters, pinned/folder/day blocks, folder collapse, and multi-select',
       (tester) async {
+        final fixedNow = DateTime(2026, 11, 26, 15, 0);
         final container = ProviderContainer();
         addTearDown(container.dispose);
 
         final wsCtrl = container.read(workspacesProvider.notifier);
         await wsCtrl.add('/tmp/project-alpha', title: 'Alpha 项目');
+        await wsCtrl.add('/tmp/project-beta', title: 'Beta 项目');
+        // Select Alpha 项目 as the active scope.
+        final alphaWs = container
+            .read(workspacesProvider)
+            .workspaces
+            .firstWhere((w) => w.title == 'Alpha 项目');
+        await wsCtrl.select(alphaWs.id);
 
         final sessCtrl = container.read(sessionsProvider.notifier);
         sessCtrl.registerCreatedSession(
           AcpSessionInfo(
-            sessionId: 's_alpha_1',
+            sessionId: 's_pinned',
             cwd: '/tmp/project-alpha',
-            title: 'Alpha 的第一个对话',
-            updatedAt: DateTime(2026, 11, 25, 12, 0),
+            title: '置顶对话',
+            updatedAt: DateTime(2026, 11, 26, 14, 0),
+          ),
+        );
+        await sessCtrl.togglePin('s_pinned');
+        sessCtrl.registerCreatedSession(
+          AcpSessionInfo(
+            sessionId: 's_folder',
+            cwd: '/tmp/project-alpha',
+            title: '文件夹里的对话',
+            updatedAt: DateTime(2026, 11, 26, 13, 0),
           ),
         );
         sessCtrl.registerCreatedSession(
           AcpSessionInfo(
-            sessionId: 's_alpha_2',
+            sessionId: 's_today',
             cwd: '/tmp/project-alpha',
-            title: 'Alpha 的第二个对话',
-            updatedAt: DateTime(2026, 11, 25, 11, 0),
+            title: '今天的普通对话',
+            updatedAt: DateTime(2026, 11, 26, 12, 0),
           ),
         );
+        sessCtrl.registerCreatedSession(
+          AcpSessionInfo(
+            sessionId: 's_beta',
+            cwd: '/tmp/project-beta',
+            title: 'Beta 项目的对话',
+            updatedAt: DateTime(2026, 11, 26, 11, 0),
+          ),
+          select: false,
+        );
+
+        await container
+            .read(drawerViewProvider.notifier)
+            .createFolder('核心任务', tint: 0, sessionIds: ['s_folder']);
 
         await tester.pumpWidget(
           UncontrolledProviderScope(
@@ -304,7 +330,11 @@ void main() {
               home: Scaffold(
                 body: SizedBox(
                   width: 320,
-                  child: SessionsDrawer(onClose: () {}, onOpen: (_) {}),
+                  child: SessionsDrawer(
+                    onClose: () {},
+                    onOpen: (_) {},
+                    now: fixedNow,
+                  ),
                 ),
               ),
             ),
@@ -312,24 +342,42 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        // Selected workspace must appear EXACTLY ONCE in the drawer (not duplicated in top switcher).
+        // Scope switcher displays active workspace, status filter chips are visible.
         expect(find.text('Alpha 项目'), findsOneWidget);
-        expect(find.text('Alpha 的第一个对话'), findsOneWidget);
-        expect(find.text('Alpha 的第二个对话'), findsOneWidget);
+        expect(find.text('全部'), findsOneWidget);
+        expect(find.text('运行中'), findsOneWidget);
+        expect(find.text('待确认'), findsOneWidget);
+        expect(find.text('未读'), findsOneWidget);
 
-        // Tap the Alpha workspace header -> collapses its nested conversations!
-        final wsHeader = find.descendant(
-          of: find.byKey(
-            ValueKey(
-              'ws-group-${container.read(workspacesProvider).workspaces.last.id}',
-            ),
-          ),
-          matching: find.text('Alpha 项目'),
-        );
-        await tester.tap(wsHeader);
+        // Alpha scope shows Pinned -> Folder -> Today, hiding Beta's conversation!
+        expect(find.text('置顶'), findsOneWidget);
+        expect(find.text('置顶对话'), findsOneWidget);
+        expect(find.text('核心任务'), findsOneWidget);
+        expect(find.text('文件夹里的对话'), findsOneWidget);
+        expect(find.text('今天'), findsOneWidget);
+        expect(find.text('今天的普通对话'), findsOneWidget);
+        expect(find.text('Beta 项目的对话'), findsNothing);
+
+        // Tapping custom folder header collapses its conversations.
+        await tester.tap(find.text('核心任务'));
         await tester.pumpAndSettle();
+        expect(find.text('文件夹里的对话'), findsNothing);
 
-        expect(find.text('Alpha 的第一个对话'), findsNothing);
+        // Switching scope to 全部对话 reveals Beta's conversation too!
+        await wsCtrl.select(null);
+        await tester.pumpAndSettle();
+        expect(find.text('全部对话'), findsOneWidget);
+        expect(find.text('Beta 项目的对话'), findsOneWidget);
+
+        // Entering multi-select swaps header & footer in place (DrawerSelectionHeader + SelectionActionBar).
+        container.read(drawerSelectionProvider.notifier).start('s_today');
+        await tester.pumpAndSettle();
+        expect(find.text('全选'), findsOneWidget);
+        expect(find.text('已选 1 个'), findsOneWidget);
+        expect(find.text('完成'), findsOneWidget);
+        expect(find.text('移到文件夹'), findsOneWidget);
+        expect(find.text('归档'), findsOneWidget);
+        expect(find.text('删除'), findsOneWidget);
       },
     );
 

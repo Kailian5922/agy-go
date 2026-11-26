@@ -24,6 +24,7 @@ class SessionsState {
     this.folders = const [],
     this.sessionFolders = const {},
     this.sessionWorkspaces = const {},
+    this.sessionCreatedAt = const {},
     this.collapsedWorkspaceKeys = const [],
     this.activeFolder,
     this.filter = DrawerSessionFilter.all,
@@ -46,6 +47,9 @@ class SessionsState {
   /// Persisted `sessionId -> normalized workspace cwd` mapping so every
   /// conversation reliably stays grouped under its owning workspace.
   final Map<String, String> sessionWorkspaces;
+
+  /// Persisted first-seen / creation timestamp per session for `创建时间` sorting.
+  final Map<String, DateTime> sessionCreatedAt;
   final List<String> collapsedWorkspaceKeys;
   final String? activeFolder;
   final DrawerSessionFilter filter;
@@ -94,6 +98,7 @@ class SessionsState {
     List<String>? folders,
     Map<String, String>? sessionFolders,
     Map<String, String>? sessionWorkspaces,
+    Map<String, DateTime>? sessionCreatedAt,
     List<String>? collapsedWorkspaceKeys,
     String? Function()? activeFolder,
     DrawerSessionFilter? filter,
@@ -111,6 +116,7 @@ class SessionsState {
     folders: folders ?? this.folders,
     sessionFolders: sessionFolders ?? this.sessionFolders,
     sessionWorkspaces: sessionWorkspaces ?? this.sessionWorkspaces,
+    sessionCreatedAt: sessionCreatedAt ?? this.sessionCreatedAt,
     collapsedWorkspaceKeys:
         collapsedWorkspaceKeys ?? this.collapsedWorkspaceKeys,
     activeFolder: activeFolder == null ? this.activeFolder : activeFolder(),
@@ -199,6 +205,12 @@ class SessionsController extends Notifier<SessionsState> {
               if (e.key is String && e.value is String)
                 e.key as String: normalizeWorkspacePath(e.value as String),
         },
+        sessionCreatedAt: {
+          if (map['sessionCreatedAt'] is Map)
+            for (final e in (map['sessionCreatedAt'] as Map).entries)
+              if (e.key is String && e.value is String)
+                e.key as String: ?DateTime.tryParse(e.value as String),
+        },
         collapsedWorkspaceKeys:
             (map['collapsedWorkspaces'] as List?)?.whereType<String>().toList() ??
             const [],
@@ -221,6 +233,10 @@ class SessionsController extends Notifier<SessionsState> {
           'folders': state.folders,
           'sessionFolders': state.sessionFolders,
           'sessionWorkspaces': state.sessionWorkspaces,
+          'sessionCreatedAt': {
+            for (final e in state.sessionCreatedAt.entries)
+              e.key: e.value.toIso8601String(),
+          },
           'collapsedWorkspaces': state.collapsedWorkspaceKeys,
         }),
       );
@@ -319,14 +335,20 @@ class SessionsController extends Notifier<SessionsState> {
         });
 
       final nextWorkspaces = Map<String, String>.from(state.sessionWorkspaces);
-      var wsChanged = false;
+      final nextCreatedAt = Map<String, DateTime>.from(state.sessionCreatedAt);
+      var metaChanged = false;
+      final observedNow = DateTime.now();
       for (final s in merged) {
         if (s.cwd.trim().isNotEmpty) {
           final norm = normalizeWorkspacePath(s.cwd);
           if (nextWorkspaces[s.sessionId] != norm) {
             nextWorkspaces[s.sessionId] = norm;
-            wsChanged = true;
+            metaChanged = true;
           }
+        }
+        if (!nextCreatedAt.containsKey(s.sessionId)) {
+          nextCreatedAt[s.sessionId] = s.updatedAt ?? observedNow;
+          metaChanged = true;
         }
       }
 
@@ -334,9 +356,10 @@ class SessionsController extends Notifier<SessionsState> {
       state = state.copyWith(
         sessions: merged,
         sessionWorkspaces: nextWorkspaces,
+        sessionCreatedAt: nextCreatedAt,
         loading: false,
       );
-      if (wsChanged) {
+      if (metaChanged) {
         unawaited(_saveMeta());
       }
     } catch (e) {
@@ -469,6 +492,8 @@ class SessionsController extends Notifier<SessionsState> {
     if (normCwd.isNotEmpty) {
       nextWorkspaces[info.sessionId] = normCwd;
     }
+    final nextCreatedAt = Map<String, DateTime>.from(state.sessionCreatedAt)
+      ..putIfAbsent(info.sessionId, DateTime.now);
 
     // Auto-expand the workspace receiving this brand-new conversation.
     var nextCollapsed = state.collapsedWorkspaceKeys;
@@ -488,11 +513,10 @@ class SessionsController extends Notifier<SessionsState> {
       currentSessionId: select ? info.sessionId : state.currentSessionId,
       deletedIds: state.deletedIds.where((id) => id != info.sessionId).toList(),
       sessionWorkspaces: nextWorkspaces,
+      sessionCreatedAt: nextCreatedAt,
       collapsedWorkspaceKeys: nextCollapsed,
     );
-    if (normCwd.isNotEmpty) {
-      unawaited(_saveMeta());
-    }
+    unawaited(_saveMeta());
   }
 
   void updateSessionTitle(String sessionId, String title) {
@@ -532,6 +556,14 @@ class SessionsController extends Notifier<SessionsState> {
     await _saveMeta();
   }
 
+  Future<void> batchSetPinned(Set<String> ids, bool pinned) async {
+    if (ids.isEmpty) return;
+    final remaining = state.pinnedIds.where((id) => !ids.contains(id)).toList();
+    final next = pinned ? [...ids, ...remaining] : remaining;
+    state = state.copyWith(pinnedIds: next);
+    await _saveMeta();
+  }
+
   Future<void> setArchived(String sessionId, bool archived) async {
     final next = [
       if (archived) sessionId,
@@ -560,6 +592,8 @@ class SessionsController extends Notifier<SessionsState> {
       ..remove(sessionId);
     final nextWorkspaces = Map<String, String>.from(state.sessionWorkspaces)
       ..remove(sessionId);
+    final nextCreatedAt = Map<String, DateTime>.from(state.sessionCreatedAt)
+      ..remove(sessionId);
     final nextDeleted = [
       ...state.deletedIds,
       if (!state.deletedIds.contains(sessionId)) sessionId,
@@ -574,6 +608,7 @@ class SessionsController extends Notifier<SessionsState> {
       customTitles: nextTitles,
       sessionFolders: nextFolders,
       sessionWorkspaces: nextWorkspaces,
+      sessionCreatedAt: nextCreatedAt,
     );
     await _saveMeta();
   }

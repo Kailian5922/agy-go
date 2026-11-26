@@ -613,5 +613,59 @@ void main() {
       expect(compaction, isA<AgentStatusUpdate>());
       expect((compaction as AgentStatusUpdate).detail, 'Compacting conversation history');
     });
+
+    test('ChatTranscript preserves usage_update context window when finishTurn receives turn-only usage', () {
+      var t = const ChatTranscript().appendUserPrompt('分析项目');
+
+      // 1. Live usage_update carries context window used/size + cost.
+      final liveUpdate = AcpSessionUpdate.fromJson({
+        'sessionUpdate': 'usage_update',
+        'used': 42000,
+        'size': 200000,
+        'cost': {'amount': 0.032, 'currency': 'USD'},
+      });
+      expect(liveUpdate, isA<UsageSessionUpdate>());
+      t = t.applyUpdate(liveUpdate);
+      expect(t.usage?.usedTokens, 42000);
+      expect(t.usage?.sizeTokens, 200000);
+      expect(t.usage?.effectiveUsedTokens, 42000);
+
+      // 2. session/prompt finishTurn returns per-turn tokens WITHOUT used/size.
+      final turnOnlyUsage = AcpUsageInfo.fromJson({
+        'inputTokens': 39500,
+        'outputTokens': 1250,
+        'thoughtTokens': 820,
+        'cachedReadTokens': 31000,
+        'totalTokens': 41570,
+      });
+      expect(turnOnlyUsage.usedTokens, isNull);
+      expect(turnOnlyUsage.sizeTokens, isNull);
+
+      t = t.finishTurn(AcpStopReason.endTurn, usage: turnOnlyUsage);
+
+      // Context window used/size & cost MUST survive finishTurn alongside turn token breakdown!
+      expect(t.usage?.usedTokens, 42000);
+      expect(t.usage?.sizeTokens, 200000);
+      expect(t.usage?.effectiveUsedTokens, 42000);
+      expect(t.usage?.inputTokens, 39500);
+      expect(t.usage?.outputTokens, 1250);
+      expect(t.usage?.thoughtTokens, 820);
+      expect(t.usage?.cachedReadTokens, 31000);
+      expect(t.usage?.totalTokens, 41570);
+      expect(t.usage?.costAmount, closeTo(0.032, 0.0001));
+      expect(t.usage?.costCurrency, 'USD');
+
+      // Nested / alias payload parsing fallback (contextUsed / contextWindow)
+      final nested = AcpUsageInfo.fromJson({
+        'usage': {
+          'contextUsed': 12800,
+          'contextWindow': 128000,
+          'cacheReadTokens': 4000,
+        },
+      });
+      expect(nested.usedTokens, 12800);
+      expect(nested.sizeTokens, 128000);
+      expect(nested.cachedReadTokens, 4000);
+    });
   });
 }

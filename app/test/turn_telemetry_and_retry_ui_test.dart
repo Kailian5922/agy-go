@@ -11,6 +11,8 @@ import 'package:agy_go/state/settings_state.dart';
 import 'package:agy_go/state/workspaces_state.dart';
 import 'package:agy_go/ui/chat/activity_strip.dart';
 import 'package:agy_go/ui/chat/chat_list.dart';
+import 'package:agy_go/ui/chat/composer_bar.dart';
+import 'package:agy_go/ui/chat/diff_and_output_page.dart';
 import 'package:agy_go/ui/chat/tool_call_card.dart';
 import 'package:agy_go/ui/chat/tool_format.dart';
 import 'package:agy_go/ui/common/status_dot.dart';
@@ -1177,6 +1179,78 @@ void main() {
           .where((d) => d.tone == StatusTone.busy)
           .toList();
       expect(busyDots.length, greaterThanOrEqualTo(1));
+    });
+
+    testWidgets('ComposerBar renders ContextRing from merged usage and opens ContextUsageSheet', (tester) async {
+      final mergedTranscript = const ChatTranscript()
+          .appendUserPrompt('总结代码架构')
+          .applyUpdate(
+            const UsageSessionUpdate(
+              AcpUsageInfo(usedTokens: 50000, sizeTokens: 200000, costAmount: 0.045, costCurrency: 'USD'),
+            ),
+          )
+          .finishTurn(
+            AcpStopReason.endTurn,
+            usage: const AcpUsageInfo(
+              inputTokens: 48000,
+              outputTokens: 1600,
+              thoughtTokens: 900,
+              cachedReadTokens: 32000,
+              totalTokens: 50500,
+            ),
+          );
+
+      final container = ProviderContainer(
+        overrides: [
+          chatProvider.overrideWith(
+            () => _SeededChatController(
+              ChatState(
+                sessionId: 'sess-usage',
+                sessionCwd: '/repo',
+                transcript: mergedTranscript,
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: AgyGoApp(
+            home: Scaffold(
+              body: Align(
+                alignment: Alignment.bottomCenter,
+                child: ComposerBar(
+                  enabled: true,
+                  isBusy: false,
+                  onSend: (_) async {},
+                  onCancel: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // ContextRing displays 25% (50k / 200k) right beside the send button.
+      expect(find.byType(ContextRing), findsOneWidget);
+      expect(find.text('25%'), findsOneWidget);
+
+      // Tapping ContextRing opens ContextUsageSheet with full merged breakdown!
+      await tester.tap(find.byType(ContextRing));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.text('额度与上下文'), findsOneWidget);
+      expect(find.text('已用上下文'), findsOneWidget);
+      expect(find.text('50K / 200K (25%)'), findsOneWidget);
+      expect(find.text('本轮输入'), findsOneWidget);
+      expect(find.text('本轮输出'), findsOneWidget);
+      expect(find.text('本轮思考'), findsOneWidget);
+      expect(find.text('缓存命中'), findsOneWidget);
     });
   });
 }

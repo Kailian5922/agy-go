@@ -8,6 +8,7 @@ import 'package:material_ui/material_ui.dart' show AppLifecycleState, WidgetsBin
 
 import 'agy_config_state.dart';
 import 'connection_state.dart';
+import 'drawer_view_state.dart';
 import 'phone_state.dart';
 import 'runtime_state.dart';
 import 'sessions_state.dart';
@@ -1415,6 +1416,17 @@ class ChatController extends Notifier<ChatState> {
               .registerCreatedSession(createdInfo, select: false);
         }
 
+        final pendingFolder = ref
+            .read(pendingSessionFolderProvider.notifier)
+            .take();
+        if (pendingFolder != null) {
+          unawaited(
+            ref
+                .read(drawerViewProvider.notifier)
+                .moveSessions([sid], pendingFolder),
+          );
+        }
+
         // Apply non-standard execution mode on the ACP session if matched.
         if (modes != null && desiredAgentMode != AgyAgentMode.standard) {
           final match = modes.availableModes
@@ -1937,7 +1949,8 @@ class ChatController extends Notifier<ChatState> {
           transcript: state.transcript.applyUpdate(update),
         );
       } else if (update is CurrentModeUpdate ||
-          update is AvailableCommandsUpdate) {
+          update is AvailableCommandsUpdate ||
+          update is UsageSessionUpdate) {
         final next = state.transcript.applyUpdate(update);
         if (next.modes != null) _cachedModes = next.modes;
         state = state.copyWith(transcript: next);

@@ -19,13 +19,13 @@ import '../pet/starling_pet.dart';
 import '../phone/phone_control_screen.dart';
 import '../remote/ssh_hosts_screen.dart';
 import '../settings/settings_screen.dart';
+import '../settings/settings_search_page.dart';
 import '../share/share_screen.dart';
 import '../system/keep_alive_screen.dart';
 import '../terminal/terminal_screen.dart';
 import '../theme/theme.dart';
 import '../workspace/workspace_screen.dart';
 import '../workspace/workspaces_ui.dart';
-import 'drawer_destination.dart';
 import 'drawer_drag.dart';
 import 'quick_panel.dart';
 import 'sessions_drawer.dart';
@@ -167,6 +167,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
       DrawerDestination.keepAlive => const KeepAliveScreen(),
       DrawerDestination.features => const AllFeaturesPage(),
       DrawerDestination.settings => const SettingsScreen(),
+      DrawerDestination.settingsSearch => const SettingsSearchPage(),
     };
     Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => page));
     Future<void>.delayed(AppMotion.slow, () {

@@ -510,7 +510,7 @@ class _PhoneStoragePageState extends ConsumerState<PhoneStoragePage> {
         SettingsSection(
           title: '挂载开关',
           footer: const Text(
-            '开启后本机原生 Bionic 与 PRoot Ubuntu 都会同步创建「~/手机存储」快捷入口，并在「工作区管理」中允许直接挂载手机存储、下载、文档、相册等目录。',
+            '开启后本机原生 Bionic 与 PRoot Ubuntu 都会同步创建「~/手机存储」快捷入口，并在「工作区管理」中允许直接挂载手机存储。',
           ),
           children: [
             SettingsSwitchTile(

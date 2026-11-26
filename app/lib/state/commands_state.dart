@@ -191,7 +191,7 @@ const List<SlashCommand> builtInAgySlashCommands = <SlashCommand>[
     name: 'workspace',
     label: '切换工作区',
     aliases: ['工作区'],
-    description: '切换或挂载本机目录、手机存储与下载目录',
+    description: '切换或挂载本机目录与手机存储',
     icon: AppIcons.workspace,
     kind: SlashCommandKind.app,
   ),

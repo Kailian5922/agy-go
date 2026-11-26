@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../state/connection_state.dart';
+import '../../state/drawer_view_state.dart';
 import '../../state/hosts_state.dart';
 import '../../state/runtime_state.dart';
 import '../../state/sessions_state.dart';
@@ -100,10 +101,6 @@ Future<String?> showTextPromptDialog(
 
 IconData _iconForStoragePreset(PhoneStoragePreset preset) => switch (preset.id) {
   'phone-storage' => AppIcons.phoneStorage,
-  'phone-download' => AppIcons.downloads,
-  'phone-documents' => AppIcons.document,
-  'phone-dcim' => AppIcons.camera,
-  'phone-pictures' => AppIcons.gallery,
   _ => AppIcons.folder,
 };
 
@@ -636,7 +633,7 @@ class WorkspaceSwitcher extends ConsumerWidget {
     final selected = ref.watch(selectedWorkspaceProvider);
     final theme = Theme.of(context);
     final tertiary = DshColors.of(context).textTertiary;
-    final label = selected == null ? '全部工作区' : selected.displayTitle;
+    final label = selected == null ? '全部对话' : selected.displayTitle;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 0, 10, 0),
@@ -653,7 +650,9 @@ class WorkspaceSwitcher extends ConsumerWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    selected == null ? AppIcons.workspaceGroup : AppIcons.workspace,
+                    selected == null
+                        ? AppIcons.conversations
+                        : AppIcons.workspace,
                     size: 18,
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
@@ -713,6 +712,8 @@ class _WorkspaceSheet extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final wsState = ref.watch(workspacesProvider);
+    final counts = ref.watch(workspaceCountsProvider);
+    final total = ref.watch(visibleSessionTotalProvider);
     final local = ref.watch(hostsProvider.select((h) => h.active.isLocal));
     final runtime = ref.watch(localRuntimeProvider).status;
 
@@ -744,8 +745,9 @@ class _WorkspaceSheet extends ConsumerWidget {
                 margin: margin,
                 children: [
                   ListPageRow(
-                    icon: AppIcons.workspaceGroup,
-                    title: '全部工作区',
+                    icon: AppIcons.conversations,
+                    title: '全部对话',
+                    meta: total == 0 ? null : '$total',
                     trailing: RowCheck(visible: wsState.selectedId == null),
                     onTap: () => pick(null),
                   ),
@@ -766,9 +768,13 @@ class _WorkspaceSheet extends ConsumerWidget {
                           homePath: runtime.homePath,
                           storageRoot: runtime.phoneStoragePath,
                         ),
+                        meta: (counts[w.id] ?? 0) == 0
+                            ? null
+                            : '${counts[w.id]}',
                         trailing: RowCheck(visible: wsState.selectedId == w.id),
                         onTap: () => pick(w.id),
-                        onLongPress: () => showWorkspaceActionsSheet(context, ref, w),
+                        onLongPress: () =>
+                            showWorkspaceActionsSheet(context, ref, w),
                       ),
                   ],
                 ),
@@ -1045,7 +1051,7 @@ class _WorkspaceGroupPicker extends ConsumerWidget {
 }
 
 /// Workspaces management page mirroring DSH Go's WorkspacesPage, with direct
-/// Android shared-storage authorization and one-tap quick mounting (手机存储 / 下载 / 文档 / 相册 / 图片).
+/// Android shared-storage authorization and one-tap 手机存储 mounting.
 class WorkspacesPage extends ConsumerStatefulWidget {
   const WorkspacesPage({super.key});
 
@@ -1287,8 +1293,8 @@ class _WorkspacesPageState extends ConsumerState<WorkspacesPage> {
                   subtitle: storageMounted
                       ? '已挂载 $storageRoot · 快捷入口 ~/手机存储'
                       : storageGranted
-                      ? '系统权限已就绪，开启即可挂载本机存储与下载目录'
-                      : '点击授权挂载手机存储、下载、文档与相册',
+                      ? '系统权限已就绪，开启即可挂载手机存储'
+                      : '点击授权并挂载手机存储',
                   chevron: false,
                   trailing: Switch.adaptive(
                     value: storageMounted,

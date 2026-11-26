@@ -14,7 +14,8 @@ enum DrawerDestination {
   share,
   keepAlive,
   features,
-  settings;
+  settings,
+  settingsSearch;
 
   IconData get icon => switch (this) {
     DrawerDestination.engine => AppIcons.engine,
@@ -28,6 +29,7 @@ enum DrawerDestination {
     DrawerDestination.keepAlive => AppIcons.keepAlive,
     DrawerDestination.features => AppIcons.allFeatures,
     DrawerDestination.settings => AppIcons.settings,
+    DrawerDestination.settingsSearch => AppIcons.search,
   };
 
   String get label => switch (this) {
@@ -42,5 +44,6 @@ enum DrawerDestination {
     DrawerDestination.keepAlive => '保活与更新',
     DrawerDestination.features => '全部功能',
     DrawerDestination.settings => '设置',
+    DrawerDestination.settingsSearch => '搜索设置',
   };
 }
