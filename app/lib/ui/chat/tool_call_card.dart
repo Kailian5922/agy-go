@@ -84,17 +84,27 @@ class _ToolCallCardState extends State<ToolCallCard> {
     return (added, removed);
   }
 
+  String _formatBlockOutput(AcpToolCall tc, String raw) {
+    final cleaned = tc.kind == AcpToolKind.execute
+        ? stripAgyCommandResultHeader(raw)
+        : raw.trim();
+    return cleaned;
+  }
+
   String? _rawOutputText(AcpToolCall tc) {
     final raw = tc.rawOutput;
     if (raw == null) return null;
     if (raw is String) {
-      final trimmed = raw.trim();
+      final trimmed = _formatBlockOutput(tc, raw);
       return trimmed.isEmpty ? null : trimmed;
     }
     if (raw is Map) {
       for (final key in const ['output', 'stdout', 'text', 'message', 'error']) {
         final v = raw[key];
-        if (v is String && v.trim().isNotEmpty) return v.trim();
+        if (v is String) {
+          final trimmed = _formatBlockOutput(tc, v);
+          if (trimmed.isNotEmpty) return trimmed;
+        }
       }
     }
     return null;
@@ -120,7 +130,13 @@ class _ToolCallCardState extends State<ToolCallCard> {
         nonDiffBlocks.isNotEmpty ||
         tc.locations.isNotEmpty ||
         fallbackOutput != null;
+    final nativeLabel = extractNativeToolLabel(tc, workspaceCwd: cwd);
     final summary = formatToolSummary(tc, workspaceCwd: cwd);
+    final showSecondarySummary =
+        nativeLabel != null &&
+        summary.isNotEmpty &&
+        !nativeLabel.toLowerCase().contains(summary.toLowerCase()) &&
+        !summary.toLowerCase().contains(nativeLabel.toLowerCase());
     final tintIdx = _tint(tc.kind);
     final badgeBg = dsh.identity[tintIdx % dsh.identity.length];
     final badgeFg = dsh.onIdentity[tintIdx % dsh.onIdentity.length];
@@ -221,36 +237,93 @@ class _ToolCallCardState extends State<ToolCallCard> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    Text(
-                      _verb(tc.kind),
-                      style: theme.textTheme.labelMedium?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 5),
-                      child: Text(
-                        '·',
-                        style: theme.textTheme.labelMedium?.copyWith(
-                          color: dsh.textTertiary,
+                    if (nativeLabel != null && !showSecondarySummary)
+                      Expanded(
+                        child: Text(
+                          nativeLabel,
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: failed
+                                ? dsh.danger
+                                : scheme.onSurfaceVariant,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      )
+                    else if (nativeLabel != null) ...[
+                      Flexible(
+                        child: Text(
+                          nativeLabel,
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: failed
+                                ? dsh.danger
+                                : scheme.onSurfaceVariant,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
-                    ),
-                    Expanded(
-                      child: Text(
-                        summary,
-                        maxLines: 1,
-                        softWrap: false,
-                        overflow: TextOverflow.ellipsis,
-                        style: isMonoSummary
-                            ? AppType.monoLabel(color: summaryColor)
-                                  .copyWith(fontSize: 12.5)
-                            : theme.textTheme.bodySmall?.copyWith(
-                                color: summaryColor,
-                              ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 5),
+                        child: Text(
+                          '·',
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: dsh.textTertiary,
+                          ),
+                        ),
                       ),
-                    ),
+                      Expanded(
+                        child: Text(
+                          summary,
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.ellipsis,
+                          style: isMonoSummary
+                              ? AppType.monoLabel(
+                                  color: summaryColor,
+                                ).copyWith(fontSize: 12.5)
+                              : theme.textTheme.bodySmall?.copyWith(
+                                  color: summaryColor,
+                                ),
+                        ),
+                      ),
+                    ]
+                    else ...[
+                      Text(
+                        _verb(tc.kind),
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 5),
+                        child: Text(
+                          '·',
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: dsh.textTertiary,
+                          ),
+                        ),
+                      ),
+                      Expanded(
+                        child: Text(
+                          summary,
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.ellipsis,
+                          style: isMonoSummary
+                              ? AppType.monoLabel(color: summaryColor)
+                                    .copyWith(fontSize: 12.5)
+                              : theme.textTheme.bodySmall?.copyWith(
+                                  color: summaryColor,
+                                ),
+                        ),
+                      ),
+                    ],
                     if (statusWidget != null) ...[
                       const SizedBox(width: 8),
                       statusWidget,
@@ -365,7 +438,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
                           padding: const EdgeInsets.only(top: 4),
                           child: SelectableText(
                             block is AcpTextBlock
-                                ? block.text
+                                ? _formatBlockOutput(tc, block.text)
                                 : block.toString(),
                             style: AppType.monoSmall(color: dsh.codeWellFg),
                           ),
@@ -432,7 +505,11 @@ class _ToolCallCardState extends State<ToolCallCard> {
                                           .whereType<AcpBlockToolContent>()
                                           .map(
                                             (b) => b.block is AcpTextBlock
-                                                ? (b.block as AcpTextBlock).text
+                                                ? _formatBlockOutput(
+                                                    tc,
+                                                    (b.block as AcpTextBlock)
+                                                        .text,
+                                                  )
                                                 : b.block.toString(),
                                           )
                                           .join('\n\n')
@@ -440,17 +517,23 @@ class _ToolCallCardState extends State<ToolCallCard> {
                                 Navigator.of(context).push(
                                   MaterialPageRoute<void>(
                                     builder: (_) => OutputViewerPage(
-                                      title: formatToolSummary(
-                                        tc,
-                                        workspaceCwd: cwd,
-                                        compact: false,
-                                      ),
+                                      title:
+                                          nativeLabel ??
+                                          formatToolSummary(
+                                            tc,
+                                            workspaceCwd: cwd,
+                                            compact: false,
+                                          ),
                                       subtitle: tc.locations.isNotEmpty
                                           ? displayToolPath(
                                               tc.locations.first.path,
                                               workspaceCwd: cwd,
                                             )
-                                          : tc.kind.name,
+                                          : formatToolSummary(
+                                              tc,
+                                              workspaceCwd: cwd,
+                                              compact: false,
+                                            ),
                                       output: fullText,
                                     ),
                                   ),

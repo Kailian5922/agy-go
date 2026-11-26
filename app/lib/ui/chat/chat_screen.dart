@@ -29,6 +29,7 @@ import 'composer_bar.dart';
 import 'permission_card.dart';
 import 'permission_controls.dart';
 import 'session_detail_page.dart';
+import 'tool_format.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({
@@ -116,19 +117,38 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       phoneControlProvider.select((p) => p.pendingApprovals),
     );
     final chat = ref.watch(
-      chatProvider.select(
-        (s) => (
+      chatProvider.select((s) {
+        final lastItem = s.transcript.items.isNotEmpty
+            ? s.transcript.items.last
+            : null;
+        final assistant = lastItem is AssistantTranscriptItem ? lastItem : null;
+        final activeTool = assistant?.toolCalls
+            .where((t) => t.status.isActive)
+            .lastOrNull;
+        final activePlan = s.transcript.plan
+            .where((p) => p.status.toLowerCase() == 'in_progress')
+            .firstOrNull;
+        return (
           sessionId: s.sessionId,
           title: s.transcript.title,
           isBusy: s.isBusy,
           livePhase: s.livePhase,
-          activeToolKind: s.transcript.items.isNotEmpty &&
-                  s.transcript.items.last is AssistantTranscriptItem
-              ? (s.transcript.items.last as AssistantTranscriptItem)
-                    .toolCalls
-                    .where((t) => t.status.isActive)
-                    .lastOrNull
-                    ?.kind
+          nativeHeaderStatus: s.isBusy
+              ? resolveNativeHeaderStatus(
+                  phase: s.livePhase,
+                  activeToolStatus: activeTool != null
+                      ? formatNativeToolLiveStatus(
+                          activeTool,
+                          workspaceCwd: s.sessionCwd,
+                        )
+                      : null,
+                  nativeStatusLabel: s.liveStatusLabel,
+                  activePlanLabel: activePlan?.content,
+                  liveThoughtHeadline: s.livePhase == TurnLivePhase.thinking
+                      ? latestAssistantThoughtHeadline(assistant)
+                      : null,
+                  activeRetry: s.activeRetry,
+                )
               : null,
           backgroundRunningCount: s.backgroundRunningIds.length,
           hasPlan: s.transcript.plan.isNotEmpty,
@@ -136,8 +156,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           error: s.error,
           authRequired: s.authRequired,
           hasItems: s.transcript.items.isNotEmpty,
-        ),
-      ),
+        );
+      }),
     );
 
     final connected = connAsync.value != null;
@@ -156,10 +176,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         chat.livePhase == TurnLivePhase.retrying
             ? StatusTone.warn
             : StatusTone.busy,
-        headerStatusLabelForPhase(
-          chat.livePhase,
-          activeToolKind: chat.activeToolKind,
-        ),
+        chat.nativeHeaderStatus ?? '等待响应',
       );
     } else if (chat.backgroundRunningCount > 0) {
       headerStatus = HeaderStatus(

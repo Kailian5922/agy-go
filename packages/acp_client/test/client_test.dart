@@ -536,5 +536,82 @@ void main() {
       expect(legacy.effectiveTimeline[1], isA<ToolTimelineEntry>());
       expect(legacy.effectiveTimeline[2], isA<MessageTimelineEntry>());
     });
+
+    test('AcpToolCall exposes native toolAction/toolSummary, PascalCase edit_file/write_file diffs, and ACP v2 updates', () {
+      final editTc = AcpToolCall.fromJson({
+        'toolCallId': 'tc-agy-edit',
+        'name': 'edit_file',
+        'title': 'edit_file',
+        'kind': 'edit',
+        'status': 'in_progress',
+        'rawInput': {
+          'Path': 'lib/main.dart',
+          'Target': 'oldLine();',
+          'Replacement': 'newLine();',
+          'toolAction': 'Editing lib/main.dart',
+          'toolSummary': 'Edit lib/main.dart',
+        },
+        '_meta': {'traceId': 't1'},
+      });
+
+      expect(editTc.nativeToolAction, 'Editing lib/main.dart');
+      expect(editTc.nativeToolSummary, 'Edit lib/main.dart');
+      expect(editTc.nativeDisplayLabel, 'Editing lib/main.dart');
+      expect(editTc.meta?['traceId'], 't1');
+      expect(editTc.effectiveDiffs.length, 1);
+      expect(editTc.effectiveDiffs.first.path, 'lib/main.dart');
+      expect(editTc.effectiveDiffs.first.oldText, 'oldLine();');
+      expect(editTc.effectiveDiffs.first.newText, 'newLine();');
+
+      final doneTc = editTc.mergePatch({'status': 'completed'});
+      expect(doneTc.nativeDisplayLabel, 'Edit lib/main.dart');
+      expect(doneTc.meta?['traceId'], 't1');
+
+      final writeTc = AcpToolCall.fromJson({
+        'toolCallId': 'tc-agy-write',
+        'name': 'write_file',
+        'title': 'Creating README.md',
+        'status': 'in_progress',
+        'rawInput': {
+          'Path': 'README.md',
+          'Content': '# Hello\n',
+        },
+      });
+      expect(writeTc.effectiveDiffs.length, 1);
+      expect(writeTc.effectiveDiffs.first.path, 'README.md');
+      expect(writeTc.effectiveDiffs.first.oldText, isNull);
+      expect(writeTc.effectiveDiffs.first.newText, '# Hello\n');
+      expect(writeTc.nativeDisplayLabel, 'Creating README.md');
+
+      final planUpdate = AcpSessionUpdate.fromJson({
+        'sessionUpdate': 'plan_update',
+        'planId': 'p1',
+        'plan': {
+          'type': 'items',
+          'entries': [
+            {'content': 'Inspect repo', 'status': 'completed'},
+            {'content': 'Fix status UI', 'status': 'in_progress'},
+          ],
+        },
+      });
+      expect(planUpdate, isA<PlanUpdate>());
+      expect((planUpdate as PlanUpdate).entries.length, 2);
+      expect(planUpdate.entries[1].content, 'Fix status UI');
+
+      final planRemoved = AcpSessionUpdate.fromJson({
+        'sessionUpdate': 'plan_removed',
+        'planId': 'p1',
+      });
+      expect(planRemoved, isA<PlanUpdate>());
+      expect((planRemoved as PlanUpdate).entries, isEmpty);
+
+      final compaction = AcpSessionUpdate.fromJson({
+        'sessionUpdate': 'compaction_update',
+        'status': 'in_progress',
+        'message': 'Compacting conversation history',
+      });
+      expect(compaction, isA<AgentStatusUpdate>());
+      expect((compaction as AgentStatusUpdate).detail, 'Compacting conversation history');
+    });
   });
 }

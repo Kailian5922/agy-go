@@ -93,11 +93,11 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
     final scheme = theme.colorScheme;
     final dsh = DshColors.of(context);
 
-    final activeTools = chat.lastItem is AssistantTranscriptItem
-        ? (chat.lastItem as AssistantTranscriptItem)
-              .toolCalls
-              .where((t) => t.status.isActive)
-              .toList()
+    final lastAssistant = chat.lastItem is AssistantTranscriptItem
+        ? chat.lastItem as AssistantTranscriptItem
+        : null;
+    final activeTools = lastAssistant != null
+        ? lastAssistant.toolCalls.where((t) => t.status.isActive).toList()
         : const <AcpToolCall>[];
 
     final donePlan = chat.plan
@@ -108,16 +108,15 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
         .where((p) => p.status.toLowerCase() == 'in_progress')
         .firstOrNull;
 
-    String? activeToolLabel;
-    AcpToolKind? activeToolKind;
-    if (activeTools.isNotEmpty) {
-      final tc = activeTools.last;
-      activeToolKind = tc.kind;
-      final formatted = formatToolSummary(tc, workspaceCwd: chat.sessionCwd);
-      activeToolLabel = formatted.isNotEmpty
-          ? formatted
-          : (tc.name ?? '正在执行 ${tc.kind.name}');
-    }
+    final activeToolLabel = activeTools.isNotEmpty
+        ? formatNativeToolLiveStatus(
+            activeTools.last,
+            workspaceCwd: chat.sessionCwd,
+          )
+        : null;
+    final liveThoughtHeadline = chat.livePhase == TurnLivePhase.thinking
+        ? latestAssistantThoughtHeadline(lastAssistant)
+        : null;
 
     final health = chat.isBusy
         ? deriveTurnHealth(
@@ -129,8 +128,8 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
             answerChars: chat.answerChars,
             hasActiveTool: activeTools.isNotEmpty,
             activeToolLabel: activeToolLabel,
-            activeToolKind: activeToolKind,
             liveStatusLabel: chat.liveStatusLabel,
+            liveThoughtHeadline: liveThoughtHeadline,
             activePlanLabel: currentPlan?.content,
             now: _now,
             liveTokensPerSecond: chat.liveTokensPerSecond,
@@ -306,17 +305,22 @@ class _TurnAlertBannerState extends ConsumerState<TurnAlertBanner> {
     _syncTicker(chat.isBusy && chat.startedAt != null);
     if (!chat.isBusy) return const SizedBox.shrink();
 
-    final activeTools = chat.lastItem is AssistantTranscriptItem
-        ? (chat.lastItem as AssistantTranscriptItem)
-              .toolCalls
-              .where((t) => t.status.isActive)
-              .toList()
+    final lastAssistant = chat.lastItem is AssistantTranscriptItem
+        ? chat.lastItem as AssistantTranscriptItem
+        : null;
+    final activeTools = lastAssistant != null
+        ? lastAssistant.toolCalls.where((t) => t.status.isActive).toList()
         : const <AcpToolCall>[];
 
     final activeToolLabel = activeTools.isNotEmpty
-        ? formatToolSummary(activeTools.last, workspaceCwd: chat.sessionCwd)
+        ? formatNativeToolLiveStatus(
+            activeTools.last,
+            workspaceCwd: chat.sessionCwd,
+          )
         : null;
-    final activeToolKind = activeTools.isNotEmpty ? activeTools.last.kind : null;
+    final liveThoughtHeadline = chat.livePhase == TurnLivePhase.thinking
+        ? latestAssistantThoughtHeadline(lastAssistant)
+        : null;
 
     final health = deriveTurnHealth(
       startedAt: chat.startedAt,
@@ -327,8 +331,8 @@ class _TurnAlertBannerState extends ConsumerState<TurnAlertBanner> {
       answerChars: chat.answerChars,
       hasActiveTool: activeTools.isNotEmpty,
       activeToolLabel: activeToolLabel,
-      activeToolKind: activeToolKind,
       liveStatusLabel: chat.liveStatusLabel,
+      liveThoughtHeadline: liveThoughtHeadline,
       activePlanLabel: null,
       now: _now,
       liveTokensPerSecond: chat.liveTokensPerSecond,
@@ -509,13 +513,19 @@ class _PlanActivitySheetBodyState
     final lastItem = chat.transcript.items.isNotEmpty
         ? chat.transcript.items.last
         : null;
-    final activeTools = lastItem is AssistantTranscriptItem
-        ? lastItem.toolCalls.where((t) => t.status.isActive).toList()
+    final lastAssistant = lastItem is AssistantTranscriptItem ? lastItem : null;
+    final activeTools = lastAssistant != null
+        ? lastAssistant.toolCalls.where((t) => t.status.isActive).toList()
         : const <AcpToolCall>[];
     final activeToolLabel = activeTools.isNotEmpty
-        ? formatToolSummary(activeTools.last, workspaceCwd: chat.sessionCwd)
+        ? formatNativeToolLiveStatus(
+            activeTools.last,
+            workspaceCwd: chat.sessionCwd,
+          )
         : null;
-    final activeToolKind = activeTools.isNotEmpty ? activeTools.last.kind : null;
+    final liveThoughtHeadline = chat.livePhase == TurnLivePhase.thinking
+        ? latestAssistantThoughtHeadline(lastAssistant)
+        : null;
 
     final health = chat.isBusy
         ? deriveTurnHealth(
@@ -527,8 +537,8 @@ class _PlanActivitySheetBodyState
             answerChars: chat.answerChars,
             hasActiveTool: activeTools.isNotEmpty,
             activeToolLabel: activeToolLabel,
-            activeToolKind: activeToolKind,
             liveStatusLabel: chat.liveStatusLabel,
+            liveThoughtHeadline: liveThoughtHeadline,
             activePlanLabel: plan
                 .where((p) => p.status.toLowerCase() == 'in_progress')
                 .firstOrNull
@@ -585,7 +595,7 @@ class _PlanActivitySheetBodyState
             ),
             if (chat.isBusy && health != null)
               SheetGroup(
-                title: '实时健康度（判断正常运行 / 重试 / 卡住）',
+                title: '实时状态（原生事件 / 重试 / 超时监测）',
                 children: [
                   ListPageRow(
                     icon: health.tone == TurnHealthTone.retrying
@@ -708,7 +718,7 @@ class _PlanActivitySheetBodyState
                           : tc.status == AcpToolStatus.failed
                           ? dsh.danger
                           : dsh.success,
-                      title: formatToolSummary(
+                      title: formatNativeToolLiveStatus(
                         tc,
                         workspaceCwd: chat.sessionCwd,
                       ),
@@ -717,7 +727,10 @@ class _PlanActivitySheetBodyState
                               tc.locations.first.path,
                               workspaceCwd: chat.sessionCwd,
                             )
-                          : tc.kind.name,
+                          : formatToolSummary(
+                              tc,
+                              workspaceCwd: chat.sessionCwd,
+                            ),
                       meta: tc.status.name,
                       chevron: false,
                     ),

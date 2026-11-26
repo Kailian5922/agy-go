@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../ui/chat/tool_format.dart';
 import 'chat_state.dart';
 import 'connection_state.dart';
 import 'hosts_state.dart';
@@ -178,7 +179,32 @@ class PetController extends Notifier<PetSettingsState> {
 
     String? statusText;
     if (chat.isBusy) {
-      statusText = '${headerStatusLabelForPhase(chat.livePhase)}…（可点「新对话」并发提问或点停止）';
+      final lastItem = chat.transcript.items.isNotEmpty
+          ? chat.transcript.items.last
+          : null;
+      final assistant = lastItem is AssistantTranscriptItem ? lastItem : null;
+      final activeTool = assistant?.toolCalls
+          .where((t) => t.status.isActive)
+          .lastOrNull;
+      final activePlan = chat.transcript.plan
+          .where((p) => p.status.toLowerCase() == 'in_progress')
+          .firstOrNull;
+      final nativeStatus = resolveNativeHeaderStatus(
+        phase: chat.livePhase,
+        activeToolStatus: activeTool != null
+            ? formatNativeToolLiveStatus(
+                activeTool,
+                workspaceCwd: chat.sessionCwd,
+              )
+            : null,
+        nativeStatusLabel: chat.liveStatusLabel,
+        activePlanLabel: activePlan?.content,
+        liveThoughtHeadline: chat.livePhase == TurnLivePhase.thinking
+            ? latestAssistantThoughtHeadline(assistant)
+            : null,
+        activeRetry: chat.activeRetry,
+      );
+      statusText = '$nativeStatus（可点「新对话」并发提问或点停止）';
     } else if (chat.backgroundRunningIds.isNotEmpty) {
       statusText = '后台 ${chat.backgroundRunningIds.length} 个对话运行中';
     }

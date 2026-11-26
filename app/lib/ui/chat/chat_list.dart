@@ -1212,6 +1212,10 @@ class _LiveTurnFooterState extends ConsumerState<_LiveTurnFooter> {
           thoughtChars: c.thoughtChars,
           answerChars: c.answerChars,
           liveTokensPerSecond: c.liveTokensPerSecond,
+          activePlanLabel: c.transcript.plan
+              .where((p) => p.status.toLowerCase() == 'in_progress')
+              .firstOrNull
+              ?.content,
         ),
       ),
     );
@@ -1220,6 +1224,10 @@ class _LiveTurnFooterState extends ConsumerState<_LiveTurnFooter> {
     if (widget.hasActiveTool && live.activeRetry == null) {
       return const SizedBox.shrink();
     }
+
+    final liveThoughtHeadline = live.livePhase == TurnLivePhase.thinking
+        ? latestAssistantThoughtHeadline(widget.item)
+        : null;
 
     final health = deriveTurnHealth(
       startedAt: live.startedAt,
@@ -1231,7 +1239,8 @@ class _LiveTurnFooterState extends ConsumerState<_LiveTurnFooter> {
       hasActiveTool: widget.hasActiveTool,
       activeToolLabel: null,
       liveStatusLabel: live.liveStatusLabel,
-      activePlanLabel: null,
+      liveThoughtHeadline: liveThoughtHeadline,
+      activePlanLabel: live.activePlanLabel,
       now: _now,
       liveTokensPerSecond: live.liveTokensPerSecond,
       inline: false,
@@ -1242,46 +1251,29 @@ class _LiveTurnFooterState extends ConsumerState<_LiveTurnFooter> {
     final isWarn =
         health.tone == TurnHealthTone.retrying ||
         health.tone == TurnHealthTone.suspectedStall;
-    final speedTag =
-        live.liveTokensPerSecond != null && live.liveTokensPerSecond! > 0
-        ? ' · ${formatTokensPerSecond(live.liveTokensPerSecond!)}'
-        : '';
+    final hasSpeed =
+        live.liveTokensPerSecond != null && live.liveTokensPerSecond! > 0;
 
     // Avoid duplicating the active thinking spinner row unless we have live
-    // tok/s throughput, a phase change (analyzing/working), or a warning.
+    // tok/s throughput, an explicit native status message, or a warning.
     if (widget.hasActiveThoughtRow &&
         !isWarn &&
         health.tone == TurnHealthTone.active &&
         live.livePhase == TurnLivePhase.thinking &&
-        speedTag.isEmpty) {
+        live.liveStatusLabel == null &&
+        !hasSpeed) {
       return const SizedBox.shrink();
     }
 
-    final hasTools = widget.item.toolCalls.isNotEmpty;
-    final showText = switch (health.tone) {
-      TurnHealthTone.retrying => health.detailHeadline,
-      TurnHealthTone.suspectedStall => health.detailHeadline,
-      TurnHealthTone.waiting => health.detailHeadline,
-      TurnHealthTone.active => switch (live.livePhase) {
-        TurnLivePhase.analyzing =>
-          live.liveStatusLabel?.trim().isNotEmpty == true
-              ? '分析中 · ${live.liveStatusLabel!.trim()}'
-              : '正在分析文件与工具结果…',
-        TurnLivePhase.working =>
-          live.liveStatusLabel?.trim().isNotEmpty == true
-              ? 'Working · ${live.liveStatusLabel!.trim()}'
-              : 'Working…',
-        TurnLivePhase.thinking =>
-          hasTools
-              ? (live.thoughtChars > 0
-                    ? '继续思考中$speedTag · ${formatCharCount(live.thoughtChars)}（${formatLastSignalAge(health.silentSeconds)}更新）'
-                    : '分析工具结果中…')
-              : (live.thoughtChars > 0
-                    ? '思考中$speedTag · ${formatCharCount(live.thoughtChars)}'
-                    : '思考中…'),
-        _ => hasTools ? '分析工具结果中…' : 'Working…',
-      },
-    };
+    final showText =
+        health.tone == TurnHealthTone.active &&
+            live.livePhase == TurnLivePhase.waiting &&
+            live.liveStatusLabel == null &&
+            (live.activePlanLabel == null ||
+                live.activePlanLabel!.trim().isEmpty) &&
+            (widget.item.toolCalls.isNotEmpty || widget.item.thought.isNotEmpty)
+        ? '等待引擎返回下一步事件…'
+        : health.detailHeadline;
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),

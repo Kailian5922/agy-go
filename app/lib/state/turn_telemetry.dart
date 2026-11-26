@@ -1,12 +1,20 @@
 import 'package:acp_client/acp_client.dart';
 
-/// Current active stage within an in-flight turn.
+/// Directly observed ACP wire stage within an in-flight turn (no client-side guessing).
 enum TurnLivePhase {
+  /// Prompt in flight; awaiting the next event from `agy acp`.
   waiting,
-  analyzing,
+
+  /// Receiving `agent_thought_chunk` from the model.
   thinking,
+
+  /// Executing an active tool call, active `plan` step, or explicit engine status.
   working,
+
+  /// Receiving `agent_message_chunk` from the model.
   responding,
+
+  /// Engine explicitly reported a transient network / rate-limit retry.
   retrying,
 }
 
@@ -272,47 +280,76 @@ String tailPreviewLines(String raw, {int maxLines = 3}) {
   return lines.sublist(start).join('\n');
 }
 
-/// Extracts the latest concise non-empty heading/line for the live thinking header.
+final _kBoldHeadingRe = RegExp(r'^\s*\*\*([^*\n]{2,120})\*\*\s*$');
+final _kMdHeadingRe = RegExp(r'^\s*#{1,3}\s+(.{2,120})$');
+
+/// Extracts the model's latest native thought heading/line from `agent_thought_chunk`.
+///
+/// Prefers standalone Markdown section headers that Gemini/Antigravity emits natively
+/// inside its thinking stream (e.g. `**Analyzing the status bar**` or `## Plan`),
+/// falling back to the latest non-empty reasoning line when prose has no headings.
 String latestThoughtHeadline(String raw) {
   final lines = raw
       .replaceAll('\r\n', '\n')
       .split('\n')
-      .map((l) => l.replaceAll('**', '').trim())
+      .map((l) => l.trim())
       .where((l) => l.isNotEmpty)
       .toList();
   if (lines.isEmpty) return '';
-  return lines.last;
+
+  for (var i = lines.length - 1; i >= 0; i--) {
+    final line = lines[i];
+    final bold = _kBoldHeadingRe.firstMatch(line);
+    if (bold != null) {
+      final title = bold.group(1)!.trim();
+      if (title.isNotEmpty) return title;
+    }
+    final md = _kMdHeadingRe.firstMatch(line);
+    if (md != null) {
+      final title = md.group(1)!.replaceAll('**', '').trim();
+      if (title.isNotEmpty) return title;
+    }
+  }
+
+  return lines.last.replaceAll('**', '').trim();
 }
 
-/// Maps an active ACP tool kind to the semantic live phase shown in the UI
-/// (`分析中` for read/search/fetch, `思考中` for think, `Working / 编辑中` for edits & commands).
-TurnLivePhase phaseForToolKind(AcpToolKind kind) => switch (kind) {
-  AcpToolKind.read || AcpToolKind.search || AcpToolKind.fetch =>
-    TurnLivePhase.analyzing,
-  AcpToolKind.think => TurnLivePhase.thinking,
-  _ => TurnLivePhase.working,
-};
+/// Resolves the concise top-header status directly from native ACP signals
+/// without guessing or fabricating intermediate phases.
+String resolveNativeHeaderStatus({
+  required TurnLivePhase phase,
+  String? activeToolStatus,
+  String? nativeStatusLabel,
+  String? activePlanLabel,
+  String? liveThoughtHeadline,
+  TurnRetryInfo? activeRetry,
+}) {
+  if (activeRetry != null || phase == TurnLivePhase.retrying) {
+    return activeRetry?.compactPillLabel() ?? '重试中';
+  }
+  final tool = activeToolStatus?.trim();
+  if (tool != null && tool.isNotEmpty) return tool;
 
-/// Concise top-header status text reflecting real-time agent activity.
-String headerStatusLabelForPhase(
-  TurnLivePhase phase, {
-  AcpToolKind? activeToolKind,
-}) => switch (phase) {
-  TurnLivePhase.retrying => '重试中',
-  TurnLivePhase.analyzing => '分析中',
-  TurnLivePhase.thinking => '思考中',
-  TurnLivePhase.working =>
-    (activeToolKind == AcpToolKind.edit ||
-            activeToolKind == AcpToolKind.delete ||
-            activeToolKind == AcpToolKind.move)
-        ? '编辑中'
-        : 'Working',
-  TurnLivePhase.responding => '生成中',
-  TurnLivePhase.waiting => 'Working',
-};
+  final native = nativeStatusLabel?.trim();
+  if (native != null && native.isNotEmpty) return native;
 
-/// Evaluates whether the active turn is analyzing, working, thinking, streaming,
-/// retrying, waiting, or potentially stalled.
+  if (phase == TurnLivePhase.thinking) {
+    final heading = liveThoughtHeadline?.trim();
+    if (heading != null && heading.isNotEmpty) return '思考 · $heading';
+    return '思考中';
+  }
+  if (phase == TurnLivePhase.responding) {
+    return '回复中';
+  }
+
+  final plan = activePlanLabel?.trim();
+  if (plan != null && plan.isNotEmpty) return plan;
+
+  return '等待响应';
+}
+
+/// Derives real-time turn liveness strictly from native ACP events and factual
+/// elapsed time — never guessing or fabricating what the model might be doing.
 TurnHealth deriveTurnHealth({
   required DateTime? startedAt,
   required DateTime? lastActivityAt,
@@ -324,101 +361,13 @@ TurnHealth deriveTurnHealth({
   required String? activeToolLabel,
   required String? activePlanLabel,
   required DateTime now,
-  AcpToolKind? activeToolKind,
   String? liveStatusLabel,
+  String? liveThoughtHeadline,
   double? liveTokensPerSecond,
   bool inline = true,
 }) {
   final anchor = lastActivityAt ?? startedAt ?? now;
   final silentSecs = now.difference(anchor).inSeconds.clamp(0, 86400);
-
-  // 1. Explicit network / rate-limit retry reported by agy acp.
-  if (activeRetry != null) {
-    final retryAge = now.difference(activeRetry.timestamp).inSeconds.clamp(0, 86400);
-    final ageSuffix = retryAge >= 15 ? ' · ${formatChineseDuration(retryAge)}' : '';
-    return TurnHealth(
-      tone: TurnHealthTone.retrying,
-      silentSeconds: silentSecs,
-      pillText: activeRetry.compactPillLabel(),
-      detailHeadline: '${activeRetry.summary}$ageSuffix',
-      bannerText: '${activeRetry.summary}$ageSuffix',
-    );
-  }
-
-  // 2. Active tool call running locally/remotely — clearly distinguish 分析中 / 编辑中 / Working.
-  if (hasActiveTool) {
-    final label = (activeToolLabel != null && activeToolLabel.isNotEmpty)
-        ? activeToolLabel
-        : '执行工具';
-    final prefix = switch (activeToolKind) {
-      AcpToolKind.read || AcpToolKind.search || AcpToolKind.fetch => '分析中',
-      AcpToolKind.edit || AcpToolKind.delete || AcpToolKind.move => '编辑中',
-      AcpToolKind.think => '思考中',
-      _ => 'Working',
-    };
-    final warnLongTool = silentSecs >= 180;
-    return TurnHealth(
-      tone: warnLongTool ? TurnHealthTone.suspectedStall : TurnHealthTone.active,
-      silentSeconds: silentSecs,
-      pillText: warnLongTool
-          ? '工具已等待 ${formatCompactDuration(silentSecs)}'
-          : '$prefix · $label',
-      detailHeadline: warnLongTool
-          ? '工具运行已超过 ${formatChineseDuration(silentSecs)} 未返回结果'
-          : '$prefix：$label',
-      bannerText: warnLongTool
-          ? '工具「$label」已 ${formatChineseDuration(silentSecs)} 无输出，可点右侧停止或查看日志'
-          : null,
-    );
-  }
-
-  // 3. Prolonged silence (>= 60s) with no chunks, no tool running, and no retry log.
-  if (silentSecs >= 60) {
-    final compact = formatCompactDuration(silentSecs);
-    final full = formatChineseDuration(silentSecs);
-    return TurnHealth(
-      tone: TurnHealthTone.suspectedStall,
-      silentSeconds: silentSecs,
-      pillText: '$compact无新输出',
-      detailHeadline: '已 $full 未收到模型新输出（可能在深度思考或网络已断开）',
-      bannerText: '已 $full 未收到模型输出，可能仍在深度思考或网络已卡住',
-    );
-  }
-
-  // 4. Short quiet gap (15–59s): make wait duration explicit so user knows it hasn't stopped silently.
-  if (silentSecs >= 15) {
-    final compact = formatCompactDuration(silentSecs);
-    final full = formatChineseDuration(silentSecs);
-    final (waitLabel, waitHeadline) = switch (phase) {
-      TurnLivePhase.analyzing => (
-        '分析中 · $compact前更新',
-        '正在分析工具结果与上下文（距上次输出 $full）',
-      ),
-      TurnLivePhase.working => (
-        'Working · $compact前更新',
-        '正在执行任务步骤（距上次输出 $full）',
-      ),
-      TurnLivePhase.thinking => (
-        '深度思考中 · $compact前更新',
-        '深度思考中（距上次输出 $full）',
-      ),
-      _ when thoughtChars > 0 => (
-        '深度思考中 · $compact前更新',
-        '深度思考中（距上次输出 $full）',
-      ),
-      _ => (
-        'Working · $compact',
-        '等待模型返回下一步内容（已等待 $full）',
-      ),
-    };
-    return TurnHealth(
-      tone: TurnHealthTone.waiting,
-      silentSeconds: silentSecs,
-      pillText: waitLabel,
-      detailHeadline: waitHeadline,
-    );
-  }
-
   final hasSpeed = liveTokensPerSecond != null && liveTokensPerSecond > 0;
   final compactSpeed = hasSpeed
       ? formatTokensPerSecond(liveTokensPerSecond, compact: true)
@@ -428,9 +377,132 @@ TurnHealth deriveTurnHealth({
       : null;
   final cleanStatus = liveStatusLabel?.trim();
   final hasStatus = cleanStatus != null && cleanStatus.isNotEmpty;
+  final cleanPlan = activePlanLabel?.trim();
+  final hasPlan = cleanPlan != null && cleanPlan.isNotEmpty;
+  final cleanThought = liveThoughtHeadline?.trim();
+  final hasThoughtHeading = cleanThought != null && cleanThought.isNotEmpty;
 
-  // 5. Actively running (< 15s since last chunk/event).
+  // 1. Explicit network / rate-limit retry reported by `agy acp`.
+  if (activeRetry != null) {
+    final retryAge = now
+        .difference(activeRetry.timestamp)
+        .inSeconds
+        .clamp(0, 86400);
+    final ageSuffix = retryAge >= 15
+        ? ' · ${formatChineseDuration(retryAge)}'
+        : '';
+    return TurnHealth(
+      tone: TurnHealthTone.retrying,
+      silentSeconds: silentSecs,
+      pillText: activeRetry.compactPillLabel(),
+      detailHeadline: '${activeRetry.summary}$ageSuffix',
+      bannerText: '${activeRetry.summary}$ageSuffix',
+    );
+  }
+
+  // 2. Active tool call: show the model/engine's own native action/title verbatim.
+  if (hasActiveTool) {
+    final label = (activeToolLabel != null && activeToolLabel.trim().isNotEmpty)
+        ? activeToolLabel.trim()
+        : '工具执行中';
+    final warnLongTool = silentSecs >= 180;
+    return TurnHealth(
+      tone: warnLongTool
+          ? TurnHealthTone.suspectedStall
+          : TurnHealthTone.active,
+      silentSeconds: silentSecs,
+      pillText: warnLongTool
+          ? '$label · ${formatCompactDuration(silentSecs)}'
+          : label,
+      detailHeadline: warnLongTool
+          ? '$label（已运行 ${formatChineseDuration(silentSecs)} 未返回结果）'
+          : label,
+      bannerText: warnLongTool
+          ? '「$label」已运行 ${formatChineseDuration(silentSecs)} 未返回结果，可查看日志或停止'
+          : null,
+    );
+  }
+
+  // 3. Explicit native engine status / compaction / notice emitted by `agy`.
+  if (hasStatus) {
+    final compact = formatCompactDuration(silentSecs);
+    final full = formatChineseDuration(silentSecs);
+    final tone = silentSecs >= 60
+        ? TurnHealthTone.suspectedStall
+        : (silentSecs >= 15 ? TurnHealthTone.waiting : TurnHealthTone.active);
+    return TurnHealth(
+      tone: tone,
+      silentSeconds: silentSecs,
+      pillText: silentSecs >= 15 ? '$cleanStatus · $compact' : cleanStatus,
+      detailHeadline: silentSecs >= 15
+          ? '$cleanStatus（距上次事件 $full）'
+          : cleanStatus,
+      bannerText: silentSecs >= 60 ? '$cleanStatus（已 $full 无新事件）' : null,
+    );
+  }
+
+  // 4. Actively receiving `agent_thought_chunk`: surface the model's native heading & speed.
+  if (phase == TurnLivePhase.thinking) {
+    final base = hasThoughtHeading ? '思考 · $cleanThought' : '思考中';
+    if (silentSecs >= 60) {
+      final compact = formatCompactDuration(silentSecs);
+      final full = formatChineseDuration(silentSecs);
+      return TurnHealth(
+        tone: TurnHealthTone.suspectedStall,
+        silentSeconds: silentSecs,
+        pillText: '$base · $compact无新事件',
+        detailHeadline: '$base（已 $full 未收到新思考片段）',
+        bannerText: '已 $full 未收到引擎新事件，可查看日志或停止',
+      );
+    }
+    if (silentSecs >= 15) {
+      final compact = formatCompactDuration(silentSecs);
+      final full = formatChineseDuration(silentSecs);
+      return TurnHealth(
+        tone: TurnHealthTone.waiting,
+        silentSeconds: silentSecs,
+        pillText: '$base · $compact',
+        detailHeadline: '$base（上次收到思考片段：$full前）',
+      );
+    }
+    final pillSuffix = compactSpeed != null ? ' · $compactSpeed' : '';
+    final detailParts = <String>[
+      ?fullSpeed,
+      if (thoughtChars > 0) '已 ${formatCharCount(thoughtChars)}',
+    ];
+    return TurnHealth(
+      tone: TurnHealthTone.active,
+      silentSeconds: silentSecs,
+      pillText: '$base$pillSuffix',
+      detailHeadline: detailParts.isEmpty
+          ? base
+          : '$base（${detailParts.join(' · ')}）',
+    );
+  }
+
+  // 5. Actively receiving `agent_message_chunk`.
   if (phase == TurnLivePhase.responding) {
+    if (silentSecs >= 60) {
+      final compact = formatCompactDuration(silentSecs);
+      final full = formatChineseDuration(silentSecs);
+      return TurnHealth(
+        tone: TurnHealthTone.suspectedStall,
+        silentSeconds: silentSecs,
+        pillText: '回复中 · $compact无新事件',
+        detailHeadline: '已 $full 未收到新的回复片段',
+        bannerText: '已 $full 未收到引擎新事件，可查看日志或停止',
+      );
+    }
+    if (silentSecs >= 15) {
+      final compact = formatCompactDuration(silentSecs);
+      final full = formatChineseDuration(silentSecs);
+      return TurnHealth(
+        tone: TurnHealthTone.waiting,
+        silentSeconds: silentSecs,
+        pillText: '回复中 · $compact',
+        detailHeadline: '回复中（上次收到片段：$full前）',
+      );
+    }
     final pillSuffix = compactSpeed != null
         ? ' · $compactSpeed'
         : (answerChars > 0 ? ' · ${formatCharCount(answerChars)}' : '…');
@@ -438,64 +510,57 @@ TurnHealth deriveTurnHealth({
     return TurnHealth(
       tone: TurnHealthTone.active,
       silentSeconds: silentSecs,
-      pillText: '生成中$pillSuffix',
-      detailHeadline: '正在实时输出回复（$speedPart已 ${formatCharCount(answerChars)}）',
-    );
-  }
-  if (phase == TurnLivePhase.analyzing) {
-    final detail = hasStatus ? cleanStatus : null;
-    return TurnHealth(
-      tone: TurnHealthTone.active,
-      silentSeconds: silentSecs,
-      pillText: detail != null ? '分析中 · $detail' : '分析中…',
-      detailHeadline: detail != null
-          ? '正在分析：$detail'
-          : '正在分析文件与工具返回结果…',
-    );
-  }
-  if (phase == TurnLivePhase.working) {
-    final detail = hasStatus
-        ? cleanStatus
-        : (activePlanLabel != null && activePlanLabel.isNotEmpty
-              ? activePlanLabel
-              : null);
-    return TurnHealth(
-      tone: TurnHealthTone.active,
-      silentSeconds: silentSecs,
-      pillText: detail != null ? 'Working · $detail' : 'Working…',
-      detailHeadline: detail != null ? 'Working：$detail' : '正在推进当前任务…',
-    );
-  }
-  if (phase == TurnLivePhase.thinking || thoughtChars > 0) {
-    final pillSuffix = compactSpeed != null
-        ? ' · $compactSpeed'
-        : (thoughtChars > 0 ? ' · ${formatCharCount(thoughtChars)}' : '…');
-    final speedPart = fullSpeed != null ? '$fullSpeed · ' : '';
-    return TurnHealth(
-      tone: TurnHealthTone.active,
-      silentSeconds: silentSecs,
-      pillText: '思考中$pillSuffix',
-      detailHeadline:
-          '正在实时思考（$speedPart已 ${formatCharCount(thoughtChars)}，${formatLastSignalAge(silentSecs)}更新）',
+      pillText: '回复中$pillSuffix',
+      detailHeadline: '正在接收回复（$speedPart已 ${formatCharCount(answerChars)}）',
     );
   }
 
-  if (activePlanLabel != null && activePlanLabel.isNotEmpty) {
+  // 6. Active native `plan` / `plan_update` step from `update_steps`.
+  if (hasPlan) {
+    final compact = formatCompactDuration(silentSecs);
+    final full = formatChineseDuration(silentSecs);
+    final tone = silentSecs >= 60
+        ? TurnHealthTone.suspectedStall
+        : (silentSecs >= 15 ? TurnHealthTone.waiting : TurnHealthTone.active);
     return TurnHealth(
-      tone: TurnHealthTone.active,
+      tone: tone,
       silentSeconds: silentSecs,
-      pillText: 'Working · $activePlanLabel',
-      detailHeadline: '执行计划：$activePlanLabel',
+      pillText: silentSecs >= 15 ? '$cleanPlan · $compact' : cleanPlan,
+      detailHeadline: silentSecs >= 15
+          ? '$cleanPlan（距上次事件 $full）'
+          : cleanPlan,
+      bannerText: silentSecs >= 60 ? '已 $full 未收到引擎新事件，可查看日志或停止' : null,
+    );
+  }
+
+  // 7. Waiting for the next native ACP event from `agy` (no speculation).
+  if (silentSecs >= 60) {
+    final compact = formatCompactDuration(silentSecs);
+    final full = formatChineseDuration(silentSecs);
+    return TurnHealth(
+      tone: TurnHealthTone.suspectedStall,
+      silentSeconds: silentSecs,
+      pillText: '等待响应 · $compact无事件',
+      detailHeadline: '已 $full 未收到引擎新事件',
+      bannerText: '已 $full 未收到引擎新事件，可查看日志或停止',
+    );
+  }
+  if (silentSecs >= 15) {
+    final compact = formatCompactDuration(silentSecs);
+    final full = formatChineseDuration(silentSecs);
+    return TurnHealth(
+      tone: TurnHealthTone.waiting,
+      silentSeconds: silentSecs,
+      pillText: '等待响应 · $compact',
+      detailHeadline: '等待引擎返回下一步事件（已等待 $full）',
     );
   }
 
   return TurnHealth(
     tone: TurnHealthTone.active,
     silentSeconds: silentSecs,
-    pillText: hasStatus
-        ? cleanStatus
-        : (inline ? 'Working…' : 'Antigravity Working…'),
-    detailHeadline: hasStatus ? cleanStatus : '已发送请求，模型正在接入与分析…',
+    pillText: inline ? '等待响应…' : '等待模型响应…',
+    detailHeadline: '已发送请求，等待引擎返回事件…',
   );
 }
 
@@ -671,100 +736,177 @@ TurnRetryInfo? parseRetryFromRawNotification(
   );
 }
 
-/// Extracts real-time semantic phase (`分析中` / `Working` / `思考中` / `生成中`)
-/// and optional concise label from an ACP status/progress notification payload.
-({TurnLivePhase phase, String? label})? parseLiveStatusFromMap({
+/// Returns the latest native thought heading/line from [item]'s timeline
+/// (or merged thought buffer), or `null` if no reasoning text has arrived yet.
+String? latestAssistantThoughtHeadline(AssistantTranscriptItem? item) {
+  if (item == null) return null;
+  for (final entry in item.timeline.reversed) {
+    if (entry is ThoughtTimelineEntry && entry.text.trim().isNotEmpty) {
+      final heading = latestThoughtHeadline(entry.text);
+      if (heading.isNotEmpty) return heading;
+    }
+  }
+  if (item.thought.trim().isNotEmpty) {
+    final heading = latestThoughtHeadline(item.thought);
+    if (heading.isNotEmpty) return heading;
+  }
+  return null;
+}
+
+const _kTerminalStatusTokens = <String>{
+  'end',
+  'ended',
+  'done',
+  'complete',
+  'completed',
+  'finished',
+  'idle',
+  'ready',
+  'ok',
+  'success',
+  'succeeded',
+  'cancelled',
+  'canceled',
+  'state_idle',
+  'state_fully_idle',
+};
+
+const _kOpaqueMachineStatusTokens = <String>{
+  'in_progress',
+  'inprogress',
+  'pending',
+  'running',
+  'active',
+  'busy',
+  'working',
+  'status',
+  'progress',
+  'begin',
+  'report',
+  'start',
+  'started',
+  'update',
+  'session_update',
+  'none',
+  'null',
+  'true',
+  'false',
+};
+
+String _clipStatusText(String raw) {
+  final clean = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+  if (clean.length <= 80) return clean;
+  return '${clean.substring(0, 80)}…';
+}
+
+/// Extracts a verbatim native engine status update (or explicit terminal clear)
+/// from an ACP `session/update` or JSON-RPC progress/status notification.
+///
+/// Never guesses or invents a phase from keyword matching: returns only text
+/// that `agy acp` / the model actually emitted, or factual protocol state labels
+/// (e.g. `compaction_update` / `STATE_WAITING_FOR_TASKS`).
+({String? text, bool clear})? extractNativeStatusUpdate({
   required String kindOrMethod,
   required Map<String, Object?> payload,
 }) {
-  final pieces = <String>[];
-  String? bestLabel;
-  void consider(Object? raw, {bool preferLabel = false}) {
-    if (raw is! String) return;
-    final clean = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
-    if (clean.isEmpty) return;
-    pieces.add(clean);
-    if (preferLabel && bestLabel == null) {
-      bestLabel = clean.length > 48 ? '${clean.substring(0, 48)}…' : clean;
+  final kindLower = kindOrMethod.trim().toLowerCase();
+
+  String? cleanStr(Object? raw) {
+    if (raw is! String) return null;
+    final s = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+    return s.isEmpty ? null : s;
+  }
+
+  final nestedVal = payload['value'];
+  final valMap = nestedVal is Map ? nestedVal : null;
+  final rawMeta = payload['_meta'];
+  final metaMap = rawMeta is Map ? rawMeta : null;
+
+  final stateToken = (cleanStr(valMap?['kind']) ??
+          cleanStr(payload['status']) ??
+          cleanStr(payload['state']) ??
+          cleanStr(valMap?['status']))
+      ?.toLowerCase();
+
+  if (kindLower == 'background_turn_completed' ||
+      (stateToken != null && _kTerminalStatusTokens.contains(stateToken))) {
+    return (text: null, clear: true);
+  }
+
+  if (stateToken == 'state_waiting_for_tasks' ||
+      stateToken == 'waiting_for_tasks') {
+    return (text: '等待后台任务', clear: false);
+  }
+
+  // Prefer human-readable descriptive fields emitted by the engine/model verbatim.
+  final valTitle = cleanStr(valMap?['title']);
+  final valMsg = cleanStr(valMap?['message']) ?? cleanStr(valMap?['detail']);
+  if (valTitle != null && valMsg != null && valTitle != valMsg) {
+    return (text: _clipStatusText('$valTitle · $valMsg'), clear: false);
+  }
+
+  final descriptiveCandidates = <String?>[
+    cleanStr(metaMap?['toolAction']),
+    cleanStr(payload['message']),
+    cleanStr(payload['detail']),
+    cleanStr(payload['title']),
+    cleanStr(payload['summary']),
+    cleanStr(payload['text']),
+    valMsg,
+    valTitle,
+    cleanStr(metaMap?['message']),
+    cleanStr(metaMap?['status']),
+  ];
+  for (final cand in descriptiveCandidates) {
+    if (cand == null) continue;
+    final low = cand.toLowerCase();
+    if (_kTerminalStatusTokens.contains(low)) {
+      return (text: null, clear: true);
+    }
+    if (_kOpaqueMachineStatusTokens.contains(low)) continue;
+    return (text: _clipStatusText(cand), clear: false);
+  }
+
+  if (kindLower == 'compaction_update' ||
+      kindLower == 'compaction_summary_chunk') {
+    return (text: '压缩上下文中', clear: false);
+  }
+  if (kindLower == 'background_turn_started') {
+    return (text: '后台任务执行中', clear: false);
+  }
+
+  // Only surface raw `status`/`state` if it isn't an opaque boilerplate enum token.
+  final rawState = cleanStr(payload['status']) ?? cleanStr(payload['state']);
+  if (rawState != null) {
+    final low = rawState.toLowerCase();
+    if (!_kOpaqueMachineStatusTokens.contains(low) &&
+        !_kTerminalStatusTokens.contains(low)) {
+      return (text: _clipStatusText(rawState), clear: false);
     }
   }
 
-  consider(payload['message'], preferLabel: true);
-  consider(payload['detail'], preferLabel: true);
-  consider(payload['title'], preferLabel: true);
-  consider(payload['status']);
-  consider(payload['state']);
-  consider(payload['phase']);
-  consider(payload['text']);
-
-  final nestedVal = payload['value'];
-  if (nestedVal is Map) {
-    consider(nestedVal['message'], preferLabel: true);
-    consider(nestedVal['title'], preferLabel: true);
-    consider(nestedVal['status']);
-    consider(nestedVal['kind']);
-  }
-
-  if (pieces.isEmpty) return null;
-  final probe = '$kindOrMethod ${pieces.join(' ')}'.toLowerCase();
-
-  final TurnLivePhase phase;
-  if (probe.contains('analyz') ||
-      probe.contains('analys') ||
-      probe.contains('inspect') ||
-      probe.contains('review') ||
-      probe.contains('search') ||
-      probe.contains('reading') ||
-      probe.contains('scan') ||
-      probe.contains('分析') ||
-      probe.contains('阅读') ||
-      probe.contains('检索')) {
-    phase = TurnLivePhase.analyzing;
-  } else if (probe.contains('think') ||
-      probe.contains('reason') ||
-      probe.contains('plan') ||
-      probe.contains('思考') ||
-      probe.contains('规划')) {
-    phase = TurnLivePhase.thinking;
-  } else if (probe.contains('respond') ||
-      probe.contains('generat') ||
-      probe.contains('writ') ||
-      probe.contains('answer') ||
-      probe.contains('生成') ||
-      probe.contains('回复')) {
-    phase = TurnLivePhase.responding;
-  } else if (probe.contains('work') ||
-      probe.contains('edit') ||
-      probe.contains('patch') ||
-      probe.contains('run') ||
-      probe.contains('exec') ||
-      probe.contains('tool') ||
-      probe.contains('task') ||
-      probe.contains('busy') ||
-      probe.contains('progress') ||
-      probe.contains('in_progress') ||
-      probe.contains('编辑') ||
-      probe.contains('执行') ||
-      probe.contains('修改')) {
-    phase = TurnLivePhase.working;
-  } else {
-    return null;
-  }
-
-  // Avoid echoing generic raw enum words ("working", "analyzing") as redundant detail.
-  final labelLower = bestLabel?.toLowerCase() ?? '';
-  final redundant =
-      labelLower == 'working' ||
-      labelLower == 'analyzing' ||
-      labelLower == 'thinking' ||
-      labelLower == 'running' ||
-      labelLower == 'in_progress' ||
-      labelLower == 'busy' ||
-      labelLower == 'status' ||
-      labelLower == 'progress';
-
-  return (phase: phase, label: redundant ? null : bestLabel);
+  return null;
 }
+
+/// Parses factual Antigravity `trajectoryStateUpdate` markers from engine logs
+/// (e.g. `STATE_WAITING_FOR_TASKS` when waiting on background tasks/subagents).
+({String? statusText, bool clear})? parseTrajectoryStateFromLogLine(
+  String rawLine,
+) {
+  final cleaned = cleanEngineLogLine(rawLine);
+  if (cleaned.isEmpty) return null;
+  if (cleaned.contains('STATE_WAITING_FOR_TASKS')) {
+    return (statusText: '等待后台任务', clear: false);
+  }
+  if ((cleaned.contains('trajectoryStateUpdate') ||
+          cleaned.contains('trajectory_state')) &&
+      (cleaned.contains('STATE_IDLE') ||
+          cleaned.contains('STATE_FULLY_IDLE'))) {
+    return (statusText: null, clear: true);
+  }
+  return null;
+}
+
 
 TurnRetryInfo? _parseRetryFromMap({
   required String kindOrMethod,

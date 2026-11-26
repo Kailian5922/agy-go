@@ -91,12 +91,12 @@ void main() {
       expect(res, isNotNull);
       expect(res!.kind, LiveActivityKind.running);
       expect(res.title, '添加汉化');
-      expect(res.chip, '分析中');
-      expect(res.text, '读取 · www/js/plugins.js');
+      expect(res.chip, '执行中');
+      expect(res.text, 'www/js/plugins.js');
       expect(res.text.contains('../'), isFalse);
       expect(res.sinceMs, started.millisecondsSinceEpoch);
 
-      // Edit tool surfaces 编辑中 chip
+      // Native rawInput.toolAction is surfaced verbatim on Live Activity capsule.
       final editChat = ChatState(
         sessionId: 's1',
         sessionCwd: '/storage/emulated/0/game/冬日狂想曲',
@@ -109,9 +109,15 @@ void main() {
               toolCalls: const [
                 AcpToolCall(
                   toolCallId: 'tc2',
-                  title: 'Edit www/js/plugins.js',
+                  name: 'edit_file',
+                  title: 'edit_file',
                   kind: AcpToolKind.edit,
                   status: AcpToolStatus.inProgress,
+                  rawInput: {
+                    'Path': '/storage/emulated/0/game/冬日狂想曲/www/js/plugins.js',
+                    'toolAction': 'Editing plugins.js',
+                    'toolSummary': 'Edit plugins.js',
+                  },
                 ),
               ],
             ),
@@ -127,7 +133,8 @@ void main() {
         settings: settings,
         foreground: false,
       );
-      expect(editRes?.chip, '编辑中');
+      expect(editRes?.chip, '执行中');
+      expect(editRes?.text, 'Editing plugins.js');
 
       // Background parked running conversation keeps Live Activity alive
       final bgRes = deriveLiveActivity(

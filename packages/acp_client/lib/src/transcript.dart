@@ -224,6 +224,7 @@ class ChatTranscript {
                     content: tc.content,
                     rawInput: tc.rawInput,
                     rawOutput: tc.rawOutput,
+                    meta: tc.meta,
                   )
                 else
                   tc,
@@ -271,6 +272,7 @@ class ChatTranscript {
                       content: tc.content,
                       rawInput: tc.rawInput,
                       rawOutput: tc.rawOutput,
+                      meta: tc.meta,
                     )
                   else
                     tc,

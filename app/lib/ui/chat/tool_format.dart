@@ -214,6 +214,7 @@ String compactSingleLinePath(String path, {int maxVisualWidth = 34}) {
 String? _extractPathFromRawInput(Object? rawInput) {
   if (rawInput is! Map) return null;
   for (final key in const [
+    'Path',
     'file_path',
     'filePath',
     'filepath',
@@ -335,4 +336,85 @@ String formatToolSummary(
     return compact ? compactSingleLinePath(display) : display;
   }
   return tc.name ?? tc.kind.name;
+}
+
+final _kBareToolNameRe = RegExp(r'^[a-z0-9]+(?:_[a-z0-9]+)+$');
+final _kBarePathLikeRe = RegExp(
+  r'^(?:file\s+)?(?:file://|/|\.\./|\./|~/)',
+  caseSensitive: false,
+);
+final _kAgyTimestampHeaderRe = RegExp(
+  r'^(?:(?:Created|Completed) At:\s+[^\n]*\n)+',
+);
+
+/// Returns the model/engine's own native action/status description for [tc]
+/// (preferring `rawInput.toolAction` while active, `rawInput.toolSummary` when done,
+/// or a descriptive ACP `title`), scrubbing only Android `../../../../` traversal noise.
+///
+/// Returns `null` when neither the model nor `agy acp` supplied a native descriptive
+/// label (e.g. only a bare path or bare internal tool identifier).
+String? extractNativeToolLabel(
+  AcpToolCall tc, {
+  String? workspaceCwd,
+}) {
+  String clean(String raw) {
+    var out = scrubTraversalPaths(
+      raw.trim().replaceAll(RegExp(r'\s+'), ' '),
+      workspaceCwd: workspaceCwd,
+    );
+    if (workspaceCwd != null && workspaceCwd.trim().isNotEmpty) {
+      final canonWs = _canonicalForPrefix(normalizeToolPath(workspaceCwd));
+      if (canonWs.isNotEmpty && canonWs != '/') {
+        out = out.replaceAll('$canonWs/', '');
+      }
+    }
+    out = out.replaceAll('/storage/emulated/0/', '/sdcard/');
+    out = out.replaceAll(_kAndroidAppHome, '~');
+    return out.trim();
+  }
+
+  final action = tc.nativeToolAction;
+  final summary = tc.nativeToolSummary;
+  final rawTitle = tc.title.trim().replaceAll(RegExp(r'\s+'), ' ');
+  final titleIsBare =
+      rawTitle.isEmpty ||
+      (tc.name != null && rawTitle.toLowerCase() == tc.name!.trim().toLowerCase()) ||
+      _kBareToolNameRe.hasMatch(rawTitle) ||
+      _kBarePathLikeRe.hasMatch(rawTitle);
+  final descriptiveTitle = titleIsBare ? null : rawTitle;
+
+  if (tc.status.isActive) {
+    final pick = action ?? descriptiveTitle ?? summary;
+    if (pick != null && pick.isNotEmpty) return clean(pick);
+  } else {
+    final pick = summary ?? descriptiveTitle ?? action;
+    if (pick != null && pick.isNotEmpty) return clean(pick);
+  }
+
+  if (tc.name == 'invoke_subagent' && tc.rawInput is Map) {
+    final role = _extractStringArg(tc.rawInput, const ['Role', 'role', 'TypeName']);
+    if (role != null && role.isNotEmpty) return clean(role);
+  }
+
+  return null;
+}
+
+/// Formats what [tc] is natively doing for live status bars / headers:
+/// uses the exact native `toolAction` / `title` / `toolSummary` when available,
+/// falling back directly to the factual target summary (path / command / tool name)
+/// without inventing a guessed phase prefix.
+String formatNativeToolLiveStatus(
+  AcpToolCall tc, {
+  String? workspaceCwd,
+}) {
+  final native = extractNativeToolLabel(tc, workspaceCwd: workspaceCwd);
+  if (native != null && native.isNotEmpty) return native;
+  return formatToolSummary(tc, workspaceCwd: workspaceCwd);
+}
+
+/// Strips the model-facing `Created At:` / `Completed At:` header lines that
+/// `agy acp` prepends to command `rawOutput` / text content.
+String stripAgyCommandResultHeader(String raw) {
+  final normalized = raw.replaceAll('\r\n', '\n');
+  return normalized.replaceFirst(_kAgyTimestampHeaderRe, '').trim();
 }

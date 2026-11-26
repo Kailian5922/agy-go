@@ -11,6 +11,8 @@ import 'package:agy_go/state/settings_state.dart';
 import 'package:agy_go/state/workspaces_state.dart';
 import 'package:agy_go/ui/chat/activity_strip.dart';
 import 'package:agy_go/ui/chat/chat_list.dart';
+import 'package:agy_go/ui/chat/tool_call_card.dart';
+import 'package:agy_go/ui/chat/tool_format.dart';
 import 'package:agy_go/ui/common/status_dot.dart';
 import 'package:agy_go/ui/shell/sessions_drawer.dart';
 import 'package:agy_remote/agy_remote.dart';
@@ -119,10 +121,10 @@ void main() {
       expect(rawNotif!.retryInSeconds, 5);
     });
 
-    test('deriveTurnHealth separates active thinking, quiet waiting, retrying, and prolonged silence', () {
+    test('deriveTurnHealth reflects native thinking heading, factual waiting, retrying, and prolonged silence without guessing', () {
       final t0 = DateTime(2026, 11, 26, 16, 0, 0);
 
-      // Active thinking (3s ago, 420 chars)
+      // Active thinking with native heading from agent_thought_chunk (3s ago)
       final active = deriveTurnHealth(
         startedAt: t0,
         lastActivityAt: t0.add(const Duration(seconds: 20)),
@@ -132,14 +134,16 @@ void main() {
         answerChars: 0,
         hasActiveTool: false,
         activeToolLabel: null,
+        liveThoughtHeadline: 'Checking ACP status handling',
         activePlanLabel: null,
         now: t0.add(const Duration(seconds: 23)),
       );
       expect(active.tone, TurnHealthTone.active);
-      expect(active.pillText, '思考中 · 420字');
+      expect(active.pillText, '思考 · Checking ACP status handling');
+      expect(active.detailHeadline, contains('420字'));
       expect(active.showAlertBanner, isFalse);
 
-      // Quiet wait (28s ago)
+      // Quiet wait (28s ago) -> factual elapsed gap, never guesses "深度思考中"
       final waiting = deriveTurnHealth(
         startedAt: t0,
         lastActivityAt: t0,
@@ -153,10 +157,11 @@ void main() {
         now: t0.add(const Duration(seconds: 28)),
       );
       expect(waiting.tone, TurnHealthTone.waiting);
-      expect(waiting.pillText, '深度思考中 · 28s前更新');
+      expect(waiting.pillText, '思考中 · 28s');
+      expect(waiting.pillText, isNot(contains('深度思考')));
       expect(waiting.showAlertBanner, isFalse);
 
-      // Prolonged silence (95s ago, no active tool) -> suspectedStall + alert banner!
+      // Prolonged silence (95s ago, no active tool) -> factual suspectedStall + alert banner!
       final stalled = deriveTurnHealth(
         startedAt: t0,
         lastActivityAt: t0,
@@ -170,7 +175,8 @@ void main() {
         now: t0.add(const Duration(seconds: 95)),
       );
       expect(stalled.tone, TurnHealthTone.suspectedStall);
-      expect(stalled.pillText, '1m35s无新输出');
+      expect(stalled.pillText, '思考中 · 1m35s无新事件');
+      expect(stalled.detailHeadline, contains('未收到新思考片段'));
       expect(stalled.showAlertBanner, isTrue);
 
       // Explicit retry notice -> retrying + alert banner!
@@ -195,14 +201,17 @@ void main() {
       expect(retrying.showAlertBanner, isTrue);
     });
 
-    test('tailPreviewLines and latestThoughtHeadline always surface the newest thinking lines', () {
-      const multiLine =
-          'Line 1 old\nLine 2 old\n\nLine 3 middle\n**Line 4 newer**\nLine 5 latest';
-      expect(latestThoughtHeadline(multiLine), 'Line 5 latest');
+    test('tailPreviewLines and latestThoughtHeadline prefer Gemini native bold/markdown headers and fall back to newest prose line', () {
+      const withHeading =
+          'Line 1 old\n**Inspecting status bar**\nChecking lines 120 to 160 in chat_screen.dart';
+      expect(latestThoughtHeadline(withHeading), 'Inspecting status bar');
       expect(
-        tailPreviewLines(multiLine, maxLines: 2),
-        '**Line 4 newer**\nLine 5 latest',
+        tailPreviewLines(withHeading, maxLines: 2),
+        '**Inspecting status bar**\nChecking lines 120 to 160 in chat_screen.dart',
       );
+
+      const plainProse = 'Line 1 old\nLine 2 middle\nLine 3 latest';
+      expect(latestThoughtHeadline(plainProse), 'Line 3 latest');
     });
   });
 
@@ -455,12 +464,12 @@ void main() {
       await tester.pump(const Duration(milliseconds: 350));
 
       expect(find.text('实时运行状态与进度'), findsOneWidget);
-      expect(find.text('实时健康度（判断正常运行 / 重试 / 卡住）'), findsOneWidget);
+      expect(find.text('实时状态（原生事件 / 重试 / 超时监测）'), findsOneWidget);
       expect(find.text('引擎重试原文'), findsOneWidget);
       expect(find.text('中止当前卡顿并重发上一条消息'), findsOneWidget);
     });
 
-    testWidgets('ChatList shows live thinking tail (not line 1) and footer status below finished tools', (tester) async {
+    testWidgets('ChatList shows live thinking tail (not line 1) and factual silence warning below finished tools', (tester) async {
       final now = DateTime.now();
       final seeded = ChatState(
         sessionId: 's-think',
@@ -510,12 +519,12 @@ void main() {
       );
       await tester.pump();
 
-      // Shows latest thought line instead of staying stuck on line 1, AND shows stall warning below tool!
+      // Shows latest thought line instead of staying stuck on line 1, AND shows factual silence warning!
       expect(find.textContaining('Latest active thought line right now'), findsWidgets);
-      expect(find.textContaining('未收到模型新输出'), findsOneWidget);
+      expect(find.textContaining('未收到新思考片段'), findsOneWidget);
     });
 
-    test('TurnSpeedTracker, phaseForToolKind, parseLiveStatusFromMap & deriveTurnHealth accurately track speed and live phase', () {
+    test('TurnSpeedTracker, resolveNativeHeaderStatus, extractNativeStatusUpdate & deriveTurnHealth report strictly native signals', () {
       expect(estimateTokenCount('你好世界hello'), greaterThan(3));
       expect(formatTokensPerSecond(48.64), '48.6 tok/s');
       expect(formatTokensPerSecond(48.64, compact: true), '49 tok/s');
@@ -547,55 +556,111 @@ void main() {
       expect(estFinal, isNotNull);
       expect(estFinal!.estimated, isTrue);
 
-      // Phase classification & header labels
-      expect(phaseForToolKind(AcpToolKind.read), TurnLivePhase.analyzing);
-      expect(phaseForToolKind(AcpToolKind.search), TurnLivePhase.analyzing);
-      expect(phaseForToolKind(AcpToolKind.edit), TurnLivePhase.working);
-      expect(phaseForToolKind(AcpToolKind.execute), TurnLivePhase.working);
-      expect(headerStatusLabelForPhase(TurnLivePhase.analyzing), '分析中');
+      // Native tool label formatting prefers model's own rawInput.toolAction / toolSummary.
+      const activeTool = AcpToolCall(
+        toolCallId: 'tc-native',
+        name: 'read_file',
+        title: 'read_file',
+        kind: AcpToolKind.read,
+        status: AcpToolStatus.inProgress,
+        rawInput: {
+          'Path': '/repo/lib/main.dart',
+          'toolAction': 'Viewing lib/main.dart',
+          'toolSummary': 'View lib/main.dart',
+        },
+      );
       expect(
-        headerStatusLabelForPhase(TurnLivePhase.working, activeToolKind: AcpToolKind.edit),
-        '编辑中',
+        formatNativeToolLiveStatus(activeTool, workspaceCwd: '/repo'),
+        'Viewing lib/main.dart',
       );
-      expect(headerStatusLabelForPhase(TurnLivePhase.working), 'Working');
+      expect(
+        resolveNativeHeaderStatus(
+          phase: TurnLivePhase.working,
+          activeToolStatus: formatNativeToolLiveStatus(
+            activeTool,
+            workspaceCwd: '/repo',
+          ),
+        ),
+        'Viewing lib/main.dart',
+      );
 
-      final parsedAnalyzing = parseLiveStatusFromMap(
-        kindOrMethod: 'status_update',
+      // Native header status shows verbatim engine status, thought heading, or honest 等待响应.
+      expect(
+        resolveNativeHeaderStatus(
+          phase: TurnLivePhase.working,
+          nativeStatusLabel: '压缩上下文中',
+        ),
+        '压缩上下文中',
+      );
+      expect(
+        resolveNativeHeaderStatus(
+          phase: TurnLivePhase.thinking,
+          liveThoughtHeadline: 'Planning patch for chat_state.dart',
+        ),
+        '思考 · Planning patch for chat_state.dart',
+      );
+      expect(
+        resolveNativeHeaderStatus(phase: TurnLivePhase.waiting),
+        '等待响应',
+      );
+
+      // extractNativeStatusUpdate returns verbatim engine messages and explicit clears without keyword guessing.
+      final verbatim = extractNativeStatusUpdate(
+        kindOrMethod: 'agent_status',
+        payload: {'message': 'Compacting conversation history'},
+      );
+      expect(verbatim?.text, 'Compacting conversation history');
+      expect(verbatim?.clear, isFalse);
+
+      final compactStart = extractNativeStatusUpdate(
+        kindOrMethod: 'compaction_update',
+        payload: {'status': 'in_progress'},
+      );
+      expect(compactStart?.text, '压缩上下文中');
+      expect(compactStart?.clear, isFalse);
+
+      final compactDone = extractNativeStatusUpdate(
+        kindOrMethod: 'compaction_update',
+        payload: {'status': 'completed'},
+      );
+      expect(compactDone?.clear, isTrue);
+
+      final progressReport = extractNativeStatusUpdate(
+        kindOrMethod: r'$/progress',
         payload: {
-          'phase': 'analyzing',
-          'message': '正在扫描项目目录',
+          'value': {
+            'kind': 'report',
+            'title': 'Indexing workspace',
+            'message': '18/40 files',
+          },
         },
       );
-      expect(parsedAnalyzing?.phase, TurnLivePhase.analyzing);
-      expect(parsedAnalyzing?.label, '正在扫描项目目录');
+      expect(progressReport?.text, 'Indexing workspace · 18/40 files');
 
-      final parsedWorking = parseLiveStatusFromMap(
-        kindOrMethod: 'progress',
+      final progressEnd = extractNativeStatusUpdate(
+        kindOrMethod: r'$/progress',
         payload: {
-          'status': 'working',
-          'title': 'Running build script',
+          'value': {'kind': 'end'},
         },
       );
-      expect(parsedWorking?.phase, TurnLivePhase.working);
-      expect(parsedWorking?.label, 'Running build script');
+      expect(progressEnd?.clear, isTrue);
 
-      // deriveTurnHealth distinguishes 分析中 / 编辑中 / 思考中 · tok/s
-      final analyzeHealth = deriveTurnHealth(
-        startedAt: t0,
-        lastActivityAt: t0,
-        phase: TurnLivePhase.analyzing,
-        activeRetry: null,
-        thoughtChars: 0,
-        answerChars: 0,
-        hasActiveTool: true,
-        activeToolLabel: 'lib/main.dart',
-        activeToolKind: AcpToolKind.read,
-        activePlanLabel: null,
-        now: t0.add(const Duration(seconds: 2)),
+      // Factual trajectoryStateUpdate log parsing
+      expect(
+        parseTrajectoryStateFromLogLine(
+          '[stderr] RAW WS MSG: {"trajectoryStateUpdate":{"state":"STATE_WAITING_FOR_TASKS"}}',
+        )?.statusText,
+        '等待后台任务',
       );
-      expect(analyzeHealth.pillText, '分析中 · lib/main.dart');
+      expect(
+        parseTrajectoryStateFromLogLine(
+          '[stderr] RAW WS MSG: {"trajectoryStateUpdate":{"state":"STATE_FULLY_IDLE"}}',
+        )?.clear,
+        isTrue,
+      );
 
-      final editHealth = deriveTurnHealth(
+      // deriveTurnHealth surfaces active tool label verbatim without inventing 分析中 / 编辑中 prefixes.
+      final toolHealth = deriveTurnHealth(
         startedAt: t0,
         lastActivityAt: t0,
         phase: TurnLivePhase.working,
@@ -603,12 +668,11 @@ void main() {
         thoughtChars: 0,
         answerChars: 0,
         hasActiveTool: true,
-        activeToolLabel: 'lib/main.dart',
-        activeToolKind: AcpToolKind.edit,
+        activeToolLabel: 'Viewing lib/main.dart',
         activePlanLabel: null,
         now: t0.add(const Duration(seconds: 2)),
       );
-      expect(editHealth.pillText, '编辑中 · lib/main.dart');
+      expect(toolHealth.pillText, 'Viewing lib/main.dart');
 
       final speedThinkHealth = deriveTurnHealth(
         startedAt: t0,
@@ -624,6 +688,187 @@ void main() {
         now: t0.add(const Duration(seconds: 2)),
       );
       expect(speedThinkHealth.pillText, '思考中 · 46 tok/s');
+
+      // Command output timestamp header stripping
+      expect(
+        stripAgyCommandResultHeader(
+          'Created At: 2026-11-26T04:00:00Z\nCompleted At: 2026-11-26T04:00:02Z\nAll tests passed!',
+        ),
+        'All tests passed!',
+      );
+    });
+
+    test('ChatController does not fabricate 分析工具结果 after tool finishes and applies compaction + late background tool patches', () async {
+      final (clientTransport, agentTransport) = MemoryAcpTransport.pair();
+      final client = AcpClient(clientTransport);
+      final agent = AcpJsonRpcPeer(agentTransport);
+      addTearDown(() async {
+        await client.close();
+        await agent.close();
+      });
+
+      final promptGate = Completer<void>();
+      agent.onRequest('initialize', (_) async => {
+        'protocolVersion': 1,
+        'agentInfo': {'name': 'antigravity-cli', 'version': '1.6.0'},
+        'agentCapabilities': {'loadSession': true},
+      });
+      agent.onRequest('session/list', (_) async => {'sessions': const <Object?>[]});
+      agent.onRequest('session/new', (_) async => {'sessionId': 'sess-native'});
+      agent.onRequest('session/prompt', (_) async {
+        await promptGate.future;
+        return {'stopReason': 'end_turn'};
+      });
+
+      final init = await client.initialize();
+      final conn = HostConnection(
+        host: const HostRef.local(),
+        label: 'Test',
+        client: client,
+        initResult: init,
+        defaultCwd: '/repo',
+      );
+      final container = ProviderContainer(
+        overrides: [
+          activeConnectionProvider.overrideWith(() => _StubConnection(conn)),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.read(chatProvider);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final turn = container.read(chatProvider.notifier).send('检查代码');
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      // 1. Active tool starts with native toolAction
+      await agent.sendNotification('session/update', {
+        'sessionId': 'sess-native',
+        'update': {
+          'sessionUpdate': 'tool_call',
+          'toolCallId': 'tc-1',
+          'name': 'read_file',
+          'title': 'read_file',
+          'kind': 'read',
+          'status': 'in_progress',
+          'rawInput': {
+            'Path': '/repo/lib/app.dart',
+            'toolAction': 'Reading app.dart',
+            'toolSummary': 'Read app.dart',
+          },
+        },
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(container.read(chatProvider).livePhase, TurnLivePhase.working);
+
+      // 2. Tool completes -> MUST NOT fabricate "分析工具结果"! Goes cleanly to waiting.
+      await agent.sendNotification('session/update', {
+        'sessionId': 'sess-native',
+        'update': {
+          'sessionUpdate': 'tool_call_update',
+          'toolCallId': 'tc-1',
+          'status': 'completed',
+        },
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(container.read(chatProvider).livePhase, TurnLivePhase.waiting);
+      expect(container.read(chatProvider).liveStatusLabel, isNull);
+
+      // 3. Native compaction_update sets status and clears cleanly when completed.
+      await agent.sendNotification('session/update', {
+        'sessionId': 'sess-native',
+        'update': {
+          'sessionUpdate': 'compaction_update',
+          'status': 'in_progress',
+        },
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(container.read(chatProvider).liveStatusLabel, '压缩上下文中');
+
+      await agent.sendNotification('session/update', {
+        'sessionId': 'sess-native',
+        'update': {
+          'sessionUpdate': 'compaction_update',
+          'status': 'completed',
+        },
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(container.read(chatProvider).liveStatusLabel, isNull);
+
+      // 4. Background tool still running when prompt ends, then patched after end_turn!
+      await agent.sendNotification('session/update', {
+        'sessionId': 'sess-native',
+        'update': {
+          'sessionUpdate': 'tool_call',
+          'toolCallId': 'tc-bg',
+          'name': 'run_command',
+          'title': 'Running tests',
+          'kind': 'execute',
+          'status': 'in_progress',
+        },
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      promptGate.complete();
+      await turn;
+      expect(container.read(chatProvider).isBusy, isFalse);
+
+      // Late patch for known background tool updates transcript even after end_turn.
+      await agent.sendNotification('session/update', {
+        'sessionId': 'sess-native',
+        'update': {
+          'sessionUpdate': 'tool_call_update',
+          'toolCallId': 'tc-bg',
+          'status': 'completed',
+          'rawOutput': 'Created At: 2026-11-26T04:00:00Z\nCompleted At: 2026-11-26T04:00:03Z\nPASS',
+        },
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final lastAssistant =
+          container.read(chatProvider).transcript.items.last as AssistantTranscriptItem;
+      expect(lastAssistant.toolCallById('tc-bg')?.status, AcpToolStatus.completed);
+      expect(lastAssistant.toolCallById('tc-bg')?.rawOutput, contains('PASS'));
+    });
+
+    testWidgets('ToolCallCard renders native toolAction and strips Created At command headers', (tester) async {
+      const tc = AcpToolCall(
+        toolCallId: 'tc-cmd',
+        name: 'run_command',
+        title: 'run_command',
+        kind: AcpToolKind.execute,
+        status: AcpToolStatus.completed,
+        rawInput: {
+          'CommandLine': 'flutter test',
+          'toolAction': 'Running tests',
+          'toolSummary': 'Run unit test suite',
+        },
+        rawOutput:
+            'Created At: 2026-11-26T04:00:00Z\nCompleted At: 2026-11-26T04:00:02Z\n00:02 +73: All tests passed!',
+      );
+
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: AgyGoApp(
+            home: Scaffold(
+              body: Padding(
+                padding: EdgeInsets.all(12),
+                child: ToolCallCard(toolCall: tc, workspaceCwd: '/repo'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // Completed card displays native toolSummary + command without guessed verb override.
+      expect(find.text('Run unit test suite'), findsOneWidget);
+      expect(find.text('flutter test'), findsOneWidget);
+
+      // Expand to inspect cleaned command output (no Created At / Completed At boilerplate).
+      await tester.tap(find.text('Run unit test suite'));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('00:02 +73: All tests passed!'), findsOneWidget);
+      expect(find.textContaining('Created At:'), findsNothing);
     });
 
     test('switching conversations and workspaces keeps background turns alive and isolates cancel()', () async {

@@ -1950,7 +1950,7 @@ class ChatController extends Notifier<ChatState> {
 
     // Ignore stray late content/tool chunks when idle (e.g. arriving right after
     // the user tapped Stop or after a network failure), while still ingesting
-    // metadata updates (config options, modes, session title, usage).
+    // metadata/plan updates and late patches to already-known background tools.
     final update = notification.update;
     if (!current.isSending && !current.isLoadingSession) {
       final isMetadata =
@@ -1958,8 +1958,16 @@ class ChatController extends Notifier<ChatState> {
           update is CurrentModeUpdate ||
           update is AvailableCommandsUpdate ||
           update is SessionInfoUpdate ||
-          update is UsageSessionUpdate;
-      if (!isMetadata) return;
+          update is UsageSessionUpdate ||
+          update is PlanUpdate;
+      final isKnownToolPatch =
+          update is ToolCallPatchedUpdate &&
+          current.transcript.items.any(
+            (item) =>
+                item is AssistantTranscriptItem &&
+                item.toolCallById(update.toolCallId) != null,
+          );
+      if (!isMetadata && !isKnownToolPatch) return;
     }
 
     final now = DateTime.now();
@@ -1994,25 +2002,27 @@ class ChatController extends Notifier<ChatState> {
       case ToolCallCreatedUpdate():
       case ToolCallPatchedUpdate():
         recoveredFromRetry = current.activeRetry != null;
-      case PlanUpdate(:final entries):
-        final activePlan = entries
-            .where((p) => p.status.toLowerCase() == 'in_progress')
-            .firstOrNull;
-        if (activePlan != null && activePlan.content.trim().isNotEmpty) {
-          nextPhase = TurnLivePhase.working;
-          nextStatusLabel = activePlan.content.trim();
-          statusChanged = true;
-        }
+      case PlanUpdate():
+        // Active plan step is stored directly on `transcript.plan` and rendered
+        // natively without duplicating or leaving stale `liveStatusLabel` state.
+        recoveredFromRetry = current.activeRetry != null;
       case AgentStatusUpdate():
         retryUpdate = parseRetryFromStatusUpdate(update, now: now);
         if (retryUpdate == null) {
-          final parsed = parseLiveStatusFromMap(
+          final statusEvent = extractNativeStatusUpdate(
             kindOrMethod: update.kind,
             payload: update.raw,
           );
-          if (parsed != null) {
-            nextPhase = parsed.phase;
-            nextStatusLabel = parsed.label;
+          if (statusEvent != null) {
+            if (statusEvent.clear) {
+              nextStatusLabel = null;
+              if (nextPhase == TurnLivePhase.working) {
+                nextPhase = TurnLivePhase.waiting;
+              }
+            } else {
+              nextPhase = TurnLivePhase.working;
+              nextStatusLabel = statusEvent.text;
+            }
             statusChanged = true;
           }
           recoveredFromRetry = current.activeRetry != null;
@@ -2022,13 +2032,20 @@ class ChatController extends Notifier<ChatState> {
       case UnknownSessionUpdate():
         retryUpdate = parseRetryFromUnknownUpdate(update, now: now);
         if (retryUpdate == null) {
-          final parsed = parseLiveStatusFromMap(
+          final statusEvent = extractNativeStatusUpdate(
             kindOrMethod: update.kind,
             payload: update.raw,
           );
-          if (parsed != null) {
-            nextPhase = parsed.phase;
-            nextStatusLabel = parsed.label;
+          if (statusEvent != null) {
+            if (statusEvent.clear) {
+              nextStatusLabel = null;
+              if (nextPhase == TurnLivePhase.working) {
+                nextPhase = TurnLivePhase.waiting;
+              }
+            } else {
+              nextPhase = TurnLivePhase.working;
+              nextStatusLabel = statusEvent.text;
+            }
             statusChanged = true;
           }
         }
@@ -2058,14 +2075,15 @@ class ChatController extends Notifier<ChatState> {
           ? last.toolCalls.where((t) => t.status.isActive).toList()
           : const <AcpToolCall>[];
       if (activeTools.isNotEmpty) {
-        nextPhase = phaseForToolKind(activeTools.last.kind);
+        nextPhase = TurnLivePhase.working;
         nextStatusLabel = null;
         statusChanged = true;
         nextLiveTps = null;
-      } else {
-        // Tool batch completed: model is now analyzing the tool output for the next step.
-        nextPhase = TurnLivePhase.analyzing;
-        nextStatusLabel = '分析工具结果';
+      } else if (current.isSending) {
+        // Tool batch finished: wait honestly for the next native ACP event
+        // (thought, tool call, plan update, or message) without fabricating a phase.
+        nextPhase = TurnLivePhase.waiting;
+        nextStatusLabel = null;
         statusChanged = true;
         nextLiveTps = null;
       }
@@ -2151,29 +2169,38 @@ class ChatController extends Notifier<ChatState> {
       _recordLiveRetry(retry, sessionId: targetSid);
       return;
     }
-    final liveStatus = parseLiveStatusFromMap(
+    final statusEvent = extractNativeStatusUpdate(
       kindOrMethod: notif.method,
       payload: notif.params,
     );
     final methodLower = notif.method.toLowerCase();
-    if (liveStatus != null ||
+    if (statusEvent != null ||
         methodLower.contains('progress') ||
         methodLower.contains('status')) {
-      if (targetSid != null) {
-        _updateSessionState(
-          targetSid,
-          (cur) => cur.copyWith(
+      ChatState applyStatus(ChatState cur) {
+        if (statusEvent == null) {
+          return cur.copyWith(lastActivityAt: () => now);
+        }
+        if (statusEvent.clear) {
+          return cur.copyWith(
             lastActivityAt: () => now,
-            livePhase: liveStatus?.phase,
-            liveStatusLabel: liveStatus != null ? () => liveStatus.label : null,
-          ),
-        );
-      } else if (foregroundPending) {
-        state = state.copyWith(
+            livePhase: cur.livePhase == TurnLivePhase.working
+                ? TurnLivePhase.waiting
+                : cur.livePhase,
+            liveStatusLabel: () => null,
+          );
+        }
+        return cur.copyWith(
           lastActivityAt: () => now,
-          livePhase: liveStatus?.phase,
-          liveStatusLabel: liveStatus != null ? () => liveStatus.label : null,
+          livePhase: TurnLivePhase.working,
+          liveStatusLabel: () => statusEvent.text,
         );
+      }
+
+      if (targetSid != null) {
+        _updateSessionState(targetSid, applyStatus);
+      } else if (foregroundPending) {
+        state = applyStatus(state);
       }
     }
   }
@@ -2212,6 +2239,35 @@ class ChatController extends Notifier<ChatState> {
     final retry = parseRetryFromLogLine(rawLine);
     if (retry != null) {
       _recordLiveRetry(retry, sessionId: targetSid);
+      return;
+    }
+
+    final traj = parseTrajectoryStateFromLogLine(rawLine);
+    if (traj != null) {
+      final now = DateTime.now();
+      ChatState applyTraj(ChatState cur) {
+        if (traj.clear) {
+          if (cur.liveStatusLabel != '等待后台任务') return cur;
+          return cur.copyWith(
+            lastActivityAt: () => now,
+            liveStatusLabel: () => null,
+            livePhase: cur.livePhase == TurnLivePhase.working
+                ? TurnLivePhase.waiting
+                : cur.livePhase,
+          );
+        }
+        return cur.copyWith(
+          lastActivityAt: () => now,
+          livePhase: TurnLivePhase.working,
+          liveStatusLabel: () => traj.statusText,
+        );
+      }
+
+      if (targetSid != null) {
+        _updateSessionState(targetSid, applyTraj);
+      } else if (foregroundPending) {
+        state = applyTraj(state);
+      }
     }
   }
 

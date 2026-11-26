@@ -641,6 +641,7 @@ enum AcpToolKind {
       return search;
     }
     if (probe.contains('run_command') ||
+        probe.contains('run_workflow') ||
         probe.contains('bash') ||
         probe.contains('shell') ||
         probe.contains('terminal') ||
@@ -649,6 +650,7 @@ enum AcpToolKind {
     }
     if (probe.contains('read_url') ||
         probe.contains('web_search') ||
+        probe.contains('search_web') ||
         probe.contains('fetch')) {
       return fetch;
     }
@@ -800,6 +802,7 @@ class AcpToolCall {
     this.content = const [],
     this.rawInput,
     this.rawOutput,
+    this.meta,
   });
 
   factory AcpToolCall.fromJson(Map<String, Object?> json) {
@@ -812,6 +815,7 @@ class AcpToolCall {
     }
     final title = _asString(json['title']);
     final name = _asNullableString(json['name']);
+    final rawMeta = json['_meta'];
     return AcpToolCall(
       toolCallId: _asString(json['toolCallId']),
       title: title,
@@ -825,6 +829,7 @@ class AcpToolCall {
       content: parsedContent,
       rawInput: json['rawInput'],
       rawOutput: json['rawOutput'],
+      meta: rawMeta is Map ? Map<String, Object?>.from(rawMeta) : null,
     );
   }
 
@@ -837,6 +842,78 @@ class AcpToolCall {
   final List<AcpToolContent> content;
   final Object? rawInput;
   final Object? rawOutput;
+  final Map<String, Object?>? meta;
+
+  static String? _cleanStringField(Object? raw) {
+    if (raw is! String) return null;
+    final clean = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+    return clean.isEmpty ? null : clean;
+  }
+
+  /// Native present-participle action string emitted by the model itself
+  /// (e.g. `"Viewing README.md"`, `"Analyzing directory"`, `"Running tests"`).
+  String? get nativeToolAction {
+    if (rawInput is Map) {
+      final m = rawInput! as Map;
+      final direct =
+          _cleanStringField(m['toolAction']) ??
+          _cleanStringField(m['tool_action']);
+      if (direct != null) return direct;
+    }
+    if (meta != null) {
+      return _cleanStringField(meta!['toolAction']) ??
+          _cleanStringField(meta!['tool_action']) ??
+          _cleanStringField(meta!['action']);
+    }
+    return null;
+  }
+
+  /// Native concise summary emitted by the model itself
+  /// (e.g. `"Read README.md"`, `"Directory analysis"`, `"Test execution"`).
+  String? get nativeToolSummary {
+    if (rawInput is Map) {
+      final m = rawInput! as Map;
+      final direct =
+          _cleanStringField(m['toolSummary']) ??
+          _cleanStringField(m['tool_summary']) ??
+          _cleanStringField(m['Description']) ??
+          _cleanStringField(m['description']);
+      if (direct != null) return direct;
+    }
+    if (meta != null) {
+      return _cleanStringField(meta!['toolSummary']) ??
+          _cleanStringField(meta!['tool_summary']) ??
+          _cleanStringField(meta!['summary']);
+    }
+    return null;
+  }
+
+  /// Whether [title] is merely a bare internal snake_case tool identifier
+  /// (like `run_command` or `read_file`) rather than human-readable action text.
+  bool get _titleIsBareToolName {
+    final t = title.trim();
+    if (t.isEmpty) return true;
+    final n = name?.trim();
+    if (n != null && n.isNotEmpty && t.toLowerCase() == n.toLowerCase()) {
+      return true;
+    }
+    return RegExp(r'^[a-z0-9]+(?:_[a-z0-9]+)+$').hasMatch(t);
+  }
+
+  /// Exact native status/label emitted by the model or `agy acp` for this tool call
+  /// without client-side phase guessing.
+  String? get nativeDisplayLabel {
+    final action = nativeToolAction;
+    final summary = nativeToolSummary;
+    final cleanTitle = _cleanStringField(title);
+    final descriptiveTitle =
+        (cleanTitle != null && !_titleIsBareToolName) ? cleanTitle : null;
+
+    if (status.isActive) {
+      return action ?? descriptiveTitle ?? summary ?? cleanTitle ?? _cleanStringField(name);
+    }
+    return summary ?? descriptiveTitle ?? action ?? cleanTitle ?? _cleanStringField(name);
+  }
 
   /// All file diffs associated with this tool call: prefers explicit ACP
   /// [AcpDiffToolContent] blocks and falls back to live edit arguments in
@@ -862,6 +939,7 @@ class AcpToolCall {
     final input = rawInput! as Map;
     String resolvePath() {
       for (final key in const [
+        'Path',
         'TargetFile',
         'target_file',
         'file_path',
@@ -888,12 +966,14 @@ class AcpToolCall {
       for (final c in chunks.whereType<Map>()) {
         final oldText =
             _asNullableString(c['TargetContent']) ??
+            _asNullableString(c['Target']) ??
             _asNullableString(c['old_string']) ??
             _asNullableString(c['oldString']) ??
             _asNullableString(c['old_text']) ??
             _asNullableString(c['oldText']);
         final newText =
             _asNullableString(c['ReplacementContent']) ??
+            _asNullableString(c['Replacement']) ??
             _asNullableString(c['new_string']) ??
             _asNullableString(c['newString']) ??
             _asNullableString(c['new_text']) ??
@@ -911,8 +991,10 @@ class AcpToolCall {
       if (out.isNotEmpty) return out;
     }
 
-    // Single replace edit (`TargetContent`/`ReplacementContent`, `old_string`/`new_string`, etc.).
+    // Single replace edit (`Target`/`Replacement` from agy acp `edit_file`,
+    // `TargetContent`/`ReplacementContent`, `old_string`/`new_string`, etc.).
     final oldText =
+        _asNullableString(input['Target']) ??
         _asNullableString(input['TargetContent']) ??
         _asNullableString(input['old_string']) ??
         _asNullableString(input['oldString']) ??
@@ -920,6 +1002,7 @@ class AcpToolCall {
         _asNullableString(input['old_text']) ??
         _asNullableString(input['oldText']);
     final newText =
+        _asNullableString(input['Replacement']) ??
         _asNullableString(input['ReplacementContent']) ??
         _asNullableString(input['new_string']) ??
         _asNullableString(input['newString']) ??
@@ -936,9 +1019,14 @@ class AcpToolCall {
       ];
     }
 
-    // Whole-file write/create (`CodeContent` / `content` on edit tools).
-    if (kind == AcpToolKind.edit && path.isNotEmpty) {
+    // Whole-file write/create (`Content` from agy acp `write_file`, `CodeContent`, `content`).
+    final isWriteTool =
+        kind == AcpToolKind.edit ||
+        name == 'write_file' ||
+        name == 'write_to_file';
+    if (isWriteTool && path.isNotEmpty) {
       final body =
+          _asNullableString(input['Content']) ??
           _asNullableString(input['CodeContent']) ??
           _asNullableString(input['file_text']) ??
           _asNullableString(input['content']);
@@ -998,6 +1086,12 @@ class AcpToolCall {
         : (kind != AcpToolKind.other
               ? kind
               : AcpToolKind.infer(name: nextName, title: nextTitle));
+    final patchMeta = patch['_meta'] is Map
+        ? Map<String, Object?>.from(patch['_meta']! as Map)
+        : null;
+    final mergedMeta = patchMeta == null
+        ? meta
+        : <String, Object?>{...?meta, ...patchMeta};
 
     return AcpToolCall(
       toolCallId: toolCallId,
@@ -1011,6 +1105,7 @@ class AcpToolCall {
       content: mergedContent,
       rawInput: patch['rawInput'] ?? rawInput,
       rawOutput: patch['rawOutput'] ?? rawOutput,
+      meta: mergedMeta,
     );
   }
 }
@@ -1246,8 +1341,56 @@ class AcpSessionNotification {
 sealed class AcpSessionUpdate {
   const AcpSessionUpdate();
 
+  static List<AcpPlanEntry> _parsePlanEntries(Map<String, Object?> json) {
+    final direct = _asList(json['entries']);
+    if (direct.isNotEmpty) {
+      return direct
+          .whereType<Map>()
+          .map((m) => AcpPlanEntry.fromJson(Map<String, Object?>.from(m)))
+          .toList();
+    }
+    final nestedPlan = json['plan'];
+    if (nestedPlan is Map) {
+      final nestedEntries = _asList(nestedPlan['entries']);
+      if (nestedEntries.isNotEmpty) {
+        return nestedEntries
+            .whereType<Map>()
+            .map((m) => AcpPlanEntry.fromJson(Map<String, Object?>.from(m)))
+            .toList();
+      }
+      final markdown = _asNullableString(nestedPlan['content']);
+      if (markdown != null && markdown.trim().isNotEmpty) {
+        final lines = markdown
+            .replaceAll('\r\n', '\n')
+            .split('\n')
+            .map((l) => l.trim())
+            .where((l) => l.isNotEmpty)
+            .toList();
+        final checklist = <AcpPlanEntry>[];
+        final checkRe = RegExp(r'^[-*]\s+\[([ xX~-])\]\s+(.+)$');
+        for (final line in lines) {
+          final m = checkRe.firstMatch(line);
+          if (m != null) {
+            final mark = m.group(1)!.toLowerCase();
+            final status = switch (mark) {
+              'x' => 'completed',
+              '~' => 'in_progress',
+              '-' => 'skipped',
+              _ => 'pending',
+            };
+            checklist.add(AcpPlanEntry(content: m.group(2)!.trim(), status: status));
+          }
+        }
+        if (checklist.isNotEmpty) return checklist;
+      }
+    }
+    return const [];
+  }
+
   static AcpSessionUpdate fromJson(Map<String, Object?> json) {
     final kind = _asString(json['sessionUpdate']);
+    final rawMeta = json['_meta'];
+    final meta = rawMeta is Map ? Map<String, Object?>.from(rawMeta) : null;
     switch (kind) {
       case 'agent_message_chunk':
         return AgentMessageChunkUpdate(
@@ -1268,13 +1411,10 @@ sealed class AcpSessionUpdate {
           toolCallId: _asString(json['toolCallId']),
           patch: json,
         );
-      case 'plan':
-        return PlanUpdate(
-          _asList(json['entries'])
-              .whereType<Map>()
-              .map((m) => AcpPlanEntry.fromJson(Map<String, Object?>.from(m)))
-              .toList(),
-        );
+      case 'plan' || 'plan_update':
+        return PlanUpdate(_parsePlanEntries(json));
+      case 'plan_removed':
+        return const PlanUpdate([]);
       case 'available_commands_update':
         return AvailableCommandsUpdate(
           _asList(json['availableCommands'])
@@ -1298,6 +1438,25 @@ sealed class AcpSessionUpdate {
         );
       case 'usage_update':
         return UsageSessionUpdate(AcpUsageInfo.fromJson(json));
+      case 'compaction_update' || 'compaction_summary_chunk':
+        final statusText =
+            _asNullableString(json['status']) ??
+            _asNullableString(json['state']) ??
+            'compacting';
+        final detailText =
+            _asNullableString(json['message']) ??
+            _asNullableString(json['detail']) ??
+            _asNullableString(json['summary']) ??
+            (json['content'] is Map
+                ? _asNullableString((json['content']! as Map)['text'])
+                : null);
+        return AgentStatusUpdate(
+          kind: kind,
+          status: statusText,
+          detail: detailText,
+          meta: meta,
+          raw: json,
+        );
       case 'status' ||
           'status_update' ||
           'session_status' ||
@@ -1305,7 +1464,10 @@ sealed class AcpSessionUpdate {
           'progress' ||
           'step_update' ||
           'notice' ||
-          'activity':
+          'activity' ||
+          'task_notification' ||
+          'background_turn_started' ||
+          'background_turn_completed':
         final statusText =
             _asNullableString(json['status']) ??
             _asNullableString(json['state']) ??
@@ -1316,15 +1478,20 @@ sealed class AcpSessionUpdate {
             _asNullableString(json['message']) ??
             _asNullableString(json['detail']) ??
             _asNullableString(json['text']) ??
-            _asNullableString(json['description']);
+            _asNullableString(json['description']) ??
+            _asNullableString(json['content']) ??
+            (json['content'] is Map
+                ? _asNullableString((json['content']! as Map)['text'])
+                : null);
         return AgentStatusUpdate(
           kind: kind,
           status: statusText,
           detail: detailText,
+          meta: meta,
           raw: json,
         );
       default:
-        return UnknownSessionUpdate(kind: kind, raw: json);
+        return UnknownSessionUpdate(kind: kind, meta: meta, raw: json);
     }
   }
 }
@@ -1391,17 +1558,24 @@ final class AgentStatusUpdate extends AcpSessionUpdate {
     required this.kind,
     required this.status,
     this.detail,
+    this.meta,
     this.raw = const {},
   });
 
   final String kind;
   final String status;
   final String? detail;
+  final Map<String, Object?>? meta;
   final Map<String, Object?> raw;
 }
 
 final class UnknownSessionUpdate extends AcpSessionUpdate {
-  const UnknownSessionUpdate({required this.kind, required this.raw});
+  const UnknownSessionUpdate({
+    required this.kind,
+    this.meta,
+    required this.raw,
+  });
   final String kind;
+  final Map<String, Object?>? meta;
   final Map<String, Object?> raw;
 }

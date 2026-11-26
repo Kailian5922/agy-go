@@ -254,18 +254,6 @@ final _liveEndingProvider =
       _LiveEndingController.new,
     );
 
-String _toolVerb(AcpToolKind kind) => switch (kind) {
-  AcpToolKind.read => '读取',
-  AcpToolKind.edit => '编辑',
-  AcpToolKind.delete => '删除',
-  AcpToolKind.move => '移动',
-  AcpToolKind.search => '搜索',
-  AcpToolKind.execute => '运行',
-  AcpToolKind.fetch => '抓取',
-  AcpToolKind.think => '思考',
-  _ => '执行',
-};
-
 /// Pure reducer deriving the current Live Activity capsule payload from app state.
 LiveActivityPayload? deriveLiveActivity({
   required ChatState chat,
@@ -303,7 +291,10 @@ LiveActivityPayload? deriveLiveActivity({
   // 2. Agent tool / command permission approval.
   if (chat.pendingPermissions.isNotEmpty) {
     final tc = chat.pendingPermissions.first.request.toolCall;
-    final summary = formatToolSummary(tc, workspaceCwd: chat.sessionCwd);
+    final summary = formatNativeToolLiveStatus(
+      tc,
+      workspaceCwd: chat.sessionCwd,
+    );
     return LiveActivityPayload(
       kind: LiveActivityKind.waiting,
       title: cleanTitle,
@@ -316,17 +307,19 @@ LiveActivityPayload? deriveLiveActivity({
     );
   }
 
-  // 3. Active turn running (thinking / calling tools / following plan).
+  // 3. Active turn running: surface native tool action, engine status, thought heading, or plan.
   if (chat.isBusy) {
     final lastItem = chat.transcript.items.isNotEmpty
         ? chat.transcript.items.last
         : null;
-    final activeTool = lastItem is AssistantTranscriptItem
-        ? lastItem.toolCalls.where((t) => t.status.isActive).lastOrNull
-        : null;
+    final assistant = lastItem is AssistantTranscriptItem ? lastItem : null;
+    final activeTool = assistant?.toolCalls
+        .where((t) => t.status.isActive)
+        .lastOrNull;
     final activePlan = chat.transcript.plan
         .where((p) => p.status.toLowerCase() == 'in_progress')
         .firstOrNull;
+    final nativeStatus = chat.liveStatusLabel?.trim();
 
     String line;
     String chip;
@@ -334,33 +327,27 @@ LiveActivityPayload? deriveLiveActivity({
       line = chat.activeRetry!.summary;
       chip = '重试中';
     } else if (activeTool != null) {
-      final summary = formatToolSummary(
+      line = formatNativeToolLiveStatus(
         activeTool,
         workspaceCwd: chat.sessionCwd,
       );
-      final verb = _toolVerb(activeTool.kind);
-      line = summary.isNotEmpty ? '$verb · $summary' : '正在$verb…';
-      chip = switch (activeTool.kind) {
-        AcpToolKind.read || AcpToolKind.search || AcpToolKind.fetch => '分析中',
-        AcpToolKind.edit || AcpToolKind.delete || AcpToolKind.move => '编辑中',
-        _ => '干活中',
-      };
+      chip = '执行中';
+    } else if (nativeStatus != null && nativeStatus.isNotEmpty) {
+      line = nativeStatus;
+      chip = '运行中';
+    } else if (chat.livePhase == TurnLivePhase.thinking) {
+      final heading = latestAssistantThoughtHeadline(assistant);
+      line = heading != null ? '思考 · $heading' : '正在思考…';
+      chip = '思考中';
+    } else if (chat.livePhase == TurnLivePhase.responding) {
+      line = '正在生成回复…';
+      chip = '回复中';
     } else if (activePlan != null && activePlan.content.trim().isNotEmpty) {
       line = activePlan.content.trim();
-      chip = '干活中';
-    } else if (chat.livePhase == TurnLivePhase.analyzing) {
-      line = chat.liveStatusLabel?.trim().isNotEmpty == true
-          ? '分析中 · ${chat.liveStatusLabel!.trim()}'
-          : '正在分析文件与工具结果…';
-      chip = '分析中';
-    } else if (chat.livePhase == TurnLivePhase.working) {
-      line = chat.liveStatusLabel?.trim().isNotEmpty == true
-          ? 'Working · ${chat.liveStatusLabel!.trim()}'
-          : 'Working…';
-      chip = '干活中';
+      chip = '运行中';
     } else {
-      line = '正在思考与生成…';
-      chip = '思考中';
+      line = '等待模型响应…';
+      chip = '等待中';
     }
 
     return LiveActivityPayload(
@@ -368,7 +355,7 @@ LiveActivityPayload? deriveLiveActivity({
       title: cleanTitle,
       text: line,
       chip: chip,
-      publicText: 'AGY Go 正在干活',
+      publicText: 'AGY Go 正在运行',
       accentColor: accentColor,
       sinceMs: chat.turnStartedAt?.millisecondsSinceEpoch,
       sessionId: chat.sessionId,
