@@ -114,8 +114,9 @@ class _AppPageState extends State<AppPage> {
     });
     final theme = Theme.of(context);
     final padding = MediaQuery.paddingOf(context);
+    final topInset = math.max(padding.top, 8.0);
     const barHeight = 56.0;
-    final top = padding.top + barHeight;
+    final top = topInset + barHeight;
     final inset = sideInsetFor(padding);
     final side = EdgeInsets.symmetric(
       horizontal: AppPage.sideFor(MediaQuery.sizeOf(context).width, inset: inset),
@@ -209,7 +210,7 @@ class _AppPageState extends State<AppPage> {
               Positioned(
                 left: 0,
                 right: 0,
-                top: padding.top,
+                top: topInset,
                 height: barHeight,
                 child: BackdropGroup(
                   child: Padding(

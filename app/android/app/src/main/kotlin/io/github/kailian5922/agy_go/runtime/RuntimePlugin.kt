@@ -36,6 +36,10 @@ class RuntimePlugin(
         controller.addListener(this)
     }
 
+    fun onResume() {
+        controller.notifyStorageChanged()
+    }
+
     fun onRequestPermissionsResult(requestCode: Int): Boolean {
         if (requestCode != STORAGE_REQUEST_CODE) return false
         controller.notifyStorageChanged()
@@ -100,8 +104,7 @@ class RuntimePlugin(
             "storageStatus" -> result.success(PhoneStorage.status(context))
             "requestStorage" -> requestStorage(result)
             "openAllFilesAccess" -> {
-                val intent = PhoneStorage.allFilesAccessIntent(context)
-                result.success(intent != null && runCatching { context.startActivity(intent) }.isSuccess)
+                result.success(PhoneStorage.openAllFilesAccess(context, activityProvider()))
             }
             "startOAuthLogin" -> {
                 controller.startOAuthLogin()

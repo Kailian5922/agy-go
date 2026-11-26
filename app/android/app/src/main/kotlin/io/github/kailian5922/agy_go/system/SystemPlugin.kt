@@ -30,6 +30,7 @@ import kotlin.concurrent.thread
 class SystemPlugin(
     private val context: Context,
     messenger: BinaryMessenger,
+    private val onSetHideStatusBar: ((Boolean) -> Unit)? = null,
 ) : MethodChannel.MethodCallHandler {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -41,6 +42,11 @@ class SystemPlugin(
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
+            "setHideStatusBar" -> {
+                val enabled = call.argument<Boolean>("enabled") ?: true
+                mainHandler.post { onSetHideStatusBar?.invoke(enabled) }
+                result.success(true)
+            }
             "getDeviceInfo" -> {
                 val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
                 val ignoringBattery = pm.isIgnoringBatteryOptimizations(context.packageName)

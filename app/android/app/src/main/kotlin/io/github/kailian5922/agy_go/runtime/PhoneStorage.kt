@@ -50,6 +50,7 @@ object PhoneStorage {
         "guestPath" to GUEST_PATH,
         "hostPath" to hostRoot(),
         "outputPath" to outputDir(),
+        "supportsAllFilesAccess" to (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R),
         "needsAllFilesFallback" to (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageLegacy()),
     )
 
@@ -105,12 +106,30 @@ object PhoneStorage {
         }
     }
 
-    /** Opens the system "All files access" page for this app (Android 11+). */
-    fun allFilesAccessIntent(context: Context): Intent? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        return Intent(
-            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-            Uri.parse("package:${context.packageName}"),
-        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    /** Opens the system "All files access" page for this app (Android 11+), with OEM fallback. */
+    fun openAllFilesAccess(context: Context, activity: android.app.Activity? = null): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        val candidates = listOf(
+            Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:${context.packageName}"),
+            ),
+            Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:${context.packageName}"),
+            ),
+        )
+        for (intent in candidates) {
+            val ok = runCatching {
+                if (activity != null) {
+                    activity.startActivity(intent)
+                } else {
+                    context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+            }.isSuccess
+            if (ok) return true
+        }
+        return false
     }
 }

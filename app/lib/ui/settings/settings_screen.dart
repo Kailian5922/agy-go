@@ -373,14 +373,13 @@ class PhoneStoragePage extends ConsumerStatefulWidget {
 
 class _PhoneStoragePageState extends ConsumerState<PhoneStoragePage> {
   late final AppLifecycleListener _lifecycle;
+  bool _pendingEnable = false;
 
   @override
   void initState() {
     super.initState();
     _lifecycle = AppLifecycleListener(
-      onResume: () => unawaited(
-        ref.read(localRuntimeProvider.notifier).refreshStorage(),
-      ),
+      onResume: () => unawaited(_handleResume()),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -393,6 +392,18 @@ class _PhoneStoragePageState extends ConsumerState<PhoneStoragePage> {
   void dispose() {
     _lifecycle.dispose();
     super.dispose();
+  }
+
+  Future<void> _handleResume() async {
+    await ref.read(localRuntimeProvider.notifier).refreshStorage();
+    if (!mounted) return;
+    final granted = ref.read(localRuntimeProvider).storage.granted ||
+        ref.read(localRuntimeProvider).status.phoneStorageGranted;
+    if (_pendingEnable && granted) {
+      _pendingEnable = false;
+      await ref.read(localRuntimeProvider.notifier).setPhoneStorage(true);
+      if (mounted) showBriefNotice(context, '已授权并开启手机存储挂载');
+    }
   }
 
   @override
@@ -434,7 +445,7 @@ class _PhoneStoragePageState extends ConsumerState<PhoneStoragePage> {
         SettingsSection(
           title: '挂载开关',
           footer: const Text(
-            '开启后本机原生 Bionic 与 PRoot Ubuntu 都会同步创建「~/手机存储」快捷入口，并在「工作区管理」中允许直接浏览和挂载任意子目录。如引擎正在运行，请重启引擎以刷新 PRoot 绑定。',
+            '开启后本机原生 Bionic 与 PRoot Ubuntu 都会同步创建「~/手机存储」快捷入口，并在「工作区管理」中允许直接挂载手机存储、下载、文档、相册等目录。',
           ),
           children: [
             SettingsSwitchTile(
@@ -442,27 +453,23 @@ class _PhoneStoragePageState extends ConsumerState<PhoneStoragePage> {
               tint: SettingsHues.ai,
               title: '允许 agy 访问手机文件',
               subtitle: '挂载 /storage/emulated/0 与 ~/手机存储',
-              value: settings.phoneStorage,
+              value: mountedNow,
               onChanged: (enabled) async {
-                if (enabled && !storage.granted) {
-                  final updated = await ref
+                if (!enabled) {
+                  _pendingEnable = false;
+                  await ref
                       .read(localRuntimeProvider.notifier)
-                      .requestStorage();
-                  if (!updated.granted) {
-                    if (context.mounted) {
-                      showBriefNotice(context, '请先授予存储权限');
-                    }
-                    return;
+                      .setPhoneStorage(false);
+                  if (context.mounted) {
+                    showBriefNotice(context, '已关闭手机存储挂载');
                   }
+                  return;
                 }
-                await ref
-                    .read(localRuntimeProvider.notifier)
-                    .setPhoneStorage(enabled);
-                if (context.mounted) {
-                  showBriefNotice(
-                    context,
-                    enabled ? '已开启手机存储挂载' : '已关闭手机存储挂载',
-                  );
+                _pendingEnable = true;
+                final ok = await ensurePhoneStorageMounted(context, ref);
+                if (context.mounted && ok) {
+                  _pendingEnable = false;
+                  showBriefNotice(context, '已开启手机存储挂载');
                 }
               },
             ),
@@ -587,6 +594,14 @@ class AppearancePage extends ConsumerWidget {
         SettingsSection(
           title: '视觉与性能',
           children: [
+            SettingsSwitchTile(
+              icon: AppIcons.systemIsland,
+              tint: SettingsHues.appearance,
+              title: '隐藏顶部状态栏',
+              subtitle: '沉浸隐藏顶部系统状态栏，从屏幕顶部下滑可临时呼出',
+              value: settings.hideStatusBar,
+              onChanged: (v) => unawaited(notifier.setHideStatusBar(v)),
+            ),
             SettingsSwitchTile(
               icon: AppIcons.edgeGlow,
               tint: SettingsHues.appearance,

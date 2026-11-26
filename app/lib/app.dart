@@ -1,5 +1,8 @@
 // Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
 
+import 'dart:async';
+
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -20,10 +23,13 @@ class AgyGoApp extends ConsumerStatefulWidget {
 
 class _AgyGoAppState extends ConsumerState<AgyGoApp>
     with WidgetsBindingObserver {
+  static const _systemChannel = MethodChannel('agy/system');
+
   AppAccent? _accent;
   bool? _glassBlur;
   bool? _instantPages;
   bool? _fluid;
+  bool? _hideStatusBar;
   late ThemeData _light;
   late ThemeData _dark;
   bool _settled = false;
@@ -43,6 +49,22 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
 
   @override
   void didChangeAccessibilityFeatures() => setState(() {});
+
+  void _syncStatusBar(bool hide) {
+    if (_hideStatusBar == hide) return;
+    _hideStatusBar = hide;
+    unawaited(
+      SystemChrome.setEnabledSystemUIMode(
+        hide ? SystemUiMode.manual : SystemUiMode.edgeToEdge,
+        overlays: hide ? const [SystemUiOverlay.bottom] : SystemUiOverlay.values,
+      ),
+    );
+    unawaited(
+      _systemChannel
+          .invokeMethod<bool>('setHideStatusBar', {'enabled': hide})
+          .catchError((_) => false),
+    );
+  }
 
   void _ensureThemes({
     required AppAccent accent,
@@ -86,6 +108,7 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
         .disableAnimations;
     final fluid = settings.fluidMotion && !reduced;
 
+    _syncStatusBar(settings.hideStatusBar);
     _ensureThemes(
       accent: AppAccent.fromId(settings.accent),
       glassBlur: settings.glassBlur,

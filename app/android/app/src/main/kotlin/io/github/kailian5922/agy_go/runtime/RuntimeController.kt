@@ -410,6 +410,13 @@ class RuntimeController private constructor(private val context: Context) {
         synchronized(lock) {
             val mounted = phoneStorageEnabled && PhoneStorage.isGranted(context)
             PhoneStorage.syncShortcuts(installer.homeDir, installer.prootRootfsDir, mounted)
+            GuestWorkspaceSetup.writeInstructions(
+                homeDir = installer.homeDir,
+                workspaceDir = installer.workspaceDir,
+                useProot = preferProot && installer.isProotAvailable(),
+                phoneStorageMounted = mounted,
+                phoneControlEnabled = phoneControlEnabled,
+            )
         }
         emitStatus()
     }

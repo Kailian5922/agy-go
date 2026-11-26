@@ -97,6 +97,55 @@ Future<String?> showTextPromptDialog(
   return result;
 }
 
+IconData _iconForStoragePreset(PhoneStoragePreset preset) => switch (preset.id) {
+  'phone-storage' => AppIcons.phoneStorage,
+  'phone-download' => AppIcons.downloads,
+  'phone-documents' => AppIcons.document,
+  'phone-dcim' => AppIcons.camera,
+  'phone-pictures' => AppIcons.gallery,
+  _ => AppIcons.folder,
+};
+
+/// Ensures Android shared storage permission is granted and phone storage mounting is on.
+///
+/// Mirrors DSH Go's permission flow: requests classic READ/WRITE_EXTERNAL_STORAGE first
+/// (honoured under targetSdk 28 legacy mode), and falls back to Android 11+ "All files
+/// access" settings if the OEM restricts legacy storage.
+Future<bool> ensurePhoneStorageMounted(
+  BuildContext context,
+  WidgetRef ref,
+) async {
+  final runtimeNotifier = ref.read(localRuntimeProvider.notifier);
+  await runtimeNotifier.refreshStorage();
+  var storage = ref.read(localRuntimeProvider).storage;
+  if (!storage.granted) {
+    storage = await runtimeNotifier.requestStorage();
+  }
+  if (!storage.granted &&
+      (storage.needsAllFilesFallback || storage.supportsAllFilesAccess)) {
+    final opened = await runtimeNotifier.openAllFilesAccess();
+    if (context.mounted) {
+      showBriefNotice(
+        context,
+        opened
+            ? '请在系统设置开启「所有文件访问权限」后返回，将自动完成挂载'
+            : '请先在系统设置中授予手机存储访问权限',
+      );
+    }
+    return false;
+  }
+  if (!storage.granted) {
+    if (context.mounted) {
+      showBriefNotice(context, '未获取手机存储权限，无法挂载本机目录');
+    }
+    return false;
+  }
+  if (!ref.read(settingsProvider).phoneStorage) {
+    await runtimeNotifier.setPhoneStorage(true);
+  }
+  return true;
+}
+
 /// Opens the DSH Go-style 2-step folder picker (Locations sheet -> Directory browser)
 /// and registers the chosen folder as a mounted workspace on the active host.
 Future<WorkspaceItem?> addWorkspaceFlow(BuildContext context, WidgetRef ref) async {
@@ -128,7 +177,7 @@ Future<String?> showDirectoryPicker(
   );
 }
 
-class _DirectoryLocationsSheet extends ConsumerWidget {
+class _DirectoryLocationsSheet extends ConsumerStatefulWidget {
   const _DirectoryLocationsSheet({
     required this.title,
     required this.confirmLabel,
@@ -138,61 +187,119 @@ class _DirectoryLocationsSheet extends ConsumerWidget {
   final String confirmLabel;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_DirectoryLocationsSheet> createState() =>
+      _DirectoryLocationsSheetState();
+}
+
+class _DirectoryLocationsSheetState
+    extends ConsumerState<_DirectoryLocationsSheet> {
+  late final AppLifecycleListener _lifecycle;
+  String? _pendingBrowsePath;
+
+  @override
+  void initState() {
+    super.initState();
+    _lifecycle = AppLifecycleListener(
+      onResume: () => unawaited(_handleResume()),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(ref.read(localRuntimeProvider.notifier).refreshStorage());
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _lifecycle.dispose();
+    super.dispose();
+  }
+
+  Future<void> _handleResume() async {
+    await ref.read(localRuntimeProvider.notifier).refreshStorage();
+    if (!mounted) return;
+    final pending = _pendingBrowsePath;
+    if (pending != null && ref.read(localRuntimeProvider).storage.granted) {
+      _pendingBrowsePath = null;
+      if (!ref.read(settingsProvider).phoneStorage) {
+        await ref.read(localRuntimeProvider.notifier).setPhoneStorage(true);
+      }
+      if (mounted) await _browse(pending);
+    }
+  }
+
+  Future<void> _browse(String startPath) async {
+    final navigator = Navigator.of(context);
+    final picked = await navigator.push<String>(
+      MaterialPageRoute<String>(
+        builder: (_) => DirectoryBrowserPage(
+          startPath: startPath,
+          confirmLabel: widget.confirmLabel,
+        ),
+      ),
+    );
+    if (picked != null && navigator.mounted) {
+      navigator.pop(picked);
+    }
+  }
+
+  Future<void> _openPhoneStoragePath(String path) async {
+    final phoneStorage = ref.read(settingsProvider).phoneStorage;
+    final granted = ref.read(localRuntimeProvider).storage.granted ||
+        ref.read(localRuntimeProvider).status.phoneStorageGranted;
+    if (phoneStorage && granted) {
+      await _browse(path);
+      return;
+    }
+    _pendingBrowsePath = path;
+    final ok = await ensurePhoneStorageMounted(context, ref);
+    if (!mounted) return;
+    if (ok) {
+      _pendingBrowsePath = null;
+      await _browse(path);
+    }
+  }
+
+  Future<void> _enterPath(String defaultDir) async {
+    final typed = await showTextPromptDialog(
+      context,
+      title: '输入文件夹路径',
+      hint: defaultDir,
+      confirmLabel: '前往',
+      mono: true,
+      validate: (v) => v.startsWith('/') ? null : '请输入以 / 开头的绝对路径',
+    );
+    if (typed == null || !mounted) return;
+    await _browse(typed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final host = ref.watch(hostsProvider.select((h) => h.active));
     final local = host.isLocal;
-    final runtime = ref.watch(localRuntimeProvider).status;
+    final runtimeState = ref.watch(localRuntimeProvider);
+    final runtime = runtimeState.status;
     final conn = ref.watch(activeConnectionProvider).value;
     final phoneStorage = ref.watch(settingsProvider.select((s) => s.phoneStorage));
     final recent = ref.watch(workspacesProvider.select((w) => w.recentPaths));
     final storageRoot = runtime.phoneStoragePath;
+    final storageGranted =
+        runtimeState.storage.granted || runtime.phoneStorageGranted;
+    final storageReady = phoneStorage && storageGranted;
     final homePath = runtime.homePath;
     final defaultDir = local
         ? (runtime.workspacePath ?? conn?.defaultCwd ?? '/data/local/tmp')
         : (conn?.defaultCwd ?? '/root');
 
-    final shortcuts = <(IconData, String, String, String?)>[
+    final baseShortcuts = <(IconData, String, String, String?)>[
       if (local) ...[
         (AppIcons.defaultFolder, '默认工作区', defaultDir, '~/workspace'),
         if (homePath != null) (AppIcons.home, '主目录', homePath, '~'),
-        if (phoneStorage && runtime.phoneStorageGranted) ...[
-          (AppIcons.phoneStorage, '手机存储', storageRoot, storageRoot),
-          (AppIcons.downloads, '下载 (Download)', '$storageRoot/Download', '手机存储/Download'),
-          (AppIcons.document, '文档 (Documents)', '$storageRoot/Documents', '手机存储/Documents'),
-        ],
       ] else ...[
         (AppIcons.defaultFolder, '远程默认目录', defaultDir, defaultDir),
         (AppIcons.home, '根目录 /', '/', '/'),
       ],
     ];
-
-    Future<void> browse(String startPath) async {
-      final navigator = Navigator.of(context);
-      final picked = await navigator.push<String>(
-        MaterialPageRoute<String>(
-          builder: (_) => DirectoryBrowserPage(
-            startPath: startPath,
-            confirmLabel: confirmLabel,
-          ),
-        ),
-      );
-      if (picked != null && navigator.mounted) {
-        navigator.pop(picked);
-      }
-    }
-
-    Future<void> enterPath() async {
-      final typed = await showTextPromptDialog(
-        context,
-        title: '输入文件夹路径',
-        hint: defaultDir,
-        confirmLabel: '前往',
-        mono: true,
-        validate: (v) => v.startsWith('/') ? null : '请输入以 / 开头的绝对路径',
-      );
-      if (typed == null || !context.mounted) return;
-      await browse(typed);
-    }
 
     const margin = EdgeInsets.fromLTRB(
       SheetTitleBar.inset,
@@ -205,36 +312,46 @@ class _DirectoryLocationsSheet extends ConsumerWidget {
       top: false,
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(context).height * 0.8,
+          maxHeight: MediaQuery.sizeOf(context).height * 0.85,
         ),
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              SheetTitleBar(title),
+              SheetTitleBar(widget.title),
               SheetGroup(
                 title: '位置',
                 margin: margin,
                 children: [
-                  for (final (icon, label, path, sub) in shortcuts)
+                  for (final (icon, label, path, sub) in baseShortcuts)
                     ListPageRow(
                       icon: icon,
                       title: label,
                       subtitle: sub,
-                      onTap: () => unawaited(browse(path)),
+                      onTap: () => unawaited(_browse(path)),
                     ),
                 ],
               ),
-              if (local && (!phoneStorage || !runtime.phoneStorageGranted))
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(28, 0, 28, 12),
-                  child: Text(
-                    '提示：在「设置 › 手机存储与工作区」开启「访问手机文件」后，可直接挂载手机存储（/storage/emulated/0、下载、文档等目录）。',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: DshColors.of(context).textTertiary,
-                    ),
-                  ),
+              if (local)
+                SheetGroup(
+                  title: storageReady ? '手机存储（已挂载）' : '手机存储（点击授权挂载）',
+                  margin: margin,
+                  children: [
+                    for (final preset in phoneStoragePresets)
+                      ListPageRow(
+                        icon: _iconForStoragePreset(preset),
+                        title: preset.relativePath.isEmpty
+                            ? preset.title
+                            : '${preset.title} (${preset.relativePath})',
+                        subtitle: storageReady
+                            ? preset.subtitle
+                            : '${preset.subtitle} · 需授予手机文件访问权限',
+                        onTap: () => unawaited(
+                          _openPhoneStoragePath(preset.pathFor(storageRoot)),
+                        ),
+                      ),
+                  ],
                 ),
               if (recent.isNotEmpty)
                 SheetGroup(
@@ -251,7 +368,7 @@ class _DirectoryLocationsSheet extends ConsumerWidget {
                           homePath: homePath,
                           storageRoot: storageRoot,
                         ),
-                        onTap: () => unawaited(browse(p)),
+                        onTap: () => unawaited(_browse(p)),
                       ),
                   ],
                 ),
@@ -262,7 +379,7 @@ class _DirectoryLocationsSheet extends ConsumerWidget {
                     icon: AppIcons.enterPath,
                     title: '手动输入路径',
                     chevron: false,
-                    onTap: () => unawaited(enterPath()),
+                    onTap: () => unawaited(_enterPath(defaultDir)),
                   ),
                 ],
               ),
@@ -925,15 +1042,189 @@ class _WorkspaceGroupPicker extends ConsumerWidget {
   }
 }
 
-/// Workspaces management page mirroring DSH Go's WorkspacesPage.
-class WorkspacesPage extends ConsumerWidget {
+/// Workspaces management page mirroring DSH Go's WorkspacesPage, with direct
+/// Android shared-storage authorization and one-tap quick mounting (手机存储 / 下载 / 文档 / 相册 / 图片).
+class WorkspacesPage extends ConsumerStatefulWidget {
   const WorkspacesPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<WorkspacesPage> createState() => _WorkspacesPageState();
+}
+
+class _WorkspacesPageState extends ConsumerState<WorkspacesPage> {
+  late final AppLifecycleListener _lifecycle;
+  PhoneStoragePreset? _pendingMountPreset;
+  bool _pendingBrowseStorage = false;
+  bool _pendingEnableStorage = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _lifecycle = AppLifecycleListener(
+      onResume: () => unawaited(_handleResume()),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(ref.read(localRuntimeProvider.notifier).refreshStorage());
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _lifecycle.dispose();
+    super.dispose();
+  }
+
+  Future<void> _handleResume() async {
+    await ref.read(localRuntimeProvider.notifier).refreshStorage();
+    if (!mounted) return;
+    final granted = ref.read(localRuntimeProvider).storage.granted ||
+        ref.read(localRuntimeProvider).status.phoneStorageGranted;
+    if (!granted) return;
+
+    if (_pendingEnableStorage ||
+        _pendingMountPreset != null ||
+        _pendingBrowseStorage) {
+      if (!ref.read(settingsProvider).phoneStorage) {
+        await ref.read(localRuntimeProvider.notifier).setPhoneStorage(true);
+      }
+    }
+    if (!mounted) return;
+
+    final preset = _pendingMountPreset;
+    final browse = _pendingBrowseStorage;
+    final enableOnly = _pendingEnableStorage;
+    _pendingMountPreset = null;
+    _pendingBrowseStorage = false;
+    _pendingEnableStorage = false;
+
+    if (preset != null) {
+      await _mountPresetDirect(preset);
+    } else if (browse) {
+      await _browsePhoneStorageDirect();
+    } else if (enableOnly) {
+      showBriefNotice(context, '已授权并开启手机存储挂载');
+    }
+  }
+
+  Future<void> _togglePhoneStorage(bool enabled) async {
+    if (!enabled) {
+      _pendingEnableStorage = false;
+      await ref.read(localRuntimeProvider.notifier).setPhoneStorage(false);
+      if (mounted) showBriefNotice(context, '已关闭手机存储挂载');
+      return;
+    }
+    _pendingEnableStorage = true;
+    final ok = await ensurePhoneStorageMounted(context, ref);
+    if (!mounted) return;
+    if (ok) {
+      _pendingEnableStorage = false;
+      showBriefNotice(context, '已开启手机存储挂载（~/手机存储）');
+    }
+  }
+
+  Future<void> _mountPresetDirect(PhoneStoragePreset preset) async {
+    final storageRoot = ref.read(localRuntimeProvider).status.phoneStoragePath;
+    final path = preset.pathFor(storageRoot);
+    final ws = await ref
+        .read(workspacesProvider.notifier)
+        .add(path, title: preset.title);
+    if (mounted) {
+      showBriefNotice(context, '已挂载工作区「${ws.displayTitle}」');
+    }
+  }
+
+  Future<void> _onTapPreset(
+    PhoneStoragePreset preset,
+    WorkspaceItem? existing,
+  ) async {
+    if (existing != null) {
+      await showWorkspaceActionsSheet(
+        context,
+        ref,
+        existing,
+        onNewChat: () =>
+            Navigator.of(context).popUntil((route) => route.isFirst),
+      );
+      return;
+    }
+    final phoneStorage = ref.read(settingsProvider).phoneStorage;
+    final granted = ref.read(localRuntimeProvider).storage.granted ||
+        ref.read(localRuntimeProvider).status.phoneStorageGranted;
+    if (phoneStorage && granted) {
+      await _mountPresetDirect(preset);
+      return;
+    }
+    _pendingMountPreset = preset;
+    final ok = await ensurePhoneStorageMounted(context, ref);
+    if (!mounted) return;
+    if (ok) {
+      _pendingMountPreset = null;
+      await _mountPresetDirect(preset);
+    }
+  }
+
+  Future<void> _browsePhoneStorageDirect() async {
+    final storageRoot = ref.read(localRuntimeProvider).status.phoneStoragePath;
+    final picked = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+        builder: (_) => DirectoryBrowserPage(
+          startPath: storageRoot,
+          confirmLabel: '挂载',
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    final ws = await ref.read(workspacesProvider.notifier).add(picked);
+    if (mounted) {
+      showBriefNotice(context, '已挂载工作区「${ws.displayTitle}」');
+    }
+  }
+
+  Future<void> _onTapBrowsePhoneStorage() async {
+    final phoneStorage = ref.read(settingsProvider).phoneStorage;
+    final granted = ref.read(localRuntimeProvider).storage.granted ||
+        ref.read(localRuntimeProvider).status.phoneStorageGranted;
+    if (phoneStorage && granted) {
+      await _browsePhoneStorageDirect();
+      return;
+    }
+    _pendingBrowseStorage = true;
+    final ok = await ensurePhoneStorageMounted(context, ref);
+    if (!mounted) return;
+    if (ok) {
+      _pendingBrowseStorage = false;
+      await _browsePhoneStorageDirect();
+    }
+  }
+
+  WorkspaceItem? _findMountedPreset(
+    WorkspacesState wsState,
+    PhoneStoragePreset preset,
+    String storageRoot,
+  ) {
+    final target = preset.pathFor(storageRoot);
+    final guestTarget = preset.pathFor('/sdcard');
+    for (final w in wsState.workspaces) {
+      if (w.path == target || w.path == guestTarget) return w;
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final wsState = ref.watch(workspacesProvider);
     final local = ref.watch(hostsProvider.select((h) => h.active.isLocal));
-    final runtime = ref.watch(localRuntimeProvider).status;
+    final runtimeState = ref.watch(localRuntimeProvider);
+    final runtime = runtimeState.status;
+    final phoneStorage = ref.watch(
+      settingsProvider.select((s) => s.phoneStorage),
+    );
+    final storageRoot = runtime.phoneStoragePath;
+    final storageGranted =
+        runtimeState.storage.granted || runtime.phoneStorageGranted;
+    final storageMounted = phoneStorage && storageGranted;
     final sections = wsState.sections;
 
     return AppPage.list(
@@ -965,7 +1256,7 @@ class WorkspacesPage extends ConsumerWidget {
                         w.path,
                         local: local,
                         homePath: runtime.homePath,
-                        storageRoot: runtime.phoneStoragePath,
+                        storageRoot: storageRoot,
                       ),
                       trailing: wsState.selectedId == w.id
                           ? const RowCheck(visible: true)
@@ -979,6 +1270,63 @@ class WorkspacesPage extends ConsumerWidget {
                       ),
                     ),
                   ),
+              ],
+            ),
+          ),
+        if (local)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 24),
+            child: ListPageCard(
+              title: '手机存储与快捷挂载',
+              children: [
+                ListPageRow(
+                  icon: AppIcons.fileAccess,
+                  title: '允许 agy 访问手机存储',
+                  subtitle: storageMounted
+                      ? '已挂载 $storageRoot · 快捷入口 ~/手机存储'
+                      : storageGranted
+                      ? '系统权限已就绪，开启即可挂载本机存储与下载目录'
+                      : '点击授权挂载手机存储、下载、文档与相册',
+                  chevron: false,
+                  trailing: Switch.adaptive(
+                    value: storageMounted,
+                    onChanged: (v) => unawaited(_togglePhoneStorage(v)),
+                  ),
+                  onTap: () => unawaited(_togglePhoneStorage(!storageMounted)),
+                ),
+                for (final preset in phoneStoragePresets)
+                  Builder(
+                    builder: (context) {
+                      final mountedItem = _findMountedPreset(
+                        wsState,
+                        preset,
+                        storageRoot,
+                      );
+                      final isMounted = mountedItem != null;
+                      return ListPageRow(
+                        icon: _iconForStoragePreset(preset),
+                        title: preset.relativePath.isEmpty
+                            ? preset.title
+                            : '${preset.title} (${preset.relativePath})',
+                        subtitle: preset.subtitle,
+                        value: isMounted
+                            ? '已挂载'
+                            : (storageMounted ? '点击挂载' : '授权并挂载'),
+                        trailing: isMounted
+                            ? const RowCheck(visible: true)
+                            : null,
+                        chevron: !isMounted,
+                        onTap: () =>
+                            unawaited(_onTapPreset(preset, mountedItem)),
+                      );
+                    },
+                  ),
+                ListPageRow(
+                  icon: AppIcons.folderOpen,
+                  title: '浏览手机存储选择其他目录',
+                  subtitle: '进入 $storageRoot 浏览并挂载任意子文件夹',
+                  onTap: () => unawaited(_onTapBrowsePhoneStorage()),
+                ),
               ],
             ),
           ),

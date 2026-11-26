@@ -64,15 +64,18 @@ class ChatHeader extends StatelessWidget {
   static double barHeightOf(BuildContext context) =>
       math.max(barHeight, pillHeightOf(context) + 12);
 
+  static double topInsetOf(BuildContext context) =>
+      math.max(MediaQuery.paddingOf(context).top, 8.0);
+
   static double heightOf(BuildContext context) =>
-      MediaQuery.paddingOf(context).top + barHeightOf(context) + 8;
+      topInsetOf(context) + barHeightOf(context) + 8;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final dsh = DshColors.of(context);
-    final top = MediaQuery.paddingOf(context).top;
+    final top = topInsetOf(context);
     final barH = barHeightOf(context);
     final pillH = pillHeightOf(context);
     final titleStyle = theme.textTheme.titleSmall?.copyWith(

@@ -122,6 +122,10 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
       case RuntimeStatusEvent(:final status):
         state = state.copyWith(
           status: status,
+          storage: state.storage.copyWith(
+            granted: status.phoneStorageGranted,
+            hostPath: status.phoneStoragePath,
+          ),
           clearProgress: status.phase != RuntimePhase.installing,
         );
       case RuntimeProgressEvent(:final progress):
@@ -167,6 +171,12 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
     final status = await channel.getStatus();
     if (!ref.mounted) return;
     state = state.copyWith(storage: storage, status: status);
+    // In PRoot mode bind mounts are fixed at launch; restart so new mounts apply immediately.
+    if (status.phase == RuntimePhase.running &&
+        status.executionMode == 'proot') {
+      await stop();
+      await start();
+    }
   }
 
   Future<void> installOrUpdate() async {

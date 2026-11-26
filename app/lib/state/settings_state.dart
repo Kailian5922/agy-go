@@ -43,6 +43,7 @@ class AppSettings {
     this.accent = AppAccentId.mist,
     this.glassBlur = true,
     this.fluidMotion = true,
+    this.hideStatusBar = true,
     this.chatTextScale = 1.0,
     this.foldCompletedTurns = false,
     this.localeCode = 'system',
@@ -60,6 +61,7 @@ class AppSettings {
   final AppAccentId accent;
   final bool glassBlur;
   final bool fluidMotion;
+  final bool hideStatusBar;
   final double chatTextScale;
   final bool foldCompletedTurns;
   final String localeCode; // 'system' | 'zh' | 'en'
@@ -85,6 +87,7 @@ class AppSettings {
     AppAccentId? accent,
     bool? glassBlur,
     bool? fluidMotion,
+    bool? hideStatusBar,
     double? chatTextScale,
     bool? foldCompletedTurns,
     String? localeCode,
@@ -101,6 +104,7 @@ class AppSettings {
     accent: accent ?? this.accent,
     glassBlur: glassBlur ?? this.glassBlur,
     fluidMotion: fluidMotion ?? this.fluidMotion,
+    hideStatusBar: hideStatusBar ?? this.hideStatusBar,
     chatTextScale: chatTextScale ?? this.chatTextScale,
     foldCompletedTurns: foldCompletedTurns ?? this.foldCompletedTurns,
     localeCode: localeCode ?? this.localeCode,
@@ -123,6 +127,7 @@ class SettingsController extends Notifier<AppSettings> {
   static const _kAccent = 'agy.accent';
   static const _kGlassBlur = 'agy.glassBlur';
   static const _kFluidMotion = 'agy.fluidMotion';
+  static const _kHideStatusBar = 'agy.hideStatusBar';
   static const _kChatTextScale = 'agy.chatTextScale';
   static const _kFoldTurns = 'agy.foldCompletedTurns';
   static const _kLocaleCode = 'agy.localeCode';
@@ -162,6 +167,7 @@ class SettingsController extends Notifier<AppSettings> {
         accent: AppAccentId.parse(prefs.getString(_kAccent)),
         glassBlur: prefs.getBool(_kGlassBlur) ?? true,
         fluidMotion: prefs.getBool(_kFluidMotion) ?? true,
+        hideStatusBar: prefs.getBool(_kHideStatusBar) ?? true,
         chatTextScale: (prefs.getDouble(_kChatTextScale) ?? 1.0).clamp(0.85, 1.3),
         foldCompletedTurns: prefs.getBool(_kFoldTurns) ?? false,
         localeCode: prefs.getString(_kLocaleCode) ?? 'system',
@@ -207,6 +213,12 @@ class SettingsController extends Notifier<AppSettings> {
     state = state.copyWith(fluidMotion: enabled);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_kFluidMotion, enabled);
+  }
+
+  Future<void> setHideStatusBar(bool enabled) async {
+    state = state.copyWith(hideStatusBar: enabled);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kHideStatusBar, enabled);
   }
 
   Future<void> setChatTextScale(double scale) async {

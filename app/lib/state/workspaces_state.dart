@@ -443,6 +443,12 @@ class WorkspacesController extends Notifier<WorkspacesState> {
   }
 
   static String _folderName(String path) {
+    for (final preset in phoneStoragePresets) {
+      if (path == preset.pathFor('/storage/emulated/0') ||
+          path == preset.pathFor('/sdcard')) {
+        return preset.title;
+      }
+    }
     final parts = path.split('/').where((p) => p.isNotEmpty).toList();
     return parts.isEmpty ? path : parts.last;
   }
@@ -453,6 +459,62 @@ class WorkspacesController extends Notifier<WorkspacesState> {
     return path.substring(0, idx);
   }
 }
+
+/// Standard Android shared-storage directories that can be mounted directly as
+/// workspaces or browsed from the 2-step directory picker (mirroring DSH Go).
+class PhoneStoragePreset {
+  const PhoneStoragePreset({
+    required this.id,
+    required this.title,
+    required this.relativePath,
+    required this.subtitle,
+  });
+
+  final String id;
+  final String title;
+  final String relativePath;
+  final String subtitle;
+
+  String pathFor(String storageRoot) {
+    final base = storageRoot.endsWith('/') && storageRoot.length > 1
+        ? storageRoot.substring(0, storageRoot.length - 1)
+        : storageRoot;
+    return relativePath.isEmpty ? base : '$base/$relativePath';
+  }
+}
+
+const phoneStoragePresets = <PhoneStoragePreset>[
+  PhoneStoragePreset(
+    id: 'phone-storage',
+    title: '手机存储',
+    relativePath: '',
+    subtitle: '手机内部存储根目录',
+  ),
+  PhoneStoragePreset(
+    id: 'phone-download',
+    title: '下载',
+    relativePath: 'Download',
+    subtitle: '手机存储/Download',
+  ),
+  PhoneStoragePreset(
+    id: 'phone-documents',
+    title: '文档',
+    relativePath: 'Documents',
+    subtitle: '手机存储/Documents',
+  ),
+  PhoneStoragePreset(
+    id: 'phone-dcim',
+    title: '相册',
+    relativePath: 'DCIM',
+    subtitle: '手机存储/DCIM',
+  ),
+  PhoneStoragePreset(
+    id: 'phone-pictures',
+    title: '图片',
+    relativePath: 'Pictures',
+    subtitle: '手机存储/Pictures',
+  ),
+];
 
 final workspacesProvider =
     NotifierProvider<WorkspacesController, WorkspacesState>(

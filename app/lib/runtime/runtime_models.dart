@@ -37,6 +37,7 @@ class PhoneStorageStatus {
     this.guestPath = '/sdcard',
     this.hostPath = '/storage/emulated/0',
     this.outputPath = '/storage/emulated/0/Download/AGY-Go',
+    this.supportsAllFilesAccess = false,
     this.needsAllFilesFallback = false,
   });
 
@@ -49,6 +50,7 @@ class PhoneStorageStatus {
         hostPath: raw['hostPath'] as String? ?? '/storage/emulated/0',
         outputPath:
             raw['outputPath'] as String? ?? '/storage/emulated/0/Download/AGY-Go',
+        supportsAllFilesAccess: raw['supportsAllFilesAccess'] == true,
         needsAllFilesFallback: raw['needsAllFilesFallback'] == true,
       );
 
@@ -58,7 +60,29 @@ class PhoneStorageStatus {
   final String guestPath;
   final String hostPath;
   final String outputPath;
+  final bool supportsAllFilesAccess;
   final bool needsAllFilesFallback;
+
+  PhoneStorageStatus copyWith({
+    bool? granted,
+    bool? permission,
+    bool? legacy,
+    String? guestPath,
+    String? hostPath,
+    String? outputPath,
+    bool? supportsAllFilesAccess,
+    bool? needsAllFilesFallback,
+  }) => PhoneStorageStatus(
+    granted: granted ?? this.granted,
+    permission: permission ?? this.permission,
+    legacy: legacy ?? this.legacy,
+    guestPath: guestPath ?? this.guestPath,
+    hostPath: hostPath ?? this.hostPath,
+    outputPath: outputPath ?? this.outputPath,
+    supportsAllFilesAccess:
+        supportsAllFilesAccess ?? this.supportsAllFilesAccess,
+    needsAllFilesFallback: needsAllFilesFallback ?? this.needsAllFilesFallback,
+  );
 }
 
 class RuntimeStatus {
