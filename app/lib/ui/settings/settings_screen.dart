@@ -106,10 +106,8 @@ class SettingsScreen extends ConsumerWidget {
     final storageValue = settings.phoneStorage
         ? (runtime.storage.granted ? '已挂载' : '需授权')
         : '未开启';
-    final permSummary = settings.toolPermission.isHighRisk
-        ? 'YOLO'
-        : settings.agentMode != AgyAgentMode.standard
-        ? settings.agentMode.label
+    final permSummary = settings.agentMode == AgyAgentMode.plan
+        ? '计划模式 · ${settings.toolPermission.label}'
         : settings.toolPermission.label;
 
     return AppPage.list(
@@ -142,7 +140,7 @@ class SettingsScreen extends ConsumerWidget {
                   ? AppIcons.permissionRisky
                   : AppIcons.permissions,
               tint: settings.toolPermission.isHighRisk ? 3 : SettingsHues.ai,
-              title: '审批与执行模式',
+              title: '权限层级',
               value: Text(
                 permSummary,
                 style: settings.toolPermission.isHighRisk
@@ -818,13 +816,6 @@ class _AccentPill extends StatelessWidget {
 class PermissionPage extends ConsumerWidget {
   const PermissionPage({super.key});
 
-  IconData _modeIcon(AgyAgentMode mode) => switch (mode) {
-    AgyAgentMode.standard => AppIcons.permissions,
-    AgyAgentMode.acceptEdits => AppIcons.edit,
-    AgyAgentMode.auto => AppIcons.running,
-    AgyAgentMode.plan => AppIcons.planMode,
-  };
-
   IconData _permIcon(AgyToolPermission perm) => switch (perm) {
     AgyToolPermission.strict => AppIcons.safeMode,
     AgyToolPermission.requestReview => AppIcons.permissions,
@@ -838,42 +829,18 @@ class PermissionPage extends ConsumerWidget {
     final notifier = ref.read(settingsProvider.notifier);
     final dsh = DshColors.of(context);
     final scheme = Theme.of(context).colorScheme;
+    final isPlan = settings.agentMode == AgyAgentMode.plan;
 
     return AppPage.list(
-      title: '审批与执行模式',
-      subtitle: const Text('全局默认策略，同步写入 ~/.gemini/antigravity-cli/settings.json'),
+      title: '权限层级',
+      subtitle: const Text(
+        '遵循 Antigravity 官方四级权限预设，同步写入 ~/.gemini/antigravity-cli/settings.json',
+      ),
       children: [
         SettingsSection(
-          title: '默认执行模式 (agentMode)',
+          title: 'Antigravity 官方权限预设',
           footer: const Text(
-            '执行模式决定新对话默认如何协作：可在对话中随时通过输入框顶部状态胶囊、+ 面板或 /mode /plan 单独覆盖当前会话。',
-          ),
-          children: [
-            for (final mode in AgyAgentMode.values)
-              ListPageRow(
-                icon: _modeIcon(mode),
-                iconColor: mode == settings.agentMode ? scheme.primary : null,
-                title: mode.label,
-                subtitle: mode.description,
-                subtitleMaxLines: 2,
-                trailing: Icon(
-                  mode == settings.agentMode
-                      ? AppIcons.radioOn
-                      : AppIcons.radioOff,
-                  size: 20,
-                  color: mode == settings.agentMode
-                      ? scheme.primary
-                      : dsh.textTertiary,
-                ),
-                chevron: false,
-                onTap: () => unawaited(notifier.setAgentMode(mode)),
-              ),
-          ],
-        ),
-        SettingsSection(
-          title: '工具权限预设 (toolPermission)',
-          footer: const Text(
-            '「完全放行 (YOLO)」会在启动本机 agy 时附加 --dangerously-skip-permissions 并跳过常规工具审批；手机操控的银行/支付安全闸门仍独立强制生效。',
+            '「完全放行」会在启动本机 agy 时附加 --dangerously-skip-permissions 并跳过常规工具审批；手机操控的银行/支付安全闸门仍独立强制生效。',
           ),
           children: [
             for (final perm in AgyToolPermission.values)
@@ -900,7 +867,7 @@ class PermissionPage extends ConsumerWidget {
                   if (perm.isHighRisk && settings.toolPermission != perm) {
                     final confirmed = await confirmHighRiskAction(
                       context,
-                      title: '将「完全放行 (YOLO)」设为默认？',
+                      title: '将「完全放行」设为默认？',
                       body:
                           '开启后每次启动本机 Antigravity CLI 与新建对话都将跳过命令、改文件、联网和 MCP 的逐次确认。仅建议在受控工作区内启用。',
                       confirmLabel: '确认开启',
@@ -915,16 +882,17 @@ class PermissionPage extends ConsumerWidget {
         SettingsSection(
           title: '工作流与细粒度规则',
           children: [
-            SettingsSegmentTile<AgyArtifactReviewPolicy>(
-              icon: AppIcons.plan,
+            SettingsSwitchTile(
+              icon: AppIcons.planMode,
               tint: SettingsHues.ai,
-              title: '计划产物审核策略',
-              segments: const [
-                PillSegment(AgyArtifactReviewPolicy.asksForReview, '等待审核'),
-                PillSegment(AgyArtifactReviewPolicy.alwaysProceed, '自动继续'),
-              ],
-              selected: settings.artifactReviewPolicy,
-              onChanged: (v) => unawaited(notifier.setArtifactReviewPolicy(v)),
+              title: '默认开启计划模式（/plan）',
+              subtitle: '只读调研并先输出实施方案，经你同意后再修改代码',
+              value: isPlan,
+              onChanged: (v) => unawaited(
+                notifier.setAgentMode(
+                  v ? AgyAgentMode.plan : AgyAgentMode.standard,
+                ),
+              ),
             ),
             SettingsSegmentTile<AgyQueuedMessageBehavior>(
               icon: AppIcons.queued,
@@ -932,7 +900,7 @@ class PermissionPage extends ConsumerWidget {
               title: '生成中再发消息',
               segments: const [
                 PillSegment(AgyQueuedMessageBehavior.queue, '排队等本轮完'),
-                PillSegment(AgyQueuedMessageBehavior.steer, '立即插话引导'),
+                PillSegment(AgyQueuedMessageBehavior.steer, '立即中断发送'),
               ],
               selected: settings.queuedBehavior,
               onChanged: (v) => unawaited(notifier.setQueuedBehavior(v)),
@@ -948,8 +916,8 @@ class PermissionPage extends ConsumerWidget {
             SettingsTile(
               icon: AppIcons.configure,
               tint: SettingsHues.ai,
-              title: '配置 allow / ask / deny 规则与 settings.json',
-              subtitle: '按命令、文件路径、域名与 MCP 工具精细控制权限',
+              title: '高级规则（allow / ask / deny）',
+              subtitle: '按命令、文件路径、域名与 MCP 工具精细控制 settings.json',
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
                   builder: (_) => const AgyEngineParamsPage(),

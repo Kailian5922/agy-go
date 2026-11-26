@@ -96,17 +96,17 @@ enum AgyToolPermission {
   };
 
   String get label => switch (this) {
-    AgyToolPermission.strict => '严格逐次确认',
-    AgyToolPermission.requestReview => '标准审批',
-    AgyToolPermission.proceedInSandbox => '沙箱内放行',
-    AgyToolPermission.alwaysProceed => '完全放行 (YOLO)',
+    AgyToolPermission.strict => '严格确认',
+    AgyToolPermission.requestReview => '询问确认',
+    AgyToolPermission.proceedInSandbox => '沙箱放行',
+    AgyToolPermission.alwaysProceed => '完全放行',
   };
 
   String get description => switch (this) {
-    AgyToolPermission.strict => '包括读取文件在内的每次工具调用都询问确认',
-    AgyToolPermission.requestReview => '写文件、终端命令、联网和 MCP 调用前弹出确认卡',
-    AgyToolPermission.proceedInSandbox => '隔离沙箱内命令自动放行，沙箱外操作继续确认',
-    AgyToolPermission.alwaysProceed => '跳过全部工具与命令确认（高风险，建议仅在受控工作区使用）',
+    AgyToolPermission.strict => '包括读取文件在内的每次工具调用与命令均逐次确认',
+    AgyToolPermission.requestReview => '修改文件、运行命令、联网和 MCP 前询问确认（官方默认）',
+    AgyToolPermission.proceedInSandbox => '隔离沙箱内命令自动运行，沙箱外操作继续确认',
+    AgyToolPermission.alwaysProceed => '跳过全部工具与命令确认（高风险，等同 --dangerously-skip-permissions）',
   };
 
   bool get isHighRisk => this == AgyToolPermission.alwaysProceed;

@@ -55,7 +55,11 @@ Future<bool> confirmHighRiskAction(
 /// Floating compact status pill above [ComposerBar] showing active non-standard
 /// execution mode or elevated tool permission (mirroring DSH Go's PermissionPill).
 class PermissionStatusPill extends ConsumerWidget {
-  const PermissionStatusPill({super.key});
+  const PermissionStatusPill({super.key, this.inline = false});
+
+  /// When true, renders only the stadium pill without outer full-width padding
+  /// so it can share one horizontal row with [ActivityStrip].
+  final bool inline;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -76,13 +80,12 @@ class PermissionStatusPill extends ConsumerWidget {
     final isYolo = effectivePerm == AgyToolPermission.alwaysProceed;
     final isAllowAllChat = chat.allowAll && !isYolo;
     final isPlan = effectiveMode == AgyAgentMode.plan;
-    final isNonStandardMode = effectiveMode != AgyAgentMode.standard;
     final isStrict = effectivePerm == AgyToolPermission.strict;
     final isSandbox = effectivePerm == AgyToolPermission.proceedInSandbox;
 
     if (!isYolo &&
         !isAllowAllChat &&
-        !isNonStandardMode &&
+        !isPlan &&
         !isStrict &&
         !isSandbox &&
         chat.extraDirs == 0) {
@@ -97,112 +100,109 @@ class PermissionStatusPill extends ConsumerWidget {
     late final Color tint;
     VoidCallback? quickReset;
 
-    if (isYolo) {
-      icon = AppIcons.permissionRisky;
-      label = '完全放行 (YOLO)';
-      tint = dsh.danger;
-    } else if (isAllowAllChat) {
-      icon = AppIcons.autoApprove;
-      label = '本对话已自动放行';
-      tint = dsh.warning;
-      quickReset = () =>
-          ref.read(chatProvider.notifier).allowAllForCurrentSession(false);
-    } else if (isPlan) {
+    if (isPlan) {
       icon = AppIcons.planMode;
-      label = '计划模式 · 只读规划';
+      label = '计划模式';
       tint = scheme.primary;
       quickReset = () => unawaited(
         ref.read(chatProvider.notifier).setExecutionMode(AgyAgentMode.standard),
       );
-    } else if (effectiveMode == AgyAgentMode.auto) {
-      icon = AppIcons.running;
-      label = '智能自动模式';
+    } else if (isYolo) {
+      icon = AppIcons.permissionRisky;
+      label = '完全放行';
+      tint = dsh.danger;
+    } else if (isAllowAllChat) {
+      icon = AppIcons.autoApprove;
+      label = '本对话放行';
       tint = dsh.warning;
-    } else if (effectiveMode == AgyAgentMode.acceptEdits) {
-      icon = AppIcons.edit;
-      label = '自动改写模式';
-      tint = scheme.primary;
+      quickReset = () =>
+          ref.read(chatProvider.notifier).allowAllForCurrentSession(false);
     } else if (isStrict) {
       icon = AppIcons.safeMode;
-      label = '严格逐次审批';
+      label = '严格确认';
       tint = scheme.onSurfaceVariant;
     } else if (isSandbox) {
       icon = AppIcons.verified;
-      label = '沙箱内放行';
+      label = '沙箱放行';
       tint = dsh.success;
     } else {
       icon = AppIcons.folder;
-      label = '额外挂载 ${chat.extraDirs} 个目录';
+      label = '+${chat.extraDirs} 目录';
       tint = scheme.primary;
     }
 
+    final pill = Pressable(
+      child: GlassSurface(
+        tier: GlassTier.chrome,
+        stadium: true,
+        style: DshSurfaces.of(context).chrome.copyWith(
+          hairline: tint.withValues(alpha: 0.4),
+        ),
+        onTap: () => unawaited(showApprovalModeSheet(context, ref)),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 6, 8, 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 14, color: tint),
+              const SizedBox(width: 5),
+              Text(
+                label,
+                maxLines: 1,
+                softWrap: false,
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                  color: tint,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              if (!inline &&
+                  chat.extraDirs > 0 &&
+                  (isYolo || isAllowAllChat || isPlan || isStrict || isSandbox)) ...[
+                const SizedBox(width: 5),
+                Text(
+                  '· +${chat.extraDirs} 目录',
+                  style: Theme.of(context).textTheme.labelSmall
+                      ?.copyWith(color: dsh.textTertiary),
+                ),
+              ],
+              const SizedBox(width: 3),
+              if (quickReset != null)
+                GestureDetector(
+                  onTap: quickReset,
+                  behavior: HitTestBehavior.opaque,
+                  child: Padding(
+                    padding: const EdgeInsets.all(1),
+                    child: Icon(AppIcons.close, size: 13, color: tint),
+                  ),
+                )
+              else
+                Icon(AppIcons.disclosure, size: 13, color: tint),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (inline) return pill;
+
     return Padding(
-      padding: const EdgeInsets.fromLTRB(AppSpace.floatInset, 0, AppSpace.floatInset, 6),
+      padding: const EdgeInsets.fromLTRB(
+        AppSpace.floatInset,
+        0,
+        AppSpace.floatInset,
+        6,
+      ),
       child: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: AppSpace.floatingWidth),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Pressable(
-              child: GlassSurface(
-                tier: GlassTier.chrome,
-                stadium: true,
-                style: DshSurfaces.of(context).chrome.copyWith(
-                  hairline: tint.withValues(alpha: 0.4),
-                ),
-                onTap: () => unawaited(showApprovalModeSheet(context, ref)),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(11, 5, 8, 5),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(icon, size: 14, color: tint),
-                      const SizedBox(width: 6),
-                      Text(
-                        label,
-                        style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                          color: tint,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      if (chat.extraDirs > 0 &&
-                          (isYolo ||
-                              isAllowAllChat ||
-                              isNonStandardMode ||
-                              isStrict ||
-                              isSandbox)) ...[
-                        const SizedBox(width: 6),
-                        Text(
-                          '· +${chat.extraDirs} 目录',
-                          style: Theme.of(context).textTheme.labelSmall
-                              ?.copyWith(color: dsh.textTertiary),
-                        ),
-                      ],
-                      const SizedBox(width: 4),
-                      if (quickReset != null)
-                        GestureDetector(
-                          onTap: quickReset,
-                          behavior: HitTestBehavior.opaque,
-                          child: Padding(
-                            padding: const EdgeInsets.all(2),
-                            child: Icon(AppIcons.close, size: 13, color: tint),
-                          ),
-                        )
-                      else
-                        Icon(AppIcons.disclosure, size: 13, color: tint),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
+          child: Align(alignment: Alignment.centerLeft, child: pill),
         ),
       ),
     );
   }
 }
 
-/// Opens the Antigravity CLI Approval & Execution Mode bottom sheet.
+/// Opens the official Antigravity Permission Preset picker bottom sheet.
 Future<void> showApprovalModeSheet(BuildContext context, WidgetRef ref) {
   return showAppSheet<void>(
     context,
@@ -211,21 +211,12 @@ Future<void> showApprovalModeSheet(BuildContext context, WidgetRef ref) {
   );
 }
 
-/// Body of the Approval & Execution Mode picker.
-///
-/// Works both standalone inside [showApprovalModeSheet] and pushed inline inside
-/// a [SheetNavigator] (e.g., from the `+` composer panel).
+/// Official Antigravity 4-tier permission picker (`strict` / `request-review` /
+/// `proceed-in-sandbox` / `always-proceed`) + a simple `/plan` read-only toggle.
 class ApprovalModeSheetBody extends ConsumerWidget {
   const ApprovalModeSheetBody({super.key, this.onCloseSheet});
 
   final VoidCallback? onCloseSheet;
-
-  IconData _modeIcon(AgyAgentMode mode) => switch (mode) {
-    AgyAgentMode.standard => AppIcons.permissions,
-    AgyAgentMode.acceptEdits => AppIcons.edit,
-    AgyAgentMode.auto => AppIcons.running,
-    AgyAgentMode.plan => AppIcons.planMode,
-  };
 
   IconData _permIcon(AgyToolPermission perm) => switch (perm) {
     AgyToolPermission.strict => AppIcons.safeMode,
@@ -240,6 +231,7 @@ class ApprovalModeSheetBody extends ConsumerWidget {
     final chat = ref.watch(chatProvider);
     final activeMode = chat.sessionAgentMode ?? settings.agentMode;
     final activePerm = chat.sessionToolPermission ?? settings.toolPermission;
+    final isPlan = activeMode == AgyAgentMode.plan;
     final dsh = DshColors.of(context);
     final scheme = Theme.of(context).colorScheme;
     final insideNested = SheetNavigator.maybeOf(context)?.canPop ?? false;
@@ -260,42 +252,9 @@ class ApprovalModeSheetBody extends ConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const SheetHeader('审批与执行模式'),
+            const SheetHeader('权限层级'),
             SheetGroup(
-              title: 'Antigravity 执行模式 (agentMode)',
-              children: [
-                for (final mode in AgyAgentMode.values)
-                  ListPageRow(
-                    icon: _modeIcon(mode),
-                    iconColor: mode == activeMode ? scheme.primary : null,
-                    title: mode.label,
-                    subtitle: mode.description,
-                    subtitleMaxLines: 2,
-                    trailing: mode == activeMode
-                        ? Icon(
-                            AppIcons.radioOn,
-                            size: 20,
-                            color: scheme.primary,
-                          )
-                        : Icon(
-                            AppIcons.radioOff,
-                            size: 20,
-                            color: dsh.textTertiary,
-                          ),
-                    chevron: false,
-                    onTap: () async {
-                      await ref
-                          .read(chatProvider.notifier)
-                          .setExecutionMode(mode);
-                      if (context.mounted) {
-                        showBriefNotice(context, '本对话已切换为「${mode.label}」');
-                      }
-                    },
-                  ),
-              ],
-            ),
-            SheetGroup(
-              title: '工具权限预设 (toolPermission)',
+              title: 'Antigravity 官方权限预设',
               children: [
                 for (final perm in AgyToolPermission.values)
                   ListPageRow(
@@ -323,9 +282,9 @@ class ApprovalModeSheetBody extends ConsumerWidget {
                       if (perm.isHighRisk && activePerm != perm) {
                         final confirmed = await confirmHighRiskAction(
                           context,
-                          title: '开启「完全放行 (YOLO)」？',
+                          title: '开启「完全放行」？',
                           body:
-                              '开启后 Antigravity CLI 将跳过命令执行、文件修改与工具调用的逐次确认（等同 --dangerously-skip-permissions）。仅建议在受控测试工作区内开启；手机操控的支付/银行安全闸门仍会独立拦截。',
+                              '开启后 Antigravity CLI 将跳过命令执行、文件修改与工具调用的逐次确认（等同 --dangerously-skip-permissions）。仅建议在受控工作区内使用；手机操控的支付安全闸门仍独立拦截。',
                           confirmLabel: '确认放行',
                         );
                         if (!confirmed) return;
@@ -334,20 +293,43 @@ class ApprovalModeSheetBody extends ConsumerWidget {
                           .read(chatProvider.notifier)
                           .setSessionToolPermission(perm);
                       if (context.mounted) {
-                        showBriefNotice(context, '工具权限已设为「${perm.label}」');
+                        showBriefNotice(context, '权限已切换为「${perm.label}」');
                       }
                     },
                   ),
               ],
             ),
             SheetGroup(
-              title: '默认与细粒度规则',
+              title: '快捷选项',
               children: [
                 ListPageRow(
+                  icon: AppIcons.planMode,
+                  iconColor: isPlan ? scheme.primary : null,
+                  title: '计划模式（/plan）',
+                  subtitle: '只读调研并先输出方案，经你同意后再修改代码',
+                  trailing: Switch.adaptive(
+                    value: isPlan,
+                    onChanged: (v) async {
+                      await ref
+                          .read(chatProvider.notifier)
+                          .setExecutionMode(
+                            v ? AgyAgentMode.plan : AgyAgentMode.standard,
+                          );
+                    },
+                  ),
+                  chevron: false,
+                  onTap: () async {
+                    await ref
+                        .read(chatProvider.notifier)
+                        .setExecutionMode(
+                          isPlan ? AgyAgentMode.standard : AgyAgentMode.plan,
+                        );
+                  },
+                ),
+                ListPageRow(
                   icon: AppIcons.setDefault,
-                  title: '将当前组合设为所有新对话默认',
-                  subtitle:
-                      '同步写入 settings.json（${activeMode.label} · ${activePerm.label}）',
+                  title: '将「${activePerm.label}」设为全局默认',
+                  subtitle: '同步写入 ~/.gemini/antigravity-cli/settings.json',
                   chevron: false,
                   onTap: () async {
                     if (activePerm.isHighRisk &&
@@ -355,29 +337,26 @@ class ApprovalModeSheetBody extends ConsumerWidget {
                             AgyToolPermission.alwaysProceed) {
                       final confirmed = await confirmHighRiskAction(
                         context,
-                        title: '将「完全放行 (YOLO)」设为全局默认？',
+                        title: '将「完全放行」设为全局默认？',
                         body:
-                            '这会写入 ~/.gemini/antigravity-cli/settings.json，之后每次新建会话与重启本机引擎都会自动放行工具调用。',
+                            '这会写入 settings.json，之后每次新建会话与重启引擎都会自动放行工具调用。',
                         confirmLabel: '设为默认',
                       );
                       if (!confirmed) return;
                     }
                     await ref
                         .read(settingsProvider.notifier)
-                        .setAgentMode(activeMode);
-                    await ref
-                        .read(settingsProvider.notifier)
                         .setToolPermission(activePerm);
                     if (context.mounted) {
-                      showBriefNotice(context, '已保存为新对话默认策略');
+                      showBriefNotice(context, '已保存为新对话默认权限');
                       doneOrPop();
                     }
                   },
                 ),
                 ListPageRow(
                   icon: AppIcons.configure,
-                  title: '配置 allow / ask / deny 规则与 settings.json',
-                  subtitle: '按命令、路径与 MCP 服务器精细放行或禁止',
+                  title: '高级规则（allow / ask / deny）',
+                  subtitle: '按命令、路径与 MCP 服务器精细配置 settings.json',
                   onTap: () {
                     Navigator.of(context).pop();
                     Navigator.of(context).push(

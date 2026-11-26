@@ -75,10 +75,16 @@ String _inferModelGroup(AcpConfigOptionValue choice) {
 /// Top-right chrome-glass pill in [ChatHeader] mirroring DSH Go's ModelChip:
 /// shows `✦ <Model Name> · <思考等级> ⌄` both BEFORE and DURING conversations.
 class ModelModeChip extends ConsumerWidget {
-  const ModelModeChip({super.key, this.grouped = true, this.compact = false});
+  const ModelModeChip({
+    super.key,
+    this.grouped = true,
+    this.compact = false,
+    this.iconOnly = false,
+  });
 
   final bool grouped;
   final bool compact;
+  final bool iconOnly;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -127,6 +133,37 @@ class ModelModeChip extends ConsumerWidget {
       label = '需登录';
     } else {
       label = '选择模型';
+    }
+
+    if (iconOnly) {
+      return SizedBox.square(
+        key: const ValueKey('chat-model-icon-btn'),
+        dimension: 44,
+        child: GlassSurface(
+          tier: GlassTier.chrome,
+          circle: true,
+          grouped: grouped,
+          onTap: () => unawaited(showModelModeSheet(context)),
+          child: Tooltip(
+            message: effort != null ? '$label · $effort（切换模型）' : '$label（切换模型）',
+            child: Center(
+              child: chat.preparing || chat.updating
+                  ? SizedBox.square(
+                      dimension: 15,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.8,
+                        color: colors.primary,
+                      ),
+                    )
+                  : Icon(
+                      AppIcons.providers,
+                      size: 19,
+                      color: colors.primary,
+                    ),
+            ),
+          ),
+        ),
+      );
     }
 
     final textStyle = theme.textTheme.labelMedium?.copyWith(

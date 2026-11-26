@@ -1,10 +1,14 @@
+import 'dart:async';
+
 import 'package:acp_client/acp_client.dart';
 import 'package:agy_go/app.dart';
 import 'package:agy_go/state/chat_state.dart';
 import 'package:agy_go/state/connection_state.dart';
 import 'package:agy_go/state/sessions_state.dart';
 import 'package:agy_go/state/settings_state.dart';
+import 'package:agy_go/ui/chat/activity_strip.dart';
 import 'package:agy_go/ui/chat/model_sheet.dart';
+import 'package:agy_go/ui/chat/permission_controls.dart';
 import 'package:agy_remote/agy_remote.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -335,6 +339,300 @@ void main() {
 
       expect(find.textContaining('Gemini 4 Hydrogen'), findsOneWidget);
       expect(find.textContaining('超高'), findsOneWidget);
+    },
+  );
+
+  test(
+    'Reopening session via session/load clears streaming, cancel unlocks hung prompt immediately, and sendQueuedNow interrupts & sends',
+    () async {
+      final (clientTransport, agentTransport) = MemoryAcpTransport.pair();
+      final client = AcpClient(clientTransport);
+      final agent = AcpJsonRpcPeer(agentTransport);
+      addTearDown(() async {
+        await client.close();
+        await agent.close();
+      });
+
+      final cancelEvents = <String>[];
+      final receivedPrompts = <String>[];
+      Completer<Map<String, Object?>>? hungPrompt;
+
+      agent.onRequest('initialize', (_) async => {
+            'protocolVersion': 1,
+            'agentInfo': {'name': 'antigravity-cli', 'version': '1.5.17'},
+            'agentCapabilities': {
+              'loadSession': true,
+              'sessionCapabilities': {'list': {}, 'resume': {}},
+            },
+          });
+      agent.onRequest('session/list', (_) async => {'sessions': const <Object?>[]});
+      agent.onRequest('session/new', (_) async => {'sessionId': 'sess-draft'});
+      agent.onRequest('session/close', (_) async => <String, Object?>{});
+      agent.onNotification('session/cancel', (params) {
+        cancelEvents.add('${params['sessionId']}');
+      });
+
+      agent.onRequest('session/load', (params) async {
+        final sid = params['sessionId']! as String;
+        // Replay 2 historical turns (simulating re-entering a session after network errors).
+        await agent.sendNotification('session/update', {
+          'sessionId': sid,
+          'update': {
+            'sessionUpdate': 'user_message_chunk',
+            'content': {'type': 'text', 'text': '历史提问 1'},
+          },
+        });
+        await agent.sendNotification('session/update', {
+          'sessionId': sid,
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'content': {
+              'type': 'text',
+              'text': 'There was a network issue connecting to the server.',
+            },
+          },
+        });
+        await agent.sendNotification('session/update', {
+          'sessionId': sid,
+          'update': {
+            'sessionUpdate': 'user_message_chunk',
+            'content': {'type': 'text', 'text': '历史提问 2'},
+          },
+        });
+        await agent.sendNotification('session/update', {
+          'sessionId': sid,
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'content': {
+              'type': 'text',
+              'text': 'There was a network issue connecting to the server.',
+            },
+          },
+        });
+        return {'sessionId': sid};
+      });
+
+      agent.onRequest('session/prompt', (params) async {
+        final sid = params['sessionId']! as String;
+        final text = ((params['prompt'] as List).first as Map)['text'] as String;
+        receivedPrompts.add(text);
+        if (text == 'hung-turn') {
+          await agent.sendNotification('session/update', {
+            'sessionId': sid,
+            'update': {
+              'sessionUpdate': 'agent_message_chunk',
+              'content': {'type': 'text', 'text': '网络断开前部分输出'},
+            },
+          });
+          hungPrompt = Completer<Map<String, Object?>>();
+          return hungPrompt!.future;
+        }
+        await agent.sendNotification('session/update', {
+          'sessionId': sid,
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'content': {'type': 'text', 'text': '已立即回复: $text'},
+          },
+        });
+        return {'stopReason': 'end_turn'};
+      });
+
+      final init = await client.initialize();
+      final conn = HostConnection(
+        host: const HostRef.local(),
+        label: '本机 Android',
+        client: client,
+        initResult: init,
+        defaultCwd: '/tmp/ws',
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          activeConnectionProvider.overrideWith(
+            () => _StubConnectionController(conn),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.listen(activeConnectionProvider, (_, _) {});
+      container.listen(chatProvider, (_, _) {});
+      await container.read(activeConnectionProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+
+      // 1. Re-enter an existing session -> replayed turns MUST NOT stay streaming/busy!
+      container.read(sessionsProvider.notifier).registerCreatedSession(
+        const AcpSessionInfo(sessionId: 'sess-reopen', cwd: '/tmp/ws', title: 'Old'),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+
+      final loaded = container.read(chatProvider);
+      expect(loaded.sessionId, 'sess-reopen');
+      expect(loaded.isLoadingSession, isFalse);
+      expect(loaded.isBusy, isFalse);
+      expect(loaded.transcript.isStreaming, isFalse);
+      expect(loaded.transcript.items.length, 4);
+      for (final a in loaded.transcript.items.whereType<AssistantTranscriptItem>()) {
+        expect(a.isStreaming, isFalse);
+      }
+
+      // 2. Start a hung turn, queue a follow-up, then interrupt & send immediately via sendQueuedNow!
+      final hungFuture = container.read(chatProvider.notifier).send('hung-turn');
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(container.read(chatProvider).isBusy, isTrue);
+
+      // Default queuedBehavior is queue: sending mid-turn enqueues it.
+      await container.read(chatProvider.notifier).send('插队立即发');
+      expect(container.read(chatProvider).queuedMessages, ['插队立即发']);
+
+      // Tap 「立即发送」 on queued item #0 -> interrupts hung turn immediately without waiting!
+      await container.read(chatProvider.notifier).sendQueuedNow(0);
+      final afterImmediate = container.read(chatProvider);
+      expect(afterImmediate.queuedMessages, isEmpty);
+      expect(afterImmediate.isBusy, isFalse);
+      expect(cancelEvents, contains('sess-reopen'));
+      expect(receivedPrompts, ['hung-turn', '插队立即发']);
+      expect(
+        (afterImmediate.transcript.items.last as AssistantTranscriptItem).text,
+        '已立即回复: 插队立即发',
+      );
+
+      // 3. Stray late chunks + late completion from the abandoned hung prompt must NOT re-stick UI!
+      await agent.sendNotification('session/update', {
+        'sessionId': 'sess-reopen',
+        'update': {
+          'sessionUpdate': 'agent_message_chunk',
+          'content': {'type': 'text', 'text': '幽灵延迟分片'},
+        },
+      });
+      hungPrompt!.complete({'stopReason': 'cancelled'});
+      await hungFuture;
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      final finalState = container.read(chatProvider);
+      expect(finalState.isBusy, isFalse);
+      expect(finalState.transcript.isStreaming, isFalse);
+      expect(
+        (finalState.transcript.items.last as AssistantTranscriptItem).text,
+        '已立即回复: 插队立即发',
+      );
+    },
+  );
+
+  testWidgets(
+    'ModelModeChip(iconOnly: true) renders 44dp circular icon button without crushing title',
+    (tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: AgyGoApp(
+            home: Scaffold(
+              body: Center(child: ModelModeChip(grouped: false, iconOnly: true)),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final btn = find.byKey(const ValueKey('chat-model-icon-btn'));
+      expect(btn, findsOneWidget);
+      expect(tester.getSize(btn), const Size(44, 44));
+    },
+  );
+
+  testWidgets(
+    'Inline ActivityStrip and PermissionStatusPill sit side-by-side on one horizontal row without overflow',
+    (tester) async {
+      final (clientTransport, agentTransport) = MemoryAcpTransport.pair();
+      final client = AcpClient(clientTransport);
+      final agent = AcpJsonRpcPeer(agentTransport);
+      final pendingPrompt = Completer<Map<String, Object?>>();
+
+      agent.onRequest('initialize', (_) async => {
+            'protocolVersion': 1,
+            'agentInfo': {'name': 'antigravity-cli', 'version': '1.5.17'},
+            'agentCapabilities': {'loadSession': true},
+          });
+      agent.onRequest('session/list', (_) async => {'sessions': const <Object?>[]});
+      agent.onRequest('session/new', (_) async => {'sessionId': 'sess-inline'});
+      agent.onRequest('session/close', (_) async => <String, Object?>{});
+      agent.onNotification('session/cancel', (_) {
+        if (!pendingPrompt.isCompleted) {
+          pendingPrompt.complete({'stopReason': 'cancelled'});
+        }
+      });
+      agent.onRequest('session/prompt', (_) => pendingPrompt.future);
+
+      final init = await client.initialize();
+      final conn = HostConnection(
+        host: const HostRef.local(),
+        label: '本机 Android',
+        client: client,
+        initResult: init,
+        defaultCwd: '/tmp/ws',
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          activeConnectionProvider.overrideWith(
+            () => _StubConnectionController(conn),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        if (!pendingPrompt.isCompleted) {
+          pendingPrompt.complete({'stopReason': 'cancelled'});
+        }
+        container.dispose();
+        await client.close();
+        await agent.close();
+      });
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const AgyGoApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 340,
+                child: Row(
+                  children: [
+                    Expanded(child: ActivityStrip(inline: true)),
+                    SizedBox(width: 8),
+                    PermissionStatusPill(inline: true),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.runAsync(() async {
+        await container
+            .read(chatProvider.notifier)
+            .setSessionToolPermission(AgyToolPermission.alwaysProceed);
+      });
+      await tester.pump();
+      expect(find.text('完全放行'), findsOneWidget);
+
+      // Start an active turn so ActivityStrip(inline: true) renders beside PermissionStatusPill(inline: true).
+      unawaited(container.read(chatProvider.notifier).send('测试并发胶囊'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(find.text('思考与生成中…'), findsOneWidget);
+      expect(find.text('完全放行'), findsOneWidget);
+
+      final actRect = tester.getRect(find.byType(ActivityStrip));
+      final permRect = tester.getRect(find.byType(PermissionStatusPill));
+      // Both capsules share the same horizontal row and Activity sits to the left of Permission.
+      expect((actRect.center.dy - permRect.center.dy).abs(), lessThan(4));
+      expect(actRect.right, lessThanOrEqualTo(permRect.left));
+
+      // Cancel cleanly before teardown so ActivityStrip's periodic timer stops cleanly.
+      await container.read(chatProvider.notifier).cancel();
+      await tester.pump();
     },
   );
 }

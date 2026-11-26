@@ -20,7 +20,11 @@ import 'tool_format.dart';
 /// Mirrors DSH Go's ActivityStrip: shows active tool/thinking status, elapsed `m:ss`,
 /// streaming char rate, and live `AcpPlanEntry` checklist completion (`done/total`).
 class ActivityStrip extends ConsumerStatefulWidget {
-  const ActivityStrip({super.key});
+  const ActivityStrip({super.key, this.inline = false});
+
+  /// When true, renders as a compact stadium capsule without outer horizontal
+  /// padding so it can sit side-by-side with [PermissionStatusPill] in one row.
+  final bool inline;
 
   @override
   ConsumerState<ActivityStrip> createState() => _ActivityStripState();
@@ -110,9 +114,9 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
     } else if (currentPlan != null && currentPlan.content.isNotEmpty) {
       primaryText = currentPlan.content;
     } else if (chat.isBusy) {
-      primaryText = 'Antigravity 思考与生成中…';
+      primaryText = widget.inline ? '思考与生成中…' : 'Antigravity 思考与生成中…';
     } else {
-      primaryText = '任务计划已完成 $donePlan/$totalPlan';
+      primaryText = '计划完成 $donePlan/$totalPlan';
     }
 
     final elapsed = chat.isBusy && chat.startedAt != null
@@ -121,9 +125,98 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
     final secs = chat.startedAt != null
         ? _now.difference(chat.startedAt!).inSeconds
         : 0;
-    final rate = chat.isBusy && chat.chars > 0 && secs > 0
+    final rate = !widget.inline && chat.isBusy && chat.chars > 0 && secs > 0
         ? '${(chat.chars / secs).round()} 字/秒'
         : null;
+
+    final capsule = SmoothSize(
+      duration: AppMotion.of(context, AppMotion.quick),
+      child: Pressable(
+        child: GlassSurface(
+          tier: GlassTier.chrome,
+          stadium: widget.inline && totalPlan == 0,
+          borderRadius: widget.inline && totalPlan == 0
+              ? null
+              : AppShape.radiusLg,
+          onTap: () => unawaited(showPlanAndActivitySheet(context, ref)),
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: widget.inline ? 11 : 13,
+              vertical: widget.inline ? 6 : 8,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    StatusDot(
+                      tone: chat.isBusy ? StatusTone.busy : StatusTone.ok,
+                      size: 7,
+                    ),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: Text(
+                        primaryText,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: scheme.onSurface,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    if (totalPlan > 0) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        '$donePlan/$totalPlan',
+                        style: AppType.monoLabel(color: scheme.primary),
+                      ),
+                    ],
+                    if (elapsed != null) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        elapsed,
+                        style: AppType.monoLabel(color: dsh.textTertiary),
+                      ),
+                    ],
+                    if (rate != null) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        rate,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: dsh.textTertiary,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(width: 3),
+                    Icon(
+                      AppIcons.disclosure,
+                      size: 13,
+                      color: dsh.textTertiary,
+                    ),
+                  ],
+                ),
+                if (totalPlan > 0) ...[
+                  const SizedBox(height: 5),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: LinearProgressIndicator(
+                      value: donePlan / totalPlan,
+                      minHeight: 3,
+                      backgroundColor: scheme.onSurface.withValues(alpha: 0.08),
+                      color: scheme.primary,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (widget.inline) return capsule;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(
@@ -135,91 +228,7 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
       child: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: AppSpace.floatingWidth),
-          child: SmoothSize(
-            duration: AppMotion.of(context, AppMotion.quick),
-            child: Pressable(
-              child: GlassSurface(
-                tier: GlassTier.chrome,
-                borderRadius: AppShape.radiusLg,
-                onTap: () => unawaited(showPlanAndActivitySheet(context, ref)),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 13,
-                    vertical: 8,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(
-                        children: [
-                          StatusDot(
-                            tone: chat.isBusy ? StatusTone.busy : StatusTone.ok,
-                            size: 7,
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              primaryText,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.labelMedium?.copyWith(
-                                color: scheme.onSurface,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          if (totalPlan > 0) ...[
-                            const SizedBox(width: 8),
-                            Text(
-                              '$donePlan/$totalPlan',
-                              style: AppType.monoLabel(color: scheme.primary),
-                            ),
-                          ],
-                          if (elapsed != null) ...[
-                            const SizedBox(width: 8),
-                            Text(
-                              elapsed,
-                              style: AppType.monoLabel(color: dsh.textTertiary),
-                            ),
-                          ],
-                          if (rate != null) ...[
-                            const SizedBox(width: 6),
-                            Text(
-                              rate,
-                              style: theme.textTheme.labelSmall?.copyWith(
-                                color: dsh.textTertiary,
-                              ),
-                            ),
-                          ],
-                          const SizedBox(width: 4),
-                          Icon(
-                            AppIcons.disclosure,
-                            size: 14,
-                            color: dsh.textTertiary,
-                          ),
-                        ],
-                      ),
-                      if (totalPlan > 0) ...[
-                        const SizedBox(height: 6),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(999),
-                          child: LinearProgressIndicator(
-                            value: donePlan / totalPlan,
-                            minHeight: 3.5,
-                            backgroundColor: scheme.onSurface.withValues(
-                              alpha: 0.08,
-                            ),
-                            color: scheme.primary,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
+          child: capsule,
         ),
       ),
     );

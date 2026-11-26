@@ -189,7 +189,7 @@ void main() {
   });
 
   group('New parity UI pages render cleanly', () {
-    testWidgets('PermissionPage displays 4 execution modes and 4 tool presets', (
+    testWidgets('PermissionPage displays official 4-tier Antigravity presets and plan toggle', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -197,19 +197,19 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('审批与执行模式'), findsWidgets);
-      expect(find.text('标准审查'), findsOneWidget);
-      expect(find.text('自动改写'), findsOneWidget);
-      expect(find.text('智能自动'), findsOneWidget);
-      expect(find.text('计划模式'), findsOneWidget);
+      expect(find.text('权限层级'), findsWidgets);
+      expect(find.text('Antigravity 官方权限预设'), findsOneWidget);
+      expect(find.text('严格确认'), findsOneWidget);
+      expect(find.text('询问确认'), findsOneWidget);
+      expect(find.text('沙箱放行'), findsOneWidget);
+      expect(find.text('完全放行'), findsOneWidget);
 
       await tester.scrollUntilVisible(
-        find.text('完全放行 (YOLO)'),
+        find.text('默认开启计划模式（/plan）'),
         300,
         scrollable: find.byType(Scrollable).first,
       );
-      expect(find.text('严格逐次确认'), findsOneWidget);
-      expect(find.text('完全放行 (YOLO)'), findsOneWidget);
+      expect(find.text('默认开启计划模式（/plan）'), findsOneWidget);
     });
 
     testWidgets('ApprovalModeSheetBody renders inside Scaffold', (tester) async {
@@ -220,8 +220,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('审批与执行模式'), findsOneWidget);
-      expect(find.text('Antigravity 执行模式 (agentMode)'), findsOneWidget);
+      expect(find.text('权限层级'), findsOneWidget);
+      expect(find.text('Antigravity 官方权限预设'), findsOneWidget);
+      expect(find.text('严格确认'), findsOneWidget);
+      expect(find.text('完全放行'), findsOneWidget);
+      expect(find.text('计划模式（/plan）'), findsOneWidget);
     });
 
     testWidgets('McpServersPage, SkillsAndRulesPage, and SettingsSearchPage render', (

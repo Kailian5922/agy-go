@@ -12,6 +12,7 @@ import '../../state/hosts_state.dart';
 import '../../state/phone_state.dart';
 import '../../state/runtime_state.dart';
 import '../../state/sessions_state.dart';
+import '../../state/settings_state.dart';
 import '../../state/workspaces_state.dart';
 import '../common/status_dot.dart';
 import '../engine/engine_screen.dart';
@@ -117,9 +118,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     final connected = connAsync.value != null;
     final hasSession = chat.sessionId != null;
+    final narrow = MediaQuery.sizeOf(context).width < 600;
     final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
     final bottomPad = MediaQuery.paddingOf(context).bottom;
-    final extraDock = (chat.isBusy || chat.hasPlan) ? 176 : 124;
+    final extraDock = (chat.isBusy || chat.hasPlan) ? 142 : 122;
     final dockReserve = keyboardInset + bottomPad + extraDock;
 
     final HeaderStatus headerStatus;
@@ -181,7 +183,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     ),
                   )
                 : () => showHostSwitcherSheet(context, ref),
-            trailing: ModelModeChip(compact: hasSession),
+            trailing: ModelModeChip(
+              compact: hasSession,
+              iconOnly: hasSession && narrow,
+            ),
             onNewChat: hasSession
                 ? () => ref.read(chatProvider.notifier).startNewChat()
                 : null,
@@ -342,8 +347,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                               ),
                             ),
                           ),
-                        const ActivityStrip(),
-                        const PermissionStatusPill(),
+                        const _ComposerStatusRow(),
                         ComposerBar(
                           controller: _composerController,
                           enabled: connected,
@@ -367,6 +371,59 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Single horizontal status row directly above [ComposerBar] placing the live
+/// activity capsule and the active permission capsule side-by-side.
+class _ComposerStatusRow extends ConsumerWidget {
+  const _ComposerStatusRow();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
+    final status = ref.watch(
+      chatProvider.select(
+        (c) => (
+          showActivity: c.isBusy || c.transcript.plan.isNotEmpty,
+          mode: c.sessionAgentMode,
+          perm: c.sessionToolPermission,
+          allowAll: c.allowAllForSession,
+          extraDirs: c.additionalDirectories.length,
+        ),
+      ),
+    );
+    final effectiveMode = status.mode ?? settings.agentMode;
+    final effectivePerm = status.perm ?? settings.toolPermission;
+    final showPerm =
+        effectivePerm != AgyToolPermission.requestReview ||
+        effectiveMode == AgyAgentMode.plan ||
+        status.allowAll ||
+        status.extraDirs > 0;
+
+    if (!status.showActivity && !showPerm) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpace.floatInset,
+        0,
+        AppSpace.floatInset,
+        6,
+      ),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: AppSpace.floatingWidth),
+          child: Row(
+            children: [
+              if (status.showActivity)
+                const Expanded(child: ActivityStrip(inline: true)),
+              if (status.showActivity && showPerm) const SizedBox(width: 8),
+              if (showPerm) const PermissionStatusPill(inline: true),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

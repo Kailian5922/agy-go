@@ -66,10 +66,9 @@ class ChatList extends ConsumerWidget {
       final activeMode = chat.sessionAgentMode ?? settings.agentMode;
       final activePerm = chat.sessionToolPermission ?? settings.toolPermission;
       final isRisky = activePerm.isHighRisk;
-      final modePillLabel = isRisky
-          ? '完全放行 (YOLO)'
-          : activeMode != AgyAgentMode.standard
-          ? activeMode.label
+      final isPlan = activeMode == AgyAgentMode.plan;
+      final modePillLabel = isPlan
+          ? '计划模式 · ${activePerm.label}'
           : activePerm.label;
       final connected = connAsync.value != null;
       final st = runtime.status;
@@ -123,14 +122,14 @@ class ChatList extends ConsumerWidget {
               SetupItem(
                 icon: isRisky
                     ? AppIcons.permissionRisky
-                    : activeMode == AgyAgentMode.plan
+                    : isPlan
                     ? AppIcons.planMode
                     : AppIcons.permissions,
                 label: modePillLabel,
                 accentColor: isRisky
                     ? DshColors.of(context).danger
-                    : activeMode == AgyAgentMode.auto
-                    ? DshColors.of(context).warning
+                    : activePerm == AgyToolPermission.proceedInSandbox
+                    ? DshColors.of(context).success
                     : null,
                 onTap: () => unawaited(showApprovalModeSheet(context, ref)),
               ),

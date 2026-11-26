@@ -682,7 +682,7 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                   ),
                 ),
 
-              // Queued mid-turn messages strip
+              // Queued mid-turn messages strip (with 1-tap 「立即发送」 & withdraw)
               if (queued.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 6),
@@ -696,7 +696,7 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                             tier: GlassTier.chrome,
                             stadium: true,
                             child: SizedBox(
-                              height: 32,
+                              height: 34,
                               child: Row(
                                 children: [
                                   const SizedBox(width: 10),
@@ -720,6 +720,37 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: theme.textTheme.bodySmall,
+                                    ),
+                                  ),
+                                  GestureDetector(
+                                    onTap: () {
+                                      HapticFeedback.lightImpact();
+                                      unawaited(
+                                        ref
+                                            .read(chatProvider.notifier)
+                                            .sendQueuedNow(idx),
+                                      );
+                                    },
+                                    behavior: HitTestBehavior.opaque,
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 4,
+                                      ),
+                                      decoration: ShapeDecoration(
+                                        color: scheme.primary.withValues(
+                                          alpha: 0.14,
+                                        ),
+                                        shape: const StadiumBorder(),
+                                      ),
+                                      child: Text(
+                                        '立即发送',
+                                        style: theme.textTheme.labelSmall
+                                            ?.copyWith(
+                                              color: scheme.primary,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                      ),
                                     ),
                                   ),
                                   GestureDetector(
@@ -845,8 +876,8 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                                                 ? (queuedBehavior ==
                                                           AgyQueuedMessageBehavior
                                                               .steer
-                                                      ? '生成中… 输入发送可立即插话引导'
-                                                      : '生成中… 输入可排队，留空点击停止')
+                                                      ? '生成中… 发送将立即中断并发送'
+                                                      : '生成中… 可排队或切换立即发送')
                                                 : '给 Antigravity 发消息，或输入 / 与 @…')
                                           : '连接引擎后发送消息…'),
                                   hintMaxLines: 1,
@@ -868,7 +899,63 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                                 ),
                               ),
                             ),
-                            const SizedBox(width: 8),
+                            if (isMidTurnSend) ...[
+                              const SizedBox(width: 6),
+                              Tooltip(
+                                message: '点击切换「排队」或「立即发送」',
+                                child: GestureDetector(
+                                  onTap: () {
+                                    HapticFeedback.selectionClick();
+                                    final next =
+                                        queuedBehavior ==
+                                            AgyQueuedMessageBehavior.queue
+                                        ? AgyQueuedMessageBehavior.steer
+                                        : AgyQueuedMessageBehavior.queue;
+                                    unawaited(
+                                      ref
+                                          .read(settingsProvider.notifier)
+                                          .setQueuedBehavior(next),
+                                    );
+                                  },
+                                  child: Container(
+                                    height: keySize,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                    ),
+                                    alignment: Alignment.center,
+                                    decoration: ShapeDecoration(
+                                      color:
+                                          queuedBehavior ==
+                                              AgyQueuedMessageBehavior.steer
+                                          ? scheme.primary.withValues(
+                                              alpha: 0.14,
+                                            )
+                                          : scheme.onSurface.withValues(
+                                              alpha: 0.06,
+                                            ),
+                                      shape: const StadiumBorder(),
+                                    ),
+                                    child: Text(
+                                      queuedBehavior ==
+                                              AgyQueuedMessageBehavior.steer
+                                          ? '立即'
+                                          : '排队',
+                                      style: theme.textTheme.labelMedium
+                                          ?.copyWith(
+                                            color:
+                                                queuedBehavior ==
+                                                    AgyQueuedMessageBehavior
+                                                        .steer
+                                                ? scheme.primary
+                                                : scheme.onSurfaceVariant,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                            const SizedBox(width: 6),
                             // Concentric 36dp Send / Mid-turn Steer-or-Queue / Stop / Mic circle button
                             Pressable(
                               enabled:
@@ -915,7 +1002,7 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                                           ? (queuedBehavior ==
                                                     AgyQueuedMessageBehavior
                                                         .steer
-                                                ? AppIcons.steer
+                                                ? AppIcons.send
                                                 : AppIcons.queued)
                                           : AppIcons.send,
                                       size: showStop || voice.isListening
@@ -1137,9 +1224,9 @@ class _PlusPanelBody extends ConsumerWidget {
     final activeMode = chat.sessionAgentMode ?? settings.agentMode;
     final activePerm = chat.sessionToolPermission ?? settings.toolPermission;
     final planOn = activeMode == AgyAgentMode.plan;
-    final modeSummary = activePerm == AgyToolPermission.alwaysProceed
-        ? 'YOLO · 完全放行'
-        : '${activeMode.label} · ${activePerm.label}';
+    final modeSummary = planOn
+        ? '计划模式 · ${activePerm.label}'
+        : activePerm.label;
 
     final primaryTiles = [
       ('gallery', AppIcons.gallery, '相册', 1),
@@ -1205,7 +1292,7 @@ class _PlusPanelBody extends ConsumerWidget {
                       ? AppIcons.permissionRisky
                       : AppIcons.permissions,
                   iconColor: activePerm.isHighRisk ? dsh.danger : null,
-                  title: '审批与执行模式',
+                  title: '权限层级',
                   subtitle: modeSummary,
                   subtitleColor: activePerm.isHighRisk ? dsh.danger : null,
                   onTap: () => SheetNavigator.of(context).push(

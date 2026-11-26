@@ -199,6 +199,7 @@ class ChatController extends Notifier<ChatState> {
   /// tear down an in-flight first turn.
   String? _ownedSessionId;
   int _loadGeneration = 0;
+  int _turnGen = 0;
 
   Future<String?>? _draftFuture;
   String? _draftFutureCwd;
@@ -265,6 +266,7 @@ class ChatController extends Notifier<ChatState> {
     _cachedModes = null;
     _cachedConfigOptions = const [];
     _loadGeneration++;
+    _turnGen++;
 
     ref.onDispose(() {
       unawaited(_updateSub?.cancel());
@@ -329,6 +331,7 @@ class ChatController extends Notifier<ChatState> {
     if (next == null || next.isEmpty) {
       _ownedSessionId = null;
       _loadGeneration++;
+      _turnGen++;
       state = ChatState(
         transcript: ChatTranscript(
           modes: _cachedModes,
@@ -344,6 +347,7 @@ class ChatController extends Notifier<ChatState> {
     _discardDraftSession(conn);
     _ownedSessionId = next;
     final gen = ++_loadGeneration;
+    _turnGen++;
     final sessionInfo = ref.read(sessionsProvider).currentSession;
     final String cwd =
         sessionInfo?.cwd ?? ref.read(effectiveWorkingDirProvider);
@@ -607,7 +611,10 @@ class ChatController extends Notifier<ChatState> {
         );
       } else {
         if (!ref.mounted || _loadGeneration != gen) return;
-        state = state.copyWith(isLoadingSession: false);
+        state = state.copyWith(
+          transcript: state.transcript.finishAllStreaming(),
+          isLoadingSession: false,
+        );
         return;
       }
       if (!ref.mounted || _loadGeneration != gen) return;
@@ -618,7 +625,7 @@ class ChatController extends Notifier<ChatState> {
       state = state.copyWith(
         sessionId: handle.sessionId,
         sessionCwd: cwd,
-        transcript: state.transcript.copyWith(
+        transcript: state.transcript.finishAllStreaming().copyWith(
           modes: handle.modes ?? state.transcript.modes,
           configOptions: handle.configOptions.isNotEmpty
               ? handle.configOptions
@@ -632,13 +639,18 @@ class ChatController extends Notifier<ChatState> {
     } on AcpRpcException catch (e) {
       if (!ref.mounted || _loadGeneration != gen) return;
       state = state.copyWith(
+        transcript: state.transcript.finishAllStreaming(),
         isLoadingSession: false,
         authRequired: e.isAuthRequired,
         error: e.message,
       );
     } catch (e) {
       if (!ref.mounted || _loadGeneration != gen) return;
-      state = state.copyWith(isLoadingSession: false, error: e.toString());
+      state = state.copyWith(
+        transcript: state.transcript.finishAllStreaming(),
+        isLoadingSession: false,
+        error: e.toString(),
+      );
     }
   }
 
@@ -646,6 +658,7 @@ class ChatController extends Notifier<ChatState> {
     final conn = _activeConn;
     _ownedSessionId = null;
     _loadGeneration++;
+    _turnGen++;
     if (conn != null) {
       _discardDraftSession(conn);
     }
@@ -854,15 +867,15 @@ class ChatController extends Notifier<ChatState> {
     return ok;
   }
 
-  Future<void> send(String rawText) async {
+  Future<void> send(String rawText, {bool forceImmediate = false}) async {
     final cleanBody = rawText.trim();
     final stagedAttachments = List<ChatAttachment>.from(state.attachments);
     if (cleanBody.isEmpty && stagedAttachments.isEmpty) return;
 
-    // Handle mid-turn message submission (Steer vs Queue).
+    // Handle mid-turn message submission (Steer / Immediate vs Queue).
     if (state.isBusy) {
       final behavior = ref.read(settingsProvider).queuedBehavior;
-      if (behavior == AgyQueuedMessageBehavior.queue) {
+      if (!forceImmediate && behavior == AgyQueuedMessageBehavior.queue) {
         if (cleanBody.isNotEmpty) {
           state = state.copyWith(
             queuedMessages: [...state.queuedMessages, cleanBody],
@@ -890,6 +903,7 @@ class ChatController extends Notifier<ChatState> {
       return;
     }
 
+    final myGen = ++_turnGen;
     state = state.copyWith(
       isSending: true,
       turnStartedAt: () => DateTime.now(),
@@ -911,7 +925,7 @@ class ChatController extends Notifier<ChatState> {
         // wait for it rather than racing a second `session/new`.
         if (_draftFuture != null && _draftFutureCwd == cwd) {
           await _draftFuture;
-          if (!ref.mounted || _activeConn != conn) return;
+          if (!ref.mounted || _activeConn != conn || _turnGen != myGen) return;
         }
 
         final canReuseDraft =
@@ -935,7 +949,7 @@ class ChatController extends Notifier<ChatState> {
             mcpServers: _sessionMcpServers(conn),
             additionalDirectories: state.additionalDirectories,
           );
-          if (!ref.mounted || _activeConn != conn) return;
+          if (!ref.mounted || _activeConn != conn || _turnGen != myGen) return;
           sid = handle.sessionId;
           modes = handle.modes ?? modes;
           configs = handle.configOptions.isNotEmpty
@@ -950,6 +964,7 @@ class ChatController extends Notifier<ChatState> {
             sid,
             configs,
           );
+          if (!ref.mounted || _activeConn != conn || _turnGen != myGen) return;
           if (applied.isNotEmpty) {
             configs = applied;
             _cachedConfigOptions = applied;
@@ -1004,6 +1019,8 @@ class ChatController extends Notifier<ChatState> {
         }
       }
 
+      if (!ref.mounted || _ownedSessionId != sid || _turnGen != myGen) return;
+
       final displayPrompt = [
         if (stagedAttachments.isNotEmpty)
           stagedAttachments
@@ -1022,7 +1039,7 @@ class ChatController extends Notifier<ChatState> {
       ];
 
       final result = await conn.client.prompt(sid, blocks);
-      if (!ref.mounted || _ownedSessionId != sid) return;
+      if (!ref.mounted || _ownedSessionId != sid || _turnGen != myGen) return;
       state = state.copyWith(
         transcript: state.transcript.finishTurn(
           result.stopReason,
@@ -1055,7 +1072,7 @@ class ChatController extends Notifier<ChatState> {
         unawaited(send(nextMsg));
       }
     } on AcpRpcException catch (e) {
-      if (!ref.mounted) return;
+      if (!ref.mounted || _turnGen != myGen) return;
       state = state.copyWith(
         transcript: state.transcript.finishTurn(AcpStopReason.unknown),
         isSending: false,
@@ -1066,7 +1083,7 @@ class ChatController extends Notifier<ChatState> {
             : e.message,
       );
     } catch (e) {
-      if (!ref.mounted) return;
+      if (!ref.mounted || _turnGen != myGen) return;
       state = state.copyWith(
         transcript: state.transcript.finishTurn(AcpStopReason.unknown),
         isSending: false,
@@ -1074,6 +1091,15 @@ class ChatController extends Notifier<ChatState> {
         error: e.toString(),
       );
     }
+  }
+
+  /// Interrupts any active/stuck turn and sends queued message at [index] immediately.
+  Future<void> sendQueuedNow(int index) async {
+    if (index < 0 || index >= state.queuedMessages.length) return;
+    final msg = state.queuedMessages[index];
+    final next = List<String>.from(state.queuedMessages)..removeAt(index);
+    state = state.copyWith(queuedMessages: next);
+    await send(msg, forceImmediate: true);
   }
 
   /// Re-sends the most recent user prompt to regenerate a fresh answer.
@@ -1091,16 +1117,23 @@ class ChatController extends Notifier<ChatState> {
     setQuote(seedText);
   }
 
+  /// Immediately unlocks the UI, finishes any streaming cursor/pending tool calls,
+  /// and sends ACP `session/cancel` non-blockingly so a hung network turn never traps the user.
   Future<void> cancel() async {
-    final conn = _activeConn ?? ref.read(activeConnectionProvider).value;
-    final sid = state.sessionId;
-    if (conn == null || sid == null) return;
-    await conn.client.cancel(sid);
+    _turnGen++;
+    for (final p in state.pendingPermissions) {
+      p.cancel();
+    }
     state = state.copyWith(
+      transcript: state.transcript.finishTurn(AcpStopReason.cancelled),
       pendingPermissions: const [],
       isSending: false,
       turnStartedAt: () => null,
     );
+    final conn = _activeConn ?? ref.read(activeConnectionProvider).value;
+    final sid = state.sessionId;
+    if (conn == null || sid == null) return;
+    unawaited(conn.client.cancel(sid).catchError((_) {}));
   }
 
   Future<bool> logoutAgent() async {
@@ -1218,8 +1251,22 @@ class ChatController extends Notifier<ChatState> {
       return;
     }
 
+    // Ignore stray late content/tool chunks when idle (e.g. arriving right after
+    // the user tapped Stop or after a network failure), while still ingesting
+    // metadata updates (config options, modes, session title, usage).
+    final update = notification.update;
+    if (!state.isSending && !state.isLoadingSession) {
+      final isMetadata =
+          update is ConfigOptionUpdate ||
+          update is CurrentModeUpdate ||
+          update is AvailableCommandsUpdate ||
+          update is SessionInfoUpdate ||
+          update is UsageSessionUpdate;
+      if (!isMetadata) return;
+    }
+
     var addedChars = 0;
-    switch (notification.update) {
+    switch (update) {
       case AgentMessageChunkUpdate(:final content):
         if (content case AcpTextBlock(:final text)) addedChars = text.length;
       case AgentThoughtChunkUpdate(:final content):
@@ -1230,8 +1277,8 @@ class ChatController extends Notifier<ChatState> {
         break;
     }
 
-    final nextTranscript = state.transcript.applyUpdate(notification.update);
-    if (notification.update case SessionInfoUpdate(:final title?)) {
+    final nextTranscript = state.transcript.applyUpdate(update);
+    if (update case SessionInfoUpdate(:final title?)) {
       final currentSid = state.sessionId;
       if (currentSid != null) {
         ref.read(sessionsProvider.notifier).updateSessionTitle(currentSid, title);

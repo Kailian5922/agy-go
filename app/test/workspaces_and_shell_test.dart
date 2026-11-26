@@ -128,7 +128,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('设置'), findsWidgets);
-      expect(find.text('审批与执行模式'), findsOneWidget);
+      expect(find.text('权限层级'), findsOneWidget);
       await tester.scrollUntilVisible(
         find.text('手机存储挂载'),
         300,

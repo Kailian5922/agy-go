@@ -55,11 +55,11 @@ final _catalog = <_SettingSearchEntry>[
     builder: (_) => const EngineScreen(),
   ),
   _SettingSearchEntry(
-    title: '审批与执行模式',
-    subtitle: 'default / accept-edits / auto / plan 与工具权限 YOLO',
+    title: '权限层级',
+    subtitle: '严格确认 / 询问确认 / 沙箱放行 / 完全放行 与计划模式',
     group: 'AI 与工作区',
     icon: AppIcons.permissions,
-    keywords: ['permission', 'approval', 'yolo', 'plan', 'auto', '权限', '审批', '自动'],
+    keywords: ['permission', 'approval', 'yolo', 'plan', 'sandbox', 'strict', '权限', '审批', '放行'],
     builder: (_) => const PermissionPage(),
   ),
   _SettingSearchEntry(

@@ -225,5 +225,56 @@ void main() {
       expect(thoughtOpt, isNotNull);
       expect(thoughtOpt!.currentValue, 'high');
     });
+
+    test('replayed turns settle prior cursors and finishAllStreaming clears all streaming flags', () {
+      var t = const ChatTranscript();
+      t = t.applyUpdate(const UserMessageChunkUpdate(AcpTextBlock('turn 1')));
+      t = t.applyUpdate(const AgentMessageChunkUpdate(AcpTextBlock('network error 1')));
+      t = t.applyUpdate(const UserMessageChunkUpdate(AcpTextBlock('turn 2')));
+      t = t.applyUpdate(const AgentMessageChunkUpdate(AcpTextBlock('network error 2')));
+
+      // Turn 1 assistant was settled when turn 2 user chunk arrived; turn 2 is still streaming until replay ends.
+      expect((t.items[1] as AssistantTranscriptItem).isStreaming, isFalse);
+      expect(t.isStreaming, isTrue);
+
+      t = t.finishAllStreaming();
+      expect(t.isStreaming, isFalse);
+      for (final item in t.items.whereType<AssistantTranscriptItem>()) {
+        expect(item.isStreaming, isFalse);
+      }
+    });
+
+    test('finishTurn on cancel/unknown settles streaming flags and dangling tool calls, appendUserPrompt closes prior cursor', () {
+      var t = const ChatTranscript().appendUserPrompt('first');
+      t = t.applyUpdate(
+        const ToolCallCreatedUpdate(
+          AcpToolCall(
+            toolCallId: 'tc_stuck',
+            title: 'Read file',
+            kind: AcpToolKind.read,
+            status: AcpToolStatus.inProgress,
+          ),
+        ),
+      );
+      expect(t.isStreaming, isTrue);
+
+      // Even if a new prompt is appended before finishing, prior streaming cursor is closed.
+      final second = t.appendUserPrompt('second');
+      expect((second.items[1] as AssistantTranscriptItem).isStreaming, isFalse);
+      expect((second.items[3] as AssistantTranscriptItem).isStreaming, isTrue);
+
+      // Cancelling settles both streaming state and dangling non-terminal tool calls.
+      final cancelled = t.finishTurn(AcpStopReason.cancelled);
+      expect(cancelled.isStreaming, isFalse);
+      final assistant = cancelled.items.last as AssistantTranscriptItem;
+      expect(assistant.stopReason, AcpStopReason.cancelled);
+      expect(assistant.toolCalls.single.status, AcpToolStatus.cancelled);
+
+      final failed = t.finishTurn(AcpStopReason.unknown);
+      expect(
+        (failed.items.last as AssistantTranscriptItem).toolCalls.single.status,
+        AcpToolStatus.failed,
+      );
+    });
   });
 }

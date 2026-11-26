@@ -99,12 +99,20 @@ class ChatTranscript {
   );
 
   /// Records a locally submitted user prompt and opens a fresh streaming assistant turn.
+  /// Closes any previously streaming assistant item so stale cursors never linger.
   ChatTranscript appendUserPrompt(String text, {DateTime? now}) {
     final ts = now ?? DateTime.now();
     final baseId = ts.microsecondsSinceEpoch;
+    final settled = [
+      for (final item in items)
+        if (item is AssistantTranscriptItem && item.isStreaming)
+          item.copyWith(isStreaming: false)
+        else
+          item,
+    ];
     return copyWith(
       items: [
-        ...items,
+        ...settled,
         UserTranscriptItem(id: 'u_$baseId', timestamp: ts, text: text),
         AssistantTranscriptItem(
           id: 'a_$baseId',
@@ -115,18 +123,69 @@ class ChatTranscript {
     );
   }
 
-  /// Marks the active assistant item finished when `session/prompt` resolves.
+  /// Marks all streaming assistant items finished when `session/prompt` resolves,
+  /// errors, or is cancelled by the user.
   ChatTranscript finishTurn(AcpStopReason stopReason, {AcpUsageInfo? usage}) {
-    if (items.isEmpty || items.last is! AssistantTranscriptItem) {
-      return copyWith(usage: usage ?? this.usage);
-    }
-    final last = items.last as AssistantTranscriptItem;
-    final nextItems = List<TranscriptItem>.from(items)
-      ..[items.length - 1] = last.copyWith(
-        isStreaming: false,
-        stopReason: stopReason,
-      );
-    return copyWith(items: nextItems, usage: usage ?? this.usage);
+    final terminalToolStatus = stopReason == AcpStopReason.cancelled
+        ? AcpToolStatus.cancelled
+        : stopReason == AcpStopReason.unknown
+        ? AcpToolStatus.failed
+        : null;
+
+    var changed = false;
+    final nextItems = [
+      for (final item in items)
+        if (item is AssistantTranscriptItem && item.isStreaming)
+          () {
+            changed = true;
+            final nextTools = terminalToolStatus == null
+                ? item.toolCalls
+                : [
+                    for (final tc in item.toolCalls)
+                      if (!tc.status.isTerminal)
+                        AcpToolCall(
+                          toolCallId: tc.toolCallId,
+                          title: tc.title,
+                          name: tc.name,
+                          kind: tc.kind,
+                          status: terminalToolStatus,
+                          locations: tc.locations,
+                          content: tc.content,
+                          rawInput: tc.rawInput,
+                          rawOutput: tc.rawOutput,
+                        )
+                      else
+                        tc,
+                  ];
+            return item.copyWith(
+              isStreaming: false,
+              stopReason: stopReason,
+              toolCalls: nextTools,
+            );
+          }()
+        else
+          item,
+    ];
+    return copyWith(
+      items: changed ? nextItems : items,
+      usage: usage ?? this.usage,
+    );
+  }
+
+  /// Clears streaming flags on all replayed history items after `session/load` or `session/resume`.
+  ChatTranscript finishAllStreaming() {
+    var changed = false;
+    final nextItems = [
+      for (final item in items)
+        if (item is AssistantTranscriptItem && item.isStreaming)
+          () {
+            changed = true;
+            return item.copyWith(isStreaming: false);
+          }()
+        else
+          item,
+    ];
+    return changed ? copyWith(items: nextItems) : this;
   }
 
   /// Applies a single ACP `session/update` notification.
@@ -146,9 +205,16 @@ class ChatTranscript {
             );
           return copyWith(items: next);
         }
+        final settled = [
+          for (final item in items)
+            if (item is AssistantTranscriptItem && item.isStreaming)
+              item.copyWith(isStreaming: false)
+            else
+              item,
+        ];
         return copyWith(
           items: [
-            ...items,
+            ...settled,
             UserTranscriptItem(
               id: 'u_${items.length}_${ts.microsecondsSinceEpoch}',
               timestamp: ts,
