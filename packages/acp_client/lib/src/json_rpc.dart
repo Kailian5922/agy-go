@@ -7,6 +7,15 @@ typedef JsonRpcRequestHandler =
     FutureOr<Map<String, Object?>> Function(Map<String, Object?> params);
 typedef JsonRpcNotificationHandler = void Function(Map<String, Object?> params);
 
+/// Any JSON-RPC notification without a dedicated typed handler (e.g. `$/progress`,
+/// `window/logMessage`, or vendor retry/status notices).
+class AcpRawNotification {
+  const AcpRawNotification({required this.method, required this.params});
+
+  final String method;
+  final Map<String, Object?> params;
+}
+
 /// Bidirectional JSON-RPC 2.0 peer running over an [AcpTransport].
 class AcpJsonRpcPeer {
   AcpJsonRpcPeer(this.transport) {
@@ -26,10 +35,15 @@ class AcpJsonRpcPeer {
   final _pending = <Object, _PendingCall>{};
   final _requestHandlers = <String, JsonRpcRequestHandler>{};
   final _notificationHandlers = <String, JsonRpcNotificationHandler>{};
+  final _otherNotifications = StreamController<AcpRawNotification>.broadcast();
   final _closedCompleter = Completer<void>();
 
   bool get isClosed => _closed;
   Future<void> get done => _closedCompleter.future;
+
+  /// Broadcast stream of notifications not matched by [onNotification].
+  Stream<AcpRawNotification> get otherNotifications =>
+      _otherNotifications.stream;
 
   /// Registers a handler for incoming JSON-RPC requests from the peer (e.g. `session/request_permission`).
   void onRequest(String method, JsonRpcRequestHandler handler) {
@@ -116,6 +130,10 @@ class AcpJsonRpcPeer {
           } catch (_) {
             // Isolate notification handler errors from the transport loop.
           }
+        } else if (!_otherNotifications.isClosed) {
+          _otherNotifications.add(
+            AcpRawNotification(method: method, params: params),
+          );
         }
       }
       return;
@@ -212,6 +230,9 @@ class AcpJsonRpcPeer {
   void _onTransportDone() {
     _closed = true;
     _failAllPending(const AcpTransportException('ACP connection closed'));
+    if (!_otherNotifications.isClosed) {
+      unawaited(_otherNotifications.close());
+    }
     if (!_closedCompleter.isCompleted) _closedCompleter.complete();
   }
 
@@ -232,6 +253,7 @@ class AcpJsonRpcPeer {
     await _sub.cancel();
     await transport.close();
     _failAllPending(const AcpTransportException('ACP peer closed'));
+    if (!_otherNotifications.isClosed) await _otherNotifications.close();
     if (!_closedCompleter.isCompleted) _closedCompleter.complete();
   }
 }

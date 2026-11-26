@@ -336,7 +336,10 @@ LiveActivityPayload? deriveLiveActivity({
 
     String line;
     String chip;
-    if (activeTool != null) {
+    if (chat.activeRetry != null) {
+      line = chat.activeRetry!.summary;
+      chip = '重试中';
+    } else if (activeTool != null) {
       final summary = formatToolSummary(
         activeTool,
         workspaceCwd: chat.sessionCwd,

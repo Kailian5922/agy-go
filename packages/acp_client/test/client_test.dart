@@ -313,5 +313,28 @@ void main() {
       expect(maxInFlight, 1);
       expect(written, ['{"seq":1}', '{"seq":3}']);
     });
+
+    test('AcpClient.otherNotifications forwards non-session/update retry & progress notices', () async {
+      final (clientTransport, agentTransport) = MemoryAcpTransport.pair();
+      final client = AcpClient(clientTransport);
+      final agent = AcpJsonRpcPeer(agentTransport);
+      addTearDown(() async {
+        await client.close();
+        await agent.close();
+      });
+
+      final received = <AcpRawNotification>[];
+      final sub = client.otherNotifications.listen(received.add);
+      addTearDown(sub.cancel);
+
+      await agent.sendNotification(r'$/progress', {
+        'message': 'retrying attempt 2/5 in 4s',
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(received.length, 1);
+      expect(received.single.method, r'$/progress');
+      expect(received.single.params['message'], 'retrying attempt 2/5 in 4s');
+    });
   });
 }

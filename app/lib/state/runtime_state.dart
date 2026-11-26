@@ -18,6 +18,8 @@ class LocalRuntimeState {
     this.storage = const PhoneStorageStatus(),
     this.progress,
     this.logs = const [],
+    this.logSeq = 0,
+    this.lastLogLine,
     this.pendingOAuthUrl,
     this.updateCheck,
     this.checkingUpdate = false,
@@ -27,6 +29,8 @@ class LocalRuntimeState {
   final PhoneStorageStatus storage;
   final RuntimeProgress? progress;
   final List<String> logs;
+  final int logSeq;
+  final String? lastLogLine;
   final String? pendingOAuthUrl;
   final RuntimeUpdateCheck? updateCheck;
   final bool checkingUpdate;
@@ -37,6 +41,8 @@ class LocalRuntimeState {
     RuntimeProgress? progress,
     bool clearProgress = false,
     List<String>? logs,
+    int? logSeq,
+    String? lastLogLine,
     String? pendingOAuthUrl,
     bool clearOAuthUrl = false,
     RuntimeUpdateCheck? updateCheck,
@@ -46,6 +52,8 @@ class LocalRuntimeState {
     storage: storage ?? this.storage,
     progress: clearProgress ? null : (progress ?? this.progress),
     logs: logs ?? this.logs,
+    logSeq: logSeq ?? this.logSeq,
+    lastLogLine: lastLogLine ?? this.lastLogLine,
     pendingOAuthUrl: clearOAuthUrl
         ? null
         : (pendingOAuthUrl ?? this.pendingOAuthUrl),
@@ -161,7 +169,11 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
         if (next.length > _maxLogs) {
           next.removeRange(0, next.length - _maxLogs);
         }
-        state = state.copyWith(logs: next);
+        state = state.copyWith(
+          logs: next,
+          logSeq: state.logSeq + 1,
+          lastLogLine: line,
+        );
       case RuntimeOAuthUrlEvent(:final url):
         state = state.copyWith(pendingOAuthUrl: url);
       case RuntimeOAuthDoneEvent():

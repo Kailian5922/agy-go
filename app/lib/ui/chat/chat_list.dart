@@ -526,21 +526,13 @@ class _AssistantTurnViewState extends ConsumerState<_AssistantTurnView> {
                 ],
               ),
             ),
-        ] else if (item.isStreaming && !item.hasActivity)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const StreamingCursor(),
-                const SizedBox(width: 8),
-                Text(
-                  '思考中…',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: dsh.textTertiary,
-                  ),
-                ),
-              ],
+        ] else if (item.isStreaming)
+          _LiveTurnFooter(
+            item: item,
+            hasActiveTool: item.toolCalls.any(
+              (t) =>
+                  t.status == AcpToolStatus.inProgress ||
+                  t.status == AcpToolStatus.pending,
             ),
           ),
       ],
@@ -652,6 +644,127 @@ class _AssistantTurnViewState extends ConsumerState<_AssistantTurnView> {
   }
 }
 
+class _LiveTurnFooter extends ConsumerStatefulWidget {
+  const _LiveTurnFooter({
+    required this.item,
+    required this.hasActiveTool,
+  });
+
+  final AssistantTranscriptItem item;
+  final bool hasActiveTool;
+
+  @override
+  ConsumerState<_LiveTurnFooter> createState() => _LiveTurnFooterState();
+}
+
+class _LiveTurnFooterState extends ConsumerState<_LiveTurnFooter> {
+  Timer? _ticker;
+  DateTime _now = DateTime.now();
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _now = DateTime.now());
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final live = ref.watch(
+      chatProvider.select(
+        (c) => (
+          isBusy: c.isBusy,
+          startedAt: c.turnStartedAt,
+          lastActivityAt: c.lastActivityAt,
+          livePhase: c.livePhase,
+          activeRetry: c.activeRetry,
+          thoughtChars: c.thoughtChars,
+          answerChars: c.answerChars,
+        ),
+      ),
+    );
+    if (!live.isBusy) return const SizedBox.shrink();
+    // When a tool card is visibly running and no retry is active, avoid duplicating it.
+    if (widget.hasActiveTool && live.activeRetry == null) {
+      return const SizedBox.shrink();
+    }
+
+    final health = deriveTurnHealth(
+      startedAt: live.startedAt,
+      lastActivityAt: live.lastActivityAt,
+      phase: live.livePhase,
+      activeRetry: live.activeRetry,
+      thoughtChars: live.thoughtChars,
+      answerChars: live.answerChars,
+      hasActiveTool: widget.hasActiveTool,
+      activeToolLabel: null,
+      activePlanLabel: null,
+      now: _now,
+      inline: false,
+    );
+
+    final theme = Theme.of(context);
+    final dsh = DshColors.of(context);
+    final isWarn =
+        health.tone == TurnHealthTone.retrying ||
+        health.tone == TurnHealthTone.suspectedStall;
+
+    // Only render after tool calls when we have useful liveness info (retrying,
+    // waiting/stalled, or actively receiving new thought text after tools).
+    final hasTools = widget.item.toolCalls.isNotEmpty;
+    final showText = switch (health.tone) {
+      TurnHealthTone.retrying => health.detailHeadline,
+      TurnHealthTone.suspectedStall => health.detailHeadline,
+      TurnHealthTone.waiting => health.detailHeadline,
+      TurnHealthTone.active => hasTools
+          ? (live.thoughtChars > 0
+                ? '继续思考中 · ${formatCharCount(live.thoughtChars)}（${formatLastSignalAge(health.silentSeconds)}更新）'
+                : '处理工具结果中…')
+          : (live.thoughtChars > 0
+                ? '思考中 · ${formatCharCount(live.thoughtChars)}'
+                : '思考中…'),
+    };
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          if (isWarn)
+            Icon(
+              health.tone == TurnHealthTone.retrying
+                  ? AppIcons.retry
+                  : AppIcons.warning,
+              size: 14,
+              color: dsh.warning,
+            )
+          else
+            const StreamingCursor(),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              showText,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: isWarn ? dsh.warning : dsh.textTertiary,
+                fontWeight: isWarn ? FontWeight.w600 : null,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _ThinkingRow extends StatelessWidget {
   const _ThinkingRow({
     required this.reasoning,
@@ -671,12 +784,20 @@ class _ThinkingRow extends StatelessWidget {
     final dsh = DshColors.of(context);
     final scheme = theme.colorScheme;
     final dark = theme.brightness == Brightness.dark;
-    final preview = reasoning
-        .trimLeft()
-        .split('\n')
-        .first
-        .replaceAll('**', '')
-        .trim();
+    final preview = active
+        ? latestThoughtHeadline(reasoning)
+        : reasoning
+              .trimLeft()
+              .split('\n')
+              .first
+              .replaceAll('**', '')
+              .trim();
+    final bodyText = expanded
+        ? reasoning.trim()
+        : (active ? tailPreviewLines(reasoning, maxLines: 3) : reasoning.trim());
+    final charTag = reasoning.trim().isNotEmpty
+        ? formatCharCount(reasoning.trim().length)
+        : null;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -727,6 +848,13 @@ class _ThinkingRow extends StatelessWidget {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
+                    if (active && charTag != null) ...[
+                      const SizedBox(width: 5),
+                      Text(
+                        charTag,
+                        style: AppType.monoLabel(color: scheme.primary),
+                      ),
+                    ],
                     if (!expanded && preview.isNotEmpty) ...[
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 5),
@@ -781,7 +909,7 @@ class _ThinkingRow extends StatelessWidget {
               child: Padding(
                 padding: const EdgeInsets.only(left: 14),
                 child: Text(
-                  reasoning.trim(),
+                  bodyText,
                   maxLines: expanded ? null : 3,
                   overflow: expanded ? null : TextOverflow.ellipsis,
                   style: theme.textTheme.bodySmall?.copyWith(

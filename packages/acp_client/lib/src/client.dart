@@ -65,6 +65,10 @@ class AcpClient {
   /// Real-time `session/update` notifications across all sessions on this link.
   Stream<AcpSessionNotification> get updates => _updates.stream;
 
+  /// Any additional JSON-RPC notifications outside `session/update` (e.g. progress/retry logs).
+  Stream<AcpRawNotification> get otherNotifications =>
+      _peer.otherNotifications;
+
   /// Incoming `session/request_permission` requests requiring UI resolution.
   Stream<PendingPermission> get permissionRequests => _permissions.stream;
 

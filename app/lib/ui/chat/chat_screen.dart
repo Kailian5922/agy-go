@@ -347,6 +347,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                               ),
                             ),
                           ),
+                        const TurnAlertBanner(),
                         const _ComposerStatusRow(),
                         ComposerBar(
                           controller: _composerController,
