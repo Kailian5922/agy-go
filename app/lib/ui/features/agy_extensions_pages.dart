@@ -188,7 +188,7 @@ class McpServersPage extends ConsumerWidget {
 
     return AppPage.list(
       title: 'MCP 服务管理',
-      subtitle: const Text('配置 ~/.gemini/antigravity-cli/settings.json 中的 MCP 扩展'),
+      subtitle: const Text('配置 ~/.gemini/config/mcp_config.json 中的 MCP 扩展'),
       actions: [
         GlassIconButton(
           icon: AppIcons.refresh,

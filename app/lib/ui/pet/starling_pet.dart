@@ -307,24 +307,20 @@ class _PetSettingsPageState extends ConsumerState<PetSettingsPage> {
           ),
         ),
         SettingsSection(
-          title: '显示方式',
+          title: '应用外悬浮输入（DSH Go 同款方案）',
+          footer: const Text(
+            '切出 AGY Go 到任意其他应用时，单击悬浮球即可直接弹出输入框「问一句」并切换当前对话/新对话；长按打开快捷菜单；待确认的手机操控也会以悬浮气泡弹出。',
+          ),
           children: [
-            SettingsSwitchTile(
-              icon: AppIcons.pet,
-              tint: 2,
-              title: '在 App 内显示悬浮伙伴',
-              subtitle: '可自由拖拽，单击查看状态，长按进入本页',
-              value: pet.showInApp,
-              onChanged: (v) =>
-                  ref.read(petSettingsProvider.notifier).setShowInApp(v),
-            ),
             SettingsSwitchTile(
               icon: AppIcons.overlayBall,
               tint: 1,
-              title: 'App 外桌面悬浮球',
+              title: '应用外桌面悬浮球与悬浮输入',
               subtitle: pet.canDrawOverlays
-                  ? '已获悬浮窗权限，切到其他应用时靠边吸附显示'
-                  : '需要开启「显示在其他应用上层」权限',
+                  ? '已获悬浮窗权限，单击悬浮球可在应用外直接输入提问'
+                  : pet.canUseAccessibilityOverlay
+                  ? '已通过无障碍悬浮就绪（免额外悬浮窗权限）'
+                  : '需要「显示在其他应用上层」权限或开启手机操控无障碍服务',
               value: pet.showSystemOverlay,
               onChanged: (v) async {
                 final ok = await ref
@@ -334,6 +330,65 @@ class _PetSettingsPageState extends ConsumerState<PetSettingsPage> {
                   showBriefNotice(context, '请在系统设置中允许悬浮窗后返回开启');
                 }
               },
+            ),
+            SettingsSwitchTile(
+              icon: AppIcons.openExternal,
+              tint: 0,
+              title: '仅在切出 AGY Go 后显示',
+              subtitle: '回到本应用时自动隐藏桌面球，切到其他应用时自动滑出',
+              value: pet.onlyOutsideApp,
+              onChanged: (v) =>
+                  ref.read(petSettingsProvider.notifier).setOnlyOutsideApp(v),
+            ),
+            if (pet.hasAnyOverlayPermission)
+              SettingsTile(
+                icon: AppIcons.askAi,
+                tint: 4,
+                title: '立即弹出悬浮输入条体验',
+                subtitle: '在当前界面直接拉起悬浮「问一句」输入条',
+                onTap: () async {
+                  if (!pet.showSystemOverlay) {
+                    await ref
+                        .read(petSettingsProvider.notifier)
+                        .setOnlyOutsideApp(false);
+                    await ref
+                        .read(petSettingsProvider.notifier)
+                        .setShowSystemOverlay(true);
+                  } else if (pet.onlyOutsideApp) {
+                    await ref
+                        .read(petSettingsProvider.notifier)
+                        .setOnlyOutsideApp(false);
+                  }
+                  final opened = await ref
+                      .read(petSettingsProvider.notifier)
+                      .openFloatingAskBar();
+                  if (!opened && context.mounted) {
+                    showBriefNotice(context, '请先授予悬浮窗或无障碍权限');
+                  }
+                },
+              ),
+            if (!pet.hasAnyOverlayPermission)
+              SettingsTile(
+                icon: AppIcons.securityWarning,
+                tint: 3,
+                title: '打开应用信息（解除受限设置）',
+                subtitle: '若系统禁止开启悬浮窗，先在应用信息右上角 ⋮ 允许受限设置',
+                onTap: () =>
+                    ref.read(petSettingsProvider.notifier).openAppDetails(),
+              ),
+          ],
+        ),
+        SettingsSection(
+          title: '应用内伙伴',
+          children: [
+            SettingsSwitchTile(
+              icon: AppIcons.pet,
+              tint: 2,
+              title: '在 App 内显示悬浮伙伴',
+              subtitle: '可自由拖拽，单击查看状态，长按进入本页',
+              value: pet.showInApp,
+              onChanged: (v) =>
+                  ref.read(petSettingsProvider.notifier).setShowInApp(v),
             ),
           ],
         ),

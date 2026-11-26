@@ -10,6 +10,7 @@ import '../../runtime/runtime_models.dart';
 import '../../state/chat_state.dart';
 import '../../state/connection_state.dart';
 import '../../state/hosts_state.dart';
+import '../../state/pet_state.dart';
 import '../../state/phone_state.dart';
 import '../../state/runtime_state.dart';
 import '../../state/sessions_state.dart';
@@ -91,6 +92,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<String?>(
+      petSettingsProvider.select((p) => p.pendingPrefillText),
+      (_, next) {
+        if (next != null && next.isNotEmpty) {
+          _composerController.value = TextEditingValue(
+            text: next,
+            selection: TextSelection.collapsed(offset: next.length),
+          );
+          ref.read(petSettingsProvider.notifier).clearPendingPrefill();
+        }
+      },
+    );
     final hosts = ref.watch(hostsProvider);
     final runtime = ref.watch(localRuntimeProvider).status;
     final connAsync = ref.watch(activeConnectionProvider);

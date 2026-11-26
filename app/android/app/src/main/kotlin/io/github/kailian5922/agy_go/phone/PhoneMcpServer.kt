@@ -25,9 +25,21 @@ class PhoneMcpServer(
     private val safetyGate: SafetyGate,
     private val isEnabled: () -> Boolean,
     private val onAudit: (tool: String, summary: String, outcome: String) -> Unit,
+    private val onClientActivity: ((clientName: String?) -> Unit)? = null,
 ) {
     val authToken: String = generateToken()
+    val sessionId: String = generateToken().take(24)
+
     @Volatile var port: Int = -1
+        private set
+
+    @Volatile var clientInitialized: Boolean = false
+        private set
+
+    @Volatile var lastClientName: String? = null
+        private set
+
+    @Volatile var lastClientSeenAtMs: Long = 0L
         private set
 
     @Volatile private var serverSocket: ServerSocket? = null
@@ -58,11 +70,63 @@ class PhoneMcpServer(
 
     fun stop() {
         running = false
+        clientInitialized = false
+        lastClientName = null
+        lastClientSeenAtMs = 0L
         try {
             serverSocket?.close()
         } catch (_: Exception) {}
         serverSocket = null
         port = -1
+    }
+
+    /** Runs a real loopback Streamable HTTP initialize + tools/list probe against this server. */
+    fun selfProbe(): Pair<Boolean, String> {
+        val p = port
+        if (!running || p <= 0) return false to "MCP 本地服务未启动"
+        return try {
+            val initBody = """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"agy-go-self-check","version":"1.0"}}}"""
+            val initResp = sendLoopbackPost(p, initBody)
+            if (!initResp.first.contains("200")) {
+                return false to "initialize 失败（${initResp.first}）"
+            }
+            val listBody = """{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"""
+            val listResp = sendLoopbackPost(p, listBody)
+            if (!listResp.first.contains("200")) {
+                return false to "tools/list 失败（${listResp.first}）"
+            }
+            val tools = JSONObject(listResp.second)
+                .optJSONObject("result")
+                ?.optJSONArray("tools")
+                ?.length() ?: 0
+            true to "本地 MCP 环回通信正常（$tools 个工具就绪，127.0.0.1:$p）"
+        } catch (e: Throwable) {
+            false to "本地环回连接异常：${e.message ?: e.javaClass.simpleName}"
+        }
+    }
+
+    private fun sendLoopbackPost(port: Int, jsonBody: String): Pair<String, String> {
+        Socket("127.0.0.1", port).use { sock ->
+            sock.soTimeout = 4_000
+            val bytes = jsonBody.toByteArray(Charsets.UTF_8)
+            val req = "POST /mcp HTTP/1.1\r\n" +
+                "Host: 127.0.0.1:$port\r\n" +
+                "Authorization: Bearer $authToken\r\n" +
+                "Accept: application/json, text/event-stream\r\n" +
+                "Content-Type: application/json\r\n" +
+                "Content-Length: ${bytes.size}\r\n" +
+                "Connection: close\r\n\r\n"
+            val out = sock.getOutputStream()
+            out.write(req.toByteArray(Charsets.ISO_8859_1))
+            out.write(bytes)
+            out.flush()
+            val raw = sock.getInputStream().readBytes().toString(Charsets.UTF_8)
+            val idx = raw.indexOf("\r\n\r\n")
+            val head = if (idx >= 0) raw.substring(0, idx) else raw
+            val body = if (idx >= 0) raw.substring(idx + 4) else ""
+            val statusLine = head.substringBefore("\r\n")
+            return statusLine to body
+        }
     }
 
     private fun handleHttp(socket: Socket) {
@@ -159,12 +223,34 @@ class PhoneMcpServer(
                 if (offset == contentLength) buf else buf.copyOf(offset)
             }
 
-            val body = String(bodyBytes, Charsets.UTF_8)
+            val body = String(bodyBytes, Charsets.UTF_8).trim()
+            val extraHeaders = "Mcp-Session-Id: $sessionId\r\n"
+            if (body.startsWith("[")) {
+                val batch = try {
+                    JSONArray(body)
+                } catch (e: Exception) {
+                    writeHttp(output, 200, "OK", rpcError(JSONObject.NULL, -32700, "Parse error: ${e.message}").toString(), extraHeaders)
+                    return
+                }
+                val replies = JSONArray()
+                for (i in 0 until batch.length()) {
+                    val item = batch.optJSONObject(i) ?: continue
+                    val rep = handleJsonRpcObject(item)
+                    if (rep != null) replies.put(rep)
+                }
+                if (replies.length() == 0) {
+                    writeHttp(output, 202, "Accepted", "", extraHeaders)
+                } else {
+                    writeHttp(output, 200, "OK", replies.toString(), extraHeaders)
+                }
+                return
+            }
+
             val reply = handleJsonRpc(body)
             if (reply == null) {
-                writeHttp(output, 202, "Accepted", "")
+                writeHttp(output, 202, "Accepted", "", extraHeaders)
             } else {
-                writeHttp(output, 200, "OK", reply.toString())
+                writeHttp(output, 200, "OK", reply.toString(), extraHeaders)
             }
         }
     }
@@ -175,7 +261,10 @@ class PhoneMcpServer(
         } catch (e: Exception) {
             return rpcError(JSONObject.NULL, -32700, "Parse error: ${e.message}")
         }
+        return handleJsonRpcObject(req)
+    }
 
+    private fun handleJsonRpcObject(req: JSONObject): JSONObject? {
         val hasId = req.has("id") && !req.isNull("id")
         val id = if (hasId) req.get("id") else JSONObject.NULL
         val method = req.optString("method", "")
@@ -187,23 +276,47 @@ class PhoneMcpServer(
         }
 
         return when (method) {
-            "initialize" -> rpcResult(
-                id,
-                JSONObject().apply {
-                    put("protocolVersion", params.optString("protocolVersion", "2024-11-05"))
-                    put(
-                        "capabilities",
-                        JSONObject().put("tools", JSONObject().put("listChanged", false)),
-                    )
-                    put(
-                        "serverInfo",
-                        JSONObject().put("name", "agy-go-phone").put("version", "0.1.0"),
-                    )
-                },
-            )
+            "initialize" -> {
+                val clientInfo = params.optJSONObject("clientInfo")
+                val cName = clientInfo?.optString("name")?.takeIf { it.isNotBlank() }
+                if (cName != "agy-go-self-check") {
+                    clientInitialized = true
+                    if (cName != null) lastClientName = cName
+                    lastClientSeenAtMs = System.currentTimeMillis()
+                    onClientActivity?.invoke(lastClientName)
+                }
+                rpcResult(
+                    id,
+                    JSONObject().apply {
+                        put("protocolVersion", params.optString("protocolVersion", "2025-03-26"))
+                        put(
+                            "capabilities",
+                            JSONObject().put("tools", JSONObject().put("listChanged", false)),
+                        )
+                        put(
+                            "serverInfo",
+                            JSONObject().put("name", "agy-go-phone").put("version", "0.2.0"),
+                        )
+                        put(
+                            "instructions",
+                            "Use phone_* tools to inspect the current Android screen and interact with apps when requested by the user.",
+                        )
+                    },
+                )
+            }
             "ping" -> rpcResult(id, JSONObject())
-            "tools/list" -> rpcResult(id, JSONObject().put("tools", toolCatalog()))
-            "tools/call" -> rpcResult(id, executeToolCall(params))
+            "tools/list" -> {
+                if (lastClientSeenAtMs > 0L) {
+                    lastClientSeenAtMs = System.currentTimeMillis()
+                }
+                rpcResult(id, JSONObject().put("tools", toolCatalog()))
+            }
+            "tools/call" -> {
+                clientInitialized = true
+                lastClientSeenAtMs = System.currentTimeMillis()
+                onClientActivity?.invoke(lastClientName)
+                rpcResult(id, executeToolCall(params))
+            }
             else -> rpcError(id, -32601, "Method not found: $method")
         }
     }
@@ -501,8 +614,13 @@ class PhoneMcpServer(
         extraHeaders: String = "",
     ) {
         val bytes = body.toByteArray(Charsets.UTF_8)
+        val contentType = if (bytes.isNotEmpty()) {
+            "Content-Type: application/json; charset=utf-8\r\n"
+        } else {
+            ""
+        }
         val headers = "HTTP/1.1 $status $reason\r\n" +
-            "Content-Type: application/json; charset=utf-8\r\n" +
+            contentType +
             "Content-Length: ${bytes.size}\r\n" +
             extraHeaders +
             "Connection: close\r\n\r\n"
@@ -513,6 +631,17 @@ class PhoneMcpServer(
 
     companion object {
         private const val MAX_BODY_BYTES = 2 * 1024 * 1024
+
+        val TOOL_NAMES = listOf(
+            "phone_get_screen",
+            "phone_screenshot",
+            "phone_tap",
+            "phone_swipe",
+            "phone_input_text",
+            "phone_press_key",
+            "phone_launch_app",
+            "phone_list_apps",
+        )
 
         private fun generateToken(): String {
             val bytes = ByteArray(24)

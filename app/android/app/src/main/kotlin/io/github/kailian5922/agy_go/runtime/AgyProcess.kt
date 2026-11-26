@@ -94,6 +94,9 @@ class AgyProcess(
             env["XDG_DATA_HOME"] = File(installer.homeDir, ".local/share").absolutePath
             env["TERM"] = "xterm-256color"
             env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
+            val loopbackBypass = mergeNoProxy(env["NO_PROXY"] ?: env["no_proxy"])
+            env["NO_PROXY"] = loopbackBypass
+            env["no_proxy"] = loopbackBypass
             if (phoneStorageMounted) {
                 env["AGY_PHONE_STORAGE"] = if (executionMode == "proot") PhoneStorage.GUEST_PATH else PhoneStorage.hostRoot()
             }
@@ -221,6 +224,8 @@ class AgyProcess(
                 add("HOME=/root")
                 add("SHELL=/bin/sh")
                 add("AGY_CLI_DISABLE_AUTO_UPDATE=true")
+                add("NO_PROXY=127.0.0.1,localhost,::1")
+                add("no_proxy=127.0.0.1,localhost,::1")
                 add("PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin")
                 if (phoneStorageMounted) {
                     add("AGY_PHONE_STORAGE=${PhoneStorage.GUEST_PATH}")
@@ -347,6 +352,20 @@ class AgyProcess(
 
     companion object {
         private val OAUTH_URL_REGEX = Regex("https://accounts\\.google\\.com/[^\\s\"'<>]+")
+
+        fun mergeNoProxy(existing: String?): String {
+            val parts = LinkedHashSet<String>()
+            if (!existing.isNullOrBlank()) {
+                for (entry in existing.split(',')) {
+                    val trimmed = entry.trim()
+                    if (trimmed.isNotEmpty()) parts.add(trimmed)
+                }
+            }
+            parts.add("127.0.0.1")
+            parts.add("localhost")
+            parts.add("::1")
+            return parts.joinToString(",")
+        }
 
         private fun generateToken(): String {
             val bytes = ByteArray(24)

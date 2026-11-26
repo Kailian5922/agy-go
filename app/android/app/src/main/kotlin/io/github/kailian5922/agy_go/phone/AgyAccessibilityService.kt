@@ -2,24 +2,33 @@ package io.github.kailian5922.agy_go.phone
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.AppOpsManager
+import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Process
+import android.provider.Settings
 import android.util.Base64
 import android.view.Display
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Android AccessibilityService backing AGY Go's MCP phone-control tools.
+ * Android AccessibilityService backing AGY Go's MCP phone-control tools and optional
+ * TYPE_ACCESSIBILITY_OVERLAY floating input bar.
  * Only performs actions when invoked by PhoneMcpServer after SafetyGate approval.
  */
 class AgyAccessibilityService : AccessibilityService() {
@@ -27,6 +36,7 @@ class AgyAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        notifyStateChanged()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -38,11 +48,35 @@ class AgyAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
+    override fun onUnbind(intent: Intent?): Boolean {
+        if (instance === this) {
+            instance = null
+            notifyStateChanged()
+        }
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
         if (instance === this) {
             instance = null
+            notifyStateChanged()
         }
         super.onDestroy()
+    }
+
+    /** Context suitable for attaching a TYPE_ACCESSIBILITY_OVERLAY floating window. */
+    fun overlayWindowContext(): Context {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val dm = getSystemService(DisplayManager::class.java)
+                val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
+                if (display != null) {
+                    return createDisplayContext(display)
+                        .createWindowContext(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
+                }
+            } catch (_: Throwable) {}
+        }
+        return this
     }
 
     fun foregroundPackage(): String? =
@@ -218,12 +252,97 @@ class AgyAccessibilityService : AccessibilityService() {
     }
 
     companion object {
+        const val RESTRICTED_GUARDED = "guarded"
+        const val RESTRICTED_ACKNOWLEDGED = "acknowledged"
+        const val RESTRICTED_CLEAR = "clear"
+
+        private const val OP_RESTRICTED_SETTINGS = "android:access_restricted_settings"
+        private const val SOURCE_OTHER = 1
+        private const val SOURCE_STORE = 2
+        private const val SOURCE_LOCAL_FILE = 3
+        private const val SOURCE_DOWNLOADED_FILE = 4
+
         @Volatile var instance: AgyAccessibilityService? = null
             private set
 
         @Volatile var lastForegroundPackage: String? = null
             private set
 
+        private val stateListeners = CopyOnWriteArraySet<() -> Unit>()
+
         fun isRunning(): Boolean = instance != null
+
+        fun addStateListener(listener: () -> Unit) {
+            stateListeners.add(listener)
+        }
+
+        fun removeStateListener(listener: () -> Unit) {
+            stateListeners.remove(listener)
+        }
+
+        private fun notifyStateChanged() {
+            for (l in stateListeners) {
+                try {
+                    l()
+                } catch (_: Throwable) {}
+            }
+        }
+
+        /**
+         * Returns true when Android Settings lists AGY Go's AccessibilityService as enabled,
+         * even if the OS has temporarily failed to bind the service instance.
+         */
+        fun isEnabledInSettings(context: Context): Boolean {
+            return try {
+                val enabled = Settings.Secure.getInt(
+                    context.contentResolver,
+                    Settings.Secure.ACCESSIBILITY_ENABLED,
+                    0,
+                )
+                if (enabled != 1) return false
+                val list = Settings.Secure.getString(
+                    context.contentResolver,
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                ).orEmpty()
+                val full = "${context.packageName}/${AgyAccessibilityService::class.java.name}"
+                val shortName = "${context.packageName}/.phone.AgyAccessibilityService"
+                list.split(':').any { it.equals(full, ignoreCase = true) || it.equals(shortName, ignoreCase = true) }
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        /** Pure classifier for Android 13+ restricted settings state (sideloaded APKs). */
+        fun classifyRestrictedSettings(sdk: Int, mode: Int?, packageSource: Int?): String? {
+            if (sdk < Build.VERSION_CODES.TIRAMISU) return RESTRICTED_CLEAR
+            return when (mode) {
+                AppOpsManager.MODE_ALLOWED -> RESTRICTED_CLEAR
+                AppOpsManager.MODE_ERRORED -> RESTRICTED_GUARDED
+                AppOpsManager.MODE_IGNORED -> RESTRICTED_ACKNOWLEDGED
+                AppOpsManager.MODE_DEFAULT -> when (packageSource) {
+                    SOURCE_LOCAL_FILE, SOURCE_DOWNLOADED_FILE -> RESTRICTED_GUARDED
+                    SOURCE_STORE, SOURCE_OTHER -> RESTRICTED_CLEAR
+                    else -> null
+                }
+                else -> null
+            }
+        }
+
+        fun readRestrictedSettings(context: Context): String? {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return RESTRICTED_CLEAR
+            val mode = try {
+                val ops = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+                @Suppress("DEPRECATION")
+                ops.unsafeCheckOpRawNoThrow(OP_RESTRICTED_SETTINGS, Process.myUid(), context.packageName)
+            } catch (_: Throwable) {
+                return null
+            }
+            val source = try {
+                context.packageManager.getInstallSourceInfo(context.packageName).packageSource
+            } catch (_: Throwable) {
+                null
+            }
+            return classifyRestrictedSettings(Build.VERSION.SDK_INT, mode, source)
+        }
     }
 }

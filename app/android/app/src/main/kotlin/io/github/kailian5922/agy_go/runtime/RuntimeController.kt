@@ -291,7 +291,8 @@ class RuntimeController private constructor(private val context: Context) {
                 currentPolicy = executionPolicy
                 mountStorage = phoneStorageEnabled && PhoneStorage.isGranted(context)
                 binds = extraWorkspaceBinds
-                phoneCtrl = phoneControlEnabled
+                phoneCtrl = io.github.kailian5922.agy_go.phone.PhoneController.get(context).prepareForEngineLaunch()
+                phoneControlEnabled = phoneCtrl
                 startDir = preferredWorkingDir
             }
             if (phoneStorageEnabled && !mountStorage) {

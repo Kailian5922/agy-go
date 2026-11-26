@@ -534,6 +534,19 @@ class ChatController extends Notifier<ChatState> {
       _onWorkspaceSelectionChanged,
     );
 
+    ref.listen<(bool, String?, String?)>(
+      phoneControlProvider.select((p) => (p.enabled, p.mcpUrl, p.mcpToken)),
+      (prev, next) {
+        if (prev == next) return;
+        final c = _activeConn;
+        if (c == null || !c.isLocal) return;
+        if (state.sessionId == null && !state.isSending) {
+          _discardDraftSession(c);
+          unawaited(prepareDraftSession(forceRefresh: true));
+        }
+      },
+    );
+
     ref.listen<(int, String?)>(
       localRuntimeProvider.select((s) => (s.logSeq, s.lastLogLine)),
       (prev, next) {

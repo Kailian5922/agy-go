@@ -8,6 +8,8 @@ import 'package:material_ui/material_ui.dart';
 
 import 'state/chat_state.dart';
 import 'state/live_activity_state.dart';
+import 'state/pet_state.dart';
+import 'state/phone_state.dart';
 import 'state/settings_state.dart';
 import 'ui/common/side_insets.dart';
 import 'ui/shell/home_shell.dart';
@@ -63,6 +65,8 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
     ref.read(appForegroundProvider.notifier).setForeground(fg);
     if (fg) {
       ref.invalidate(liveActivityStatusProvider);
+      unawaited(ref.read(phoneControlProvider.notifier).refresh());
+      unawaited(ref.read(petSettingsProvider.notifier).refreshPermission());
     }
   }
 
@@ -130,6 +134,7 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
   @override
   Widget build(BuildContext context) {
     ref.watch(liveActivityBridgeProvider);
+    ref.watch(petOverlayBridgeProvider);
     final settings = ref.watch(settingsProvider);
     final foreground = ref.watch(appForegroundProvider);
     final chatBusy = ref.watch(

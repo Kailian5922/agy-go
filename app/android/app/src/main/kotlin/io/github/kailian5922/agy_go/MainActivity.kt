@@ -38,9 +38,29 @@ class MainActivity : FlutterActivity() {
         super.onResume()
         applyStatusBarVisibility()
         applyKeepScreenOn()
-        // Re-check MANAGE_EXTERNAL_STORAGE / legacy storage grants & live activity promotion after returning from Settings.
+        // Re-check storage, AccessibilityService, Restricted Settings, overlay permissions, and Live Activity after returning from Settings.
         runtimePlugin?.onResume()
+        phonePlugin?.onResume()
+        petPlugin?.onResume()
         LiveActivity.refresh(applicationContext)
+        intent?.getStringExtra(EXTRA_PREFILL_TEXT)?.let { text ->
+            intent.removeExtra(EXTRA_PREFILL_TEXT)
+            petPlugin?.deliverPrefillText(text)
+        }
+    }
+
+    override fun onPause() {
+        petPlugin?.onPause()
+        super.onPause()
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getStringExtra(EXTRA_PREFILL_TEXT)?.let { text ->
+            intent.removeExtra(EXTRA_PREFILL_TEXT)
+            petPlugin?.deliverPrefillText(text)
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -58,6 +78,10 @@ class MainActivity : FlutterActivity() {
         phonePlugin = PhonePlugin(applicationContext, messenger)
         voicePlugin = VoicePlugin(applicationContext, { this }, messenger)
         petPlugin = PetPlugin(applicationContext, messenger)
+        intent?.getStringExtra(EXTRA_PREFILL_TEXT)?.let { text ->
+            intent.removeExtra(EXTRA_PREFILL_TEXT)
+            petPlugin?.deliverPrefillText(text)
+        }
         systemPlugin = SystemPlugin(
             context = applicationContext,
             activityProvider = { this },
@@ -167,6 +191,7 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
+        const val EXTRA_PREFILL_TEXT = "agy_prefill_text"
         private const val UI_PREFS = "agy_ui_prefs"
         private const val KEY_HIDE_STATUS_BAR = "hide_status_bar"
     }

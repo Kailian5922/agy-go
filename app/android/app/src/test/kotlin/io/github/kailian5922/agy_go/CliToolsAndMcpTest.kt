@@ -1,11 +1,17 @@
 package io.github.kailian5922.agy_go
 
+import android.app.AppOpsManager
 import android.content.ContextWrapper
+import io.github.kailian5922.agy_go.pet.FloatingAskPlace
+import io.github.kailian5922.agy_go.phone.AgyAccessibilityService
+import io.github.kailian5922.agy_go.phone.PhoneController
 import io.github.kailian5922.agy_go.phone.PhoneMcpServer
 import io.github.kailian5922.agy_go.phone.SafetyGate
 import io.github.kailian5922.agy_go.runtime.AgyAuthHelper
 import io.github.kailian5922.agy_go.runtime.AgyInstaller
+import io.github.kailian5922.agy_go.runtime.AgyProcess
 import io.github.kailian5922.agy_go.runtime.GuestWorkspaceSetup
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -250,5 +256,162 @@ class CliToolsAndMcpTest {
         } finally {
             tmpHome.deleteRecursively()
         }
+    }
+
+    @Test
+    fun phoneControllerWritesOfficialMcpConfigWithServerUrlAndCleansLegacySettings() {
+        val tmpHome = Files.createTempDirectory("agy-phone-mcp-cfg").toFile()
+        try {
+            // Seed a legacy stale `phone` entry in settings.json plus an existing custom entry in mcp_config.json.
+            val legacy = AgyAuthHelper.settingsFile(tmpHome)
+            legacy.parentFile?.mkdirs()
+            legacy.writeText("""{"mcpServers":{"phone":{"httpUrl":"http://127.0.0.1:9999/mcp"},"keep":{"command":"echo"}}}""")
+
+            val cfg = PhoneController.mcpConfigFile(tmpHome)
+            cfg.parentFile?.mkdirs()
+            cfg.writeText("""{"mcpServers":{"context7":{"serverUrl":"https://mcp.example.com/mcp"}}}""")
+
+            PhoneController.writePhoneMcpConfig(
+                homeDir = tmpHome,
+                url = "http://127.0.0.1:45678/mcp",
+                token = "tok_live_123",
+                register = true,
+            )
+
+            assertTrue(cfg.isFile)
+            val saved = JSONObject(cfg.readText()).getJSONObject("mcpServers")
+            assertTrue(saved.has("context7"))
+            val phone = saved.getJSONObject("phone")
+            assertEquals("http://127.0.0.1:45678/mcp", phone.getString("serverUrl"))
+            assertFalse(phone.has("httpUrl"))
+            assertEquals("Bearer tok_live_123", phone.getJSONObject("headers").getString("Authorization"))
+            assertEquals(600, phone.getInt("timeoutSeconds"))
+            assertTrue(phone.getJSONObject("tools").getJSONObject("phone_get_screen").getBoolean("eager"))
+
+            // Legacy settings.json `phone` entry is cleaned while custom entries survive.
+            val legacyAfter = JSONObject(legacy.readText()).getJSONObject("mcpServers")
+            assertFalse(legacyAfter.has("phone"))
+            assertTrue(legacyAfter.has("keep"))
+
+            // Unregister removes `phone` from mcp_config.json cleanly.
+            PhoneController.writePhoneMcpConfig(tmpHome, null, null, register = false)
+            val afterDisable = JSONObject(cfg.readText()).getJSONObject("mcpServers")
+            assertFalse(afterDisable.has("phone"))
+            assertTrue(afterDisable.has("context7"))
+        } finally {
+            tmpHome.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun phoneMcpServerSupportsSessionHeaderBatchSelfProbeAndClientTelemetry() {
+        val gate = SafetyGate { }
+        var notifiedClient: String? = null
+        val server = PhoneMcpServer(
+            context = ContextWrapper(null),
+            safetyGate = gate,
+            isEnabled = { true },
+            onAudit = { _, _, _ -> },
+            onClientActivity = { name -> notifiedClient = name },
+        )
+        val port = server.start()
+        try {
+            // Self-probe verifies loopback HTTP without falsely marking agy client connected.
+            val (probeOk, probeMsg) = server.selfProbe()
+            assertTrue(probeMsg, probeOk)
+            assertFalse(server.clientInitialized)
+
+            // Batch JSON-RPC request returns JSON array with both responses + Mcp-Session-Id header.
+            val batchBody = """[{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"antigravity-cli","version":"1.6.0"}}},{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}]"""
+            val batchBytes = batchBody.toByteArray(Charsets.UTF_8)
+            val batchReply = sendRawHttp(
+                port,
+                "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${server.authToken}\r\n" +
+                    "Content-Type: application/json\r\nContent-Length: ${batchBytes.size}\r\n\r\n$batchBody",
+            )
+            assertTrue(batchReply.statusLine.contains("200"))
+            assertEquals(server.sessionId, batchReply.headers["mcp-session-id"])
+            val arr = JSONArray(batchReply.body)
+            assertEquals(2, arr.length())
+            assertTrue(server.clientInitialized)
+            assertEquals("antigravity-cli", notifiedClient)
+
+            // 202 Accepted for notifications omits Content-Type header (empty body).
+            val notif = """{"jsonrpc":"2.0","method":"notifications/initialized"}"""
+            val notifReply = sendRawHttp(
+                port,
+                "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${server.authToken}\r\n" +
+                    "Content-Length: ${notif.toByteArray(Charsets.UTF_8).size}\r\n\r\n$notif",
+            )
+            assertTrue(notifReply.statusLine.contains("202"))
+            assertFalse(notifReply.headers.containsKey("content-type"))
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun noProxyLoopbackBypassRestrictedSettingsAndFloatingAskGeometryWorkCorrectly() {
+        assertEquals("127.0.0.1,localhost,::1", AgyProcess.mergeNoProxy(null))
+        assertEquals(
+            "corp.internal,127.0.0.1,localhost,::1",
+            AgyProcess.mergeNoProxy("corp.internal, 127.0.0.1 "),
+        )
+
+        assertEquals(
+            AgyAccessibilityService.RESTRICTED_CLEAR,
+            AgyAccessibilityService.classifyRestrictedSettings(31, AppOpsManager.MODE_ERRORED, 3),
+        )
+        assertEquals(
+            AgyAccessibilityService.RESTRICTED_GUARDED,
+            AgyAccessibilityService.classifyRestrictedSettings(34, AppOpsManager.MODE_ERRORED, 3),
+        )
+        assertEquals(
+            AgyAccessibilityService.RESTRICTED_ACKNOWLEDGED,
+            AgyAccessibilityService.classifyRestrictedSettings(34, AppOpsManager.MODE_IGNORED, 4),
+        )
+        assertEquals(
+            AgyAccessibilityService.RESTRICTED_CLEAR,
+            AgyAccessibilityService.classifyRestrictedSettings(35, AppOpsManager.MODE_ALLOWED, 3),
+        )
+
+        // FloatingAskPlace places bar beside right-docked orb and lifts above soft keyboard.
+        val w = FloatingAskPlace.barWidth(
+            screenWidth = 1080,
+            orbLeft = 900,
+            orbRight = 1056,
+            dockedRight = true,
+            gap = 20,
+            margin = 24,
+            minWidth = 650,
+            maxWidth = 900,
+        )
+        assertEquals(856, w)
+
+        val pos = FloatingAskPlace.barPosition(
+            screenWidth = 1080,
+            screenHeight = 2400,
+            orbLeft = 900,
+            orbRight = 1056,
+            orbCenterY = 1200,
+            dockedRight = true,
+            barWidth = w,
+            barHeight = 320,
+            gap = 20,
+            margin = 24,
+            topInset = 90,
+            bottomInset = 60,
+        )
+        assertEquals(24, pos.x)
+        assertEquals(1040, pos.y)
+
+        val lifted = FloatingAskPlace.liftForIme(
+            restY = 1500,
+            currentScreenY = 1500,
+            imeOverlap = 420,
+            gap = 20,
+            minY = 90,
+        )
+        assertEquals(1060, lifted)
     }
 }

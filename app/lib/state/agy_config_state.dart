@@ -22,7 +22,11 @@ class AgyMcpServerEntry {
   });
 
   factory AgyMcpServerEntry.fromJson(String name, Map<String, Object?> json) {
-    final url = json['url'] as String? ?? json['httpUrl'] as String? ?? '';
+    final url =
+        json['serverUrl'] as String? ??
+        json['url'] as String? ??
+        json['httpUrl'] as String? ??
+        '';
     final typeRaw = (json['type'] as String? ?? '').toLowerCase();
     final transport = url.isNotEmpty
         ? (typeRaw == 'sse' ? 'sse' : 'http')
@@ -52,8 +56,8 @@ class AgyMcpServerEntry {
 
   Map<String, Object?> toJson() => <String, Object?>{
     if (isRemote) ...{
-      'type': transport,
-      'url': url,
+      'serverUrl': url,
+      if (transport == 'sse') 'type': 'sse',
       if (headers.isNotEmpty) 'headers': headers,
     } else ...{
       'command': command,
@@ -249,6 +253,13 @@ class AgyConfigController extends Notifier<AgyConfigState> {
     return '$root/.gemini/antigravity-cli/settings.json';
   }
 
+  static String _mcpConfigPathFor(String? home) {
+    final root = (home != null && home.isNotEmpty)
+        ? home
+        : (Platform.environment['HOME'] ?? Directory.current.path);
+    return '$root/.gemini/config/mcp_config.json';
+  }
+
   static String _globalMemoryPathFor(String? home) {
     final root = (home != null && home.isNotEmpty)
         ? home
@@ -271,6 +282,7 @@ class AgyConfigController extends Notifier<AgyConfigState> {
 
   Future<void> _reload(String? home, String cwd) async {
     final settingsPath = _settingsPathFor(home);
+    final mcpConfigPath = _mcpConfigPathFor(home);
     final globalMemPath = _globalMemoryPathFor(home);
     final wsMemPath = _workspaceMemoryPathFor(cwd);
 
@@ -288,19 +300,34 @@ class AgyConfigController extends Notifier<AgyConfigState> {
     } catch (_) {}
 
     final permRules = AgyPermissionRules.fromJson(map['permissions']);
-    final mcps = <AgyMcpServerEntry>[];
-    if (map['mcpServers'] is Map) {
-      for (final entry in (map['mcpServers'] as Map).entries) {
+    final mcpsByName = <String, AgyMcpServerEntry>{};
+
+    void ingestServers(Object? raw) {
+      if (raw is! Map) return;
+      for (final entry in raw.entries) {
         if (entry.key is String && entry.value is Map) {
-          mcps.add(
-            AgyMcpServerEntry.fromJson(
-              entry.key as String,
-              Map<String, Object?>.from(entry.value as Map),
-            ),
+          final name = entry.key as String;
+          if (name == 'phone') continue;
+          mcpsByName[name] = AgyMcpServerEntry.fromJson(
+            name,
+            Map<String, Object?>.from(entry.value as Map),
           );
         }
       }
     }
+
+    // Legacy settings.json entries first, overridden by official ~/.gemini/config/mcp_config.json.
+    ingestServers(map['mcpServers']);
+    try {
+      final f = File(mcpConfigPath);
+      if (await f.exists()) {
+        final decoded = jsonDecode(await f.readAsString());
+        if (decoded is Map) {
+          ingestServers(decoded['mcpServers']);
+        }
+      }
+    } catch (_) {}
+    final mcps = mcpsByName.values.toList();
 
     final globalMem = await _safeReadText(globalMemPath);
     final wsMem = await _safeReadText(wsMemPath);
@@ -461,24 +488,58 @@ class AgyConfigController extends Notifier<AgyConfigState> {
     await _writeSettingsMap(map);
   }
 
+  Future<Map<String, Object?>> _readMcpConfigMap() async {
+    final home = ref.read(localRuntimeProvider).status.homePath;
+    final path = _mcpConfigPathFor(home);
+    try {
+      final f = File(path);
+      if (await f.exists()) {
+        final decoded = jsonDecode(await f.readAsString());
+        if (decoded is Map) return Map<String, Object?>.from(decoded);
+      }
+    } catch (_) {}
+    return <String, Object?>{};
+  }
+
+  Future<void> _writeMcpConfigMap(Map<String, Object?> map) async {
+    final home = ref.read(localRuntimeProvider).status.homePath;
+    final path = _mcpConfigPathFor(home);
+    final f = File(path);
+    await f.parent.create(recursive: true);
+    await f.writeAsString(const JsonEncoder.withIndent('  ').convert(map));
+  }
+
   Future<void> upsertMcpServer(AgyMcpServerEntry entry) async {
-    final map = await _readSettingsMap();
-    final servers = map['mcpServers'] is Map
-        ? Map<String, Object?>.from(map['mcpServers'] as Map)
+    final name = entry.name.trim();
+    if (name.isEmpty) return;
+    final mcpMap = await _readMcpConfigMap();
+    final servers = mcpMap['mcpServers'] is Map
+        ? Map<String, Object?>.from(mcpMap['mcpServers'] as Map)
         : <String, Object?>{};
-    servers[entry.name.trim()] = entry.toJson();
-    map['mcpServers'] = servers;
-    await _writeSettingsMap(map);
+    servers[name] = entry.toJson();
+    mcpMap['mcpServers'] = servers;
+    await _writeMcpConfigMap(mcpMap);
+    await refresh();
   }
 
   Future<void> deleteMcpServer(String name) async {
-    final map = await _readSettingsMap();
-    if (map['mcpServers'] is Map) {
-      final servers = Map<String, Object?>.from(map['mcpServers'] as Map)
+    final mcpMap = await _readMcpConfigMap();
+    if (mcpMap['mcpServers'] is Map) {
+      final servers = Map<String, Object?>.from(mcpMap['mcpServers'] as Map)
         ..remove(name);
-      map['mcpServers'] = servers;
-      await _writeSettingsMap(map);
+      mcpMap['mcpServers'] = servers;
+      await _writeMcpConfigMap(mcpMap);
     }
+    final legacyMap = await _readSettingsMap();
+    if (legacyMap['mcpServers'] is Map &&
+        (legacyMap['mcpServers'] as Map).containsKey(name)) {
+      final servers = Map<String, Object?>.from(legacyMap['mcpServers'] as Map)
+        ..remove(name);
+      legacyMap['mcpServers'] = servers;
+      await _writeSettingsMap(legacyMap);
+      return;
+    }
+    await refresh();
   }
 
   Future<String?> saveRawSettingsJson(String raw) async {

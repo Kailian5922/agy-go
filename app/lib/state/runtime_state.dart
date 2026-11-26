@@ -267,6 +267,11 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
     await ref.read(runtimeChannelProvider).stop();
   }
 
+  Future<void> restart({List<String>? extraBinds, String? workingDir}) async {
+    await stop();
+    await start(extraBinds: extraBinds, workingDir: workingDir);
+  }
+
   Future<void> reset({bool keepHome = true}) async {
     await ref.read(runtimeChannelProvider).reset(keepHome: keepHome);
   }
