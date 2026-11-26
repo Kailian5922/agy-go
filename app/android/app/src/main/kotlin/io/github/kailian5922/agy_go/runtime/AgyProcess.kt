@@ -79,11 +79,13 @@ class AgyProcess(
             val env = environment()
             env["HOME"] = installer.homeDir.absolutePath
             env["USER"] = "agy"
+            env["SHELL"] = if (executionMode == "proot") "/bin/sh" else "/system/bin/sh"
             env["TMPDIR"] = File(context.cacheDir, "tmp").apply { mkdirs() }.absolutePath
             env["XDG_CONFIG_HOME"] = File(installer.homeDir, ".config").absolutePath
             env["XDG_CACHE_HOME"] = File(installer.homeDir, ".cache").absolutePath
             env["XDG_DATA_HOME"] = File(installer.homeDir, ".local/share").absolutePath
             env["TERM"] = "xterm-256color"
+            env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
             if (phoneStorageMounted) {
                 env["AGY_PHONE_STORAGE"] = if (executionMode == "proot") PhoneStorage.GUEST_PATH else PhoneStorage.hostRoot()
             }
@@ -222,6 +224,8 @@ class AgyProcess(
                 }
                 add("/usr/bin/env")
                 add("HOME=/root")
+                add("SHELL=/bin/sh")
+                add("AGY_CLI_DISABLE_AUTO_UPDATE=true")
                 add("PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin")
                 if (phoneStorageMounted) {
                     add("AGY_PHONE_STORAGE=${PhoneStorage.GUEST_PATH}")

@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:acp_client/acp_client.dart';
 import 'package:agy_go/app.dart';
+import 'package:agy_go/runtime/runtime_channel.dart';
 import 'package:agy_go/state/chat_state.dart';
 import 'package:agy_go/state/connection_state.dart';
+import 'package:agy_go/state/runtime_state.dart';
 import 'package:agy_go/state/sessions_state.dart';
 import 'package:agy_go/state/settings_state.dart';
 import 'package:agy_go/ui/chat/activity_strip.dart';
@@ -22,6 +24,27 @@ class _StubConnectionController extends ActiveConnectionController {
 
   @override
   Future<HostConnection?> build() async => _conn;
+}
+
+class _FakeRuntimeChannel extends RuntimeChannel {
+  const _FakeRuntimeChannel();
+
+  @override
+  Future<Map<String, Object?>> fetchQuota() async => const {
+    'exitCode': 0,
+    'apiKeyMode': false,
+    'stderr': '',
+    'stdout':
+        '{"status":"SUCCESS","command":{"name":"usage","data":{"groups":['
+        '{"name":"Gemini Models","buckets":['
+        '{"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.91},'
+        '{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.84}'
+        ']},'
+        '{"name":"Claude and GPT models","buckets":['
+        '{"id":"3p-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":1.0},'
+        '{"id":"3p-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.95}'
+        ']}]}}}',
+  };
 }
 
 class _FakeAgyAgent {
@@ -326,6 +349,7 @@ void main() {
             activeConnectionProvider.overrideWith(
               () => _StubConnectionController(conn),
             ),
+            runtimeChannelProvider.overrideWithValue(const _FakeRuntimeChannel()),
           ],
           child: const AgyGoApp(
             home: Scaffold(body: Center(child: ModelModeChip(grouped: false))),
@@ -343,10 +367,32 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('选择模型'), findsOneWidget);
+      // 「全部」 tab MUST NOT exist; only model family categories are shown.
+      expect(find.text('全部'), findsNothing);
+      expect(find.text('Gemini'), findsOneWidget);
+      expect(find.text('Claude'), findsOneWidget);
+      // Defaults to the currently selected model's category (Gemini) & shows Gemini 5h/weekly quota.
       expect(find.text('Gemini 4 Hydrogen'), findsOneWidget);
-      expect(find.text('Claude Opus 5.5'), findsOneWidget);
+      expect(find.text('Claude Opus 5.5'), findsNothing);
+      expect(find.text('5 小时额度'), findsOneWidget);
+      expect(find.text('周额度'), findsOneWidget);
+      expect(find.text('91%'), findsOneWidget);
+      expect(find.text('84%'), findsOneWidget);
       expect(find.text('思考深度'), findsOneWidget);
       expect(find.text('超高'), findsNothing);
+
+      // Switching to the Claude tab shows Claude models and switches quota to Claude / GPT.
+      await tester.tap(find.text('Claude'));
+      await tester.pumpAndSettle();
+      expect(find.text('Claude Opus 5.5'), findsOneWidget);
+      expect(find.text('Gemini 4 Hydrogen'), findsNothing);
+      expect(find.text('100%'), findsOneWidget);
+      expect(find.text('95%'), findsOneWidget);
+
+      // Switch back to Gemini tab.
+      await tester.tap(find.text('Gemini'));
+      await tester.pumpAndSettle();
+      expect(find.text('Gemini 4 Hydrogen'), findsOneWidget);
 
       // Duplicate raw ACP Mode / 会话模式 (Default / Accept edits / Plan) MUST NOT appear!
       expect(find.text('Mode'), findsNothing);

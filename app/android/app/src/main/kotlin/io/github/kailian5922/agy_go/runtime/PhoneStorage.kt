@@ -28,7 +28,8 @@ object PhoneStorage {
     /** Shortcut name placed inside the engine's home directory. */
     const val SHORTCUT_NAME = "手机存储"
 
-    fun hostRoot(): String = Environment.getExternalStorageDirectory().absolutePath // /storage/emulated/0
+    fun hostRoot(): String =
+        Environment.getExternalStorageDirectory()?.absolutePath ?: "/storage/emulated/0"
 
     fun outputDir(): String = "${hostRoot()}/Download/AGY-Go"
 

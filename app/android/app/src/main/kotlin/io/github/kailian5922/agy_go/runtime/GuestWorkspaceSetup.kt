@@ -39,6 +39,14 @@ object GuestWorkspaceSetup {
             """.trimMargin()
         }
 
+        val toolEnvBlock = if (useProot) {
+            ""
+        } else {
+            """
+            |- 本机原生 Bionic 环境的 Shell 为 `/system/bin/sh`（Android toybox，支持 `ls`/`cat`/`cp`/`mv`/`rm`/`mkdir`/`find`/`grep`/`sed`/`head`/`tail`/`wc`/`tar`/`gzip`/`chmod`/`stat`/`sha256sum` 等基础命令），不含 `bash`/`git`/`python3`/`node`/`jq`/`rg`/`curl`。文件读写与检索优先使用内置文件/搜索工具，Shell 命令请用标准 POSIX sh 写法。
+            """.trimMargin()
+        }
+
         val phoneControlBlock = if (phoneControlEnabled) {
             """
             |
@@ -55,7 +63,7 @@ object GuestWorkspaceSetup {
             |
             |- 当前运行在 $envDesc 中，由 AGY Go 通过官方 `agy acp` 协议驱动。
             |- 默认工作区目录：`$workspacePath`（每个会话可能通过 ACP `cwd` 切换到用户选择的任意工作区目录）。
-            |$storageBlock
+            |$storageBlock${if (toolEnvBlock.isNotEmpty()) "\n$toolEnvBlock" else ""}
             |- 手机屏幕较窄：回复尽量清晰精炼，代码块避免过宽行；使用与用户相同的语言回复。$phoneControlBlock
             |
         """.trimMargin()

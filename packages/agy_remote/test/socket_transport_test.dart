@@ -159,5 +159,12 @@ void main() {
         contains("exec '/opt/my'\\''bin/agy' acp"),
       );
     });
+
+    test('builds non-interactive remote quota command with updater disabled', () {
+      final cmd = SshAcpConnection.buildRemoteQuotaCommand("/opt/my'bin/agy");
+      expect(cmd, contains('AGY_CLI_DISABLE_AUTO_UPDATE=true'));
+      expect(cmd, contains('NO_BROWSER=1'));
+      expect(cmd, contains("'/opt/my'\\''bin/agy' -p /usage --output-format json </dev/null"));
+    });
   });
 }

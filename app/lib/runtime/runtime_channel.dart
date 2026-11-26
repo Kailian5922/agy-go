@@ -156,6 +156,19 @@ class RuntimeChannel {
     await _methods.invokeMethod<void>('submitOAuthCode', {'code': code});
   }
 
+  Future<Map<String, Object?>> fetchQuota() async {
+    try {
+      final raw = await _methods.invokeMethod<Map<Object?, Object?>>('fetchQuota');
+      if (raw == null) return const {};
+      return {
+        for (final entry in raw.entries)
+          if (entry.key is String) entry.key! as String: entry.value,
+      };
+    } on MissingPluginException {
+      return const {'unsupported': true};
+    }
+  }
+
   Stream<RuntimeEvent> events() {
     try {
       return _events

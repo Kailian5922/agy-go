@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:acp_client/acp_client.dart';
@@ -38,6 +39,7 @@ class SshAcpConnection {
     required this.transport,
     required this.resolvedWorkingDirectory,
     required this.verifiedFingerprint,
+    required this.agyCommand,
   });
 
   final SSHClient sshClient;
@@ -45,12 +47,22 @@ class SshAcpConnection {
   final AcpTransport transport;
   final String resolvedWorkingDirectory;
   final String? verifiedFingerprint;
+  final String agyCommand;
 
   /// Opens an interactive PTY shell over the same SSH connection (for embedded xterm).
   Future<SSHSession> openShell({int width = 80, int height = 24}) {
     return sshClient.shell(
       pty: SSHPtyConfig(width: width, height: height),
     );
+  }
+
+  /// Runs `agy -p /usage --output-format json` on the remote host to fetch 5h & weekly quota.
+  Future<String> fetchQuotaJson({
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final cmd = buildRemoteQuotaCommand(agyCommand);
+    final raw = await sshClient.run(cmd).timeout(timeout);
+    return utf8.decode(raw, allowMalformed: true);
   }
 
   Future<void> close() async {
@@ -206,6 +218,7 @@ class SshAcpConnection {
       transport: transport,
       resolvedWorkingDirectory: cwd,
       verifiedFingerprint: observedFingerprint,
+      agyCommand: config.agyCommand,
     );
   }
 
@@ -223,5 +236,13 @@ class SshAcpConnection {
     final quoted = "'${trimmed.replaceAll("'", "'\\''")}'";
     return 'export PATH="\$HOME/.local/bin:\$HOME/.gemini/antigravity-cli/bin:/usr/local/bin:\$PATH"; '
         'exec $quoted acp';
+  }
+
+  /// Builds a POSIX-safe command to fetch Antigravity 5h & weekly quota JSON on demand.
+  static String buildRemoteQuotaCommand(String agyCommand) {
+    final trimmed = agyCommand.trim().isEmpty ? 'agy' : agyCommand.trim();
+    final quoted = "'${trimmed.replaceAll("'", "'\\''")}'";
+    return 'export PATH="\$HOME/.local/bin:\$HOME/.gemini/antigravity-cli/bin:/usr/local/bin:\$PATH"; '
+        'AGY_CLI_DISABLE_AUTO_UPDATE=true NO_BROWSER=1 $quoted -p /usage --output-format json </dev/null';
   }
 }

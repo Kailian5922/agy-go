@@ -130,6 +130,14 @@ class RuntimePlugin(
                 controller.submitOAuthCode(code)
                 result.success(null)
             }
+            "fetchQuota" -> {
+                controller.fetchQuota { outcome ->
+                    mainHandler.post {
+                        outcome.onSuccess { result.success(it) }
+                            .onFailure { result.error("FETCH_QUOTA_FAILED", it.message, null) }
+                    }
+                }
+            }
             else -> result.notImplemented()
         }
     }

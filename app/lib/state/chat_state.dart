@@ -218,27 +218,49 @@ class ChatController extends Notifier<ChatState> {
         life == AppLifecycleState.inactive;
   }
 
+  String _draftMcpSignature = '';
+
   List<AcpMcpServerConfig> _sessionMcpServers(HostConnection conn) {
     final servers = <AcpMcpServerConfig>[];
-    if (conn.isLocal && conn.initResult.capabilities.supportsHttpMcp) {
-      final phone = ref.read(phoneControlProvider);
-      if (phone.isMcpReady) {
-        servers.add(
-          HttpMcpServerConfig(
-            name: 'phone',
-            url: phone.mcpUrl!,
-            headers: {'Authorization': 'Bearer ${phone.mcpToken!}'},
-          ),
-        );
+    if (conn.isLocal) {
+      final caps = conn.initResult.capabilities;
+      if (caps.supportsHttpMcp) {
+        final phone = ref.read(phoneControlProvider);
+        if (phone.isMcpReady) {
+          servers.add(
+            HttpMcpServerConfig(
+              name: 'phone',
+              url: phone.mcpUrl!,
+              headers: {'Authorization': 'Bearer ${phone.mcpToken!}'},
+            ),
+          );
+        }
       }
       final configured = ref.read(agyConfigProvider).mcpServers;
       for (final entry in configured) {
         if (entry.name == 'phone') continue;
         final cfg = entry.toAcpConfig();
-        if (cfg != null) servers.add(cfg);
+        if (cfg == null) continue;
+        if (cfg is HttpMcpServerConfig) {
+          if (cfg.transportType == 'sse' && !caps.supportsSseMcp) continue;
+          if (cfg.transportType != 'sse' && !caps.supportsHttpMcp) continue;
+        }
+        servers.add(cfg);
       }
     }
     return servers;
+  }
+
+  static String _mcpSignature(List<AcpMcpServerConfig> servers) {
+    if (servers.isEmpty) return '';
+    return servers
+        .map((s) => switch (s) {
+              HttpMcpServerConfig(:final name, :final transportType, :final url) =>
+                '$transportType:$name:$url',
+              StdioMcpServerConfig(:final name, :final command, :final args) =>
+                'stdio:$name:$command:${args.join(",")}',
+            })
+        .join('|');
   }
 
   static bool _sameStringList(List<String> a, List<String> b) {
@@ -462,9 +484,11 @@ class ChatController extends Notifier<ChatState> {
     }
     state = state.copyWith(isPreparingModels: true, clearModelError: true);
     try {
+      final mcpServers = _sessionMcpServers(conn);
+      final mcpSig = _mcpSignature(mcpServers);
       final handle = await conn.client.newSession(
         cwd: cwd,
-        mcpServers: _sessionMcpServers(conn),
+        mcpServers: mcpServers,
         additionalDirectories: extraDirs,
       );
       if (!ref.mounted || _activeConn != conn) return null;
@@ -501,6 +525,7 @@ class ChatController extends Notifier<ChatState> {
         configs = applied;
       }
       if (configs.isNotEmpty) _cachedConfigOptions = configs;
+      _draftMcpSignature = mcpSig;
 
       state = state.copyWith(
         draftSessionId: handle.sessionId,
@@ -927,10 +952,12 @@ class ChatController extends Notifier<ChatState> {
           if (!ref.mounted || _activeConn != conn || _turnGen != myGen) return;
         }
 
+        final currentMcpServers = _sessionMcpServers(conn);
         final canReuseDraft =
             state.draftSessionId != null &&
             state.draftSessionId!.isNotEmpty &&
             state.draftSessionCwd == cwd &&
+            _draftMcpSignature == _mcpSignature(currentMcpServers) &&
             _sameStringList(
               state.draftAdditionalDirs,
               state.additionalDirectories,
@@ -945,7 +972,7 @@ class ChatController extends Notifier<ChatState> {
           _discardDraftSession(conn);
           final handle = await conn.client.newSession(
             cwd: cwd,
-            mcpServers: _sessionMcpServers(conn),
+            mcpServers: currentMcpServers,
             additionalDirectories: state.additionalDirectories,
           );
           if (!ref.mounted || _activeConn != conn || _turnGen != myGen) return;

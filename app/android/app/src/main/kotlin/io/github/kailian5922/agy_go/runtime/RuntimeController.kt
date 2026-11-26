@@ -3,11 +3,13 @@ package io.github.kailian5922.agy_go.runtime
 import android.content.Context
 import java.io.BufferedReader
 import java.io.BufferedWriter
+import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.util.ArrayDeque
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Single source of truth for the on-device Antigravity CLI lifecycle on Android.
@@ -23,6 +25,7 @@ class RuntimeController private constructor(private val context: Context) {
     private val installer = AgyInstaller(context)
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "agy-runtime-ctrl") }
+    private val quotaWorker = Executors.newSingleThreadExecutor { r -> Thread(r, "agy-quota-worker") }
     private val listeners = CopyOnWriteArraySet<EventListener>()
     private val logRing = ArrayDeque<String>(MAX_LOG_LINES)
     private val lock = Any()
@@ -161,6 +164,14 @@ class RuntimeController private constructor(private val context: Context) {
     fun setPhoneControlEnabled(enabled: Boolean) {
         synchronized(lock) {
             phoneControlEnabled = enabled
+            val mounted = phoneStorageEnabled && PhoneStorage.isGranted(context)
+            GuestWorkspaceSetup.writeInstructions(
+                homeDir = installer.homeDir,
+                workspaceDir = installer.workspaceDir,
+                useProot = preferProot && installer.isProotAvailable(),
+                phoneStorageMounted = mounted,
+                phoneControlEnabled = enabled,
+            )
         }
     }
 
@@ -393,6 +404,12 @@ class RuntimeController private constructor(private val context: Context) {
                     redirectErrorStream(true)
                     val env = environment()
                     env["HOME"] = installer.homeDir.absolutePath
+                    env["SHELL"] = "/system/bin/sh"
+                    env["TMPDIR"] = File(context.cacheDir, "tmp").apply { mkdirs() }.absolutePath
+                    env["XDG_CONFIG_HOME"] = File(installer.homeDir, ".config").absolutePath
+                    env["XDG_CACHE_HOME"] = File(installer.homeDir, ".cache").absolutePath
+                    env["XDG_DATA_HOME"] = File(installer.homeDir, ".local/share").absolutePath
+                    env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
                     env["SSH_CONNECTION"] = "127.0.0.1 0 127.0.0.1 22"
                     env["NO_BROWSER"] = "1"
                 }
@@ -440,6 +457,161 @@ class RuntimeController private constructor(private val context: Context) {
                 appendLog("[auth] submitted authorization code", "system")
             } catch (e: Throwable) {
                 appendLog("[auth] failed to submit code: ${e.message}", "error")
+            }
+        }
+    }
+
+    /**
+     * Fetches the user's current 5-hour and weekly quota summary on demand via
+     * `agy -p /usage --output-format json` (zero turns, zero tokens consumed).
+     */
+    fun fetchQuota(callback: (Result<Map<String, Any?>>) -> Unit) {
+        quotaWorker.execute {
+            val currentAuth: AgyAuthHelper.AuthConfig
+            val useProot: Boolean
+            synchronized(lock) {
+                currentAuth = authConfig
+                useProot = preferProot && installer.isProotAvailable()
+            }
+
+            if (currentAuth.mode == AgyAuthHelper.MODE_GEMINI_API_KEY && currentAuth.apiKey.isNotBlank()) {
+                callback(
+                    Result.success(
+                        mapOf(
+                            "exitCode" to 0,
+                            "apiKeyMode" to true,
+                            "stdout" to "",
+                            "stderr" to "",
+                        ),
+                    ),
+                )
+                return@execute
+            }
+
+            if (!useProot && (!installer.agyBinary.exists() || !installer.agyBinary.canExecute())) {
+                callback(Result.failure(IllegalStateException("Antigravity CLI 尚未安装")))
+                return@execute
+            }
+
+            var proc: Process? = null
+            try {
+                installer.ensureDirectories()
+                val cmd = if (useProot) {
+                    val proot = File(context.applicationInfo.nativeLibraryDir, "libproot.so").absolutePath
+                    listOf(
+                        proot,
+                        "-r", installer.prootRootfsDir.absolutePath,
+                        "-0",
+                        "-w", "/root/workspace",
+                        "-b", "/dev",
+                        "-b", "/proc",
+                        "-b", "/sys",
+                        "-b", "${installer.homeDir.absolutePath}:/root",
+                        "/usr/bin/env",
+                        "HOME=/root",
+                        "SHELL=/bin/sh",
+                        "AGY_CLI_DISABLE_AUTO_UPDATE=true",
+                        "NO_BROWSER=1",
+                        "PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin",
+                        "/root/.local/bin/agy",
+                        "-p", "/usage",
+                        "--output-format", "json",
+                    )
+                } else {
+                    listOf(
+                        installer.agyBinary.absolutePath,
+                        "-p", "/usage",
+                        "--output-format", "json",
+                    )
+                }
+
+                val pb = ProcessBuilder(cmd).apply {
+                    directory(installer.workspaceDir)
+                    val env = environment()
+                    env["HOME"] = installer.homeDir.absolutePath
+                    env["USER"] = "agy"
+                    env["SHELL"] = if (useProot) "/bin/sh" else "/system/bin/sh"
+                    env["TMPDIR"] = File(context.cacheDir, "tmp").apply { mkdirs() }.absolutePath
+                    env["XDG_CONFIG_HOME"] = File(installer.homeDir, ".config").absolutePath
+                    env["XDG_CACHE_HOME"] = File(installer.homeDir, ".cache").absolutePath
+                    env["XDG_DATA_HOME"] = File(installer.homeDir, ".local/share").absolutePath
+                    env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
+                    env["NO_BROWSER"] = "1"
+                    val currentPath = env["PATH"] ?: "/system/bin:/system/xbin"
+                    env["PATH"] = "${installer.binDir.absolutePath}:$currentPath"
+                    if (useProot) {
+                        env["PROOT_TMP_DIR"] = File(context.cacheDir, "proot-tmp").apply { mkdirs() }.absolutePath
+                        env["LD_LIBRARY_PATH"] = context.applicationInfo.nativeLibraryDir
+                    }
+                    for ((k, v) in AgyAuthHelper.environmentOverrides(currentAuth)) {
+                        env[k] = v
+                    }
+                }
+
+                proc = pb.start()
+                try {
+                    proc.outputStream.close()
+                } catch (_: Exception) {}
+
+                val stdoutBuf = StringBuilder()
+                val stderrBuf = StringBuilder()
+                val outReader = Thread({
+                    try {
+                        BufferedReader(InputStreamReader(proc.inputStream, Charsets.UTF_8)).use { r ->
+                            val chunk = CharArray(4096)
+                            while (true) {
+                                val n = r.read(chunk)
+                                if (n < 0) break
+                                if (stdoutBuf.length < 256 * 1024) {
+                                    stdoutBuf.append(chunk, 0, n)
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }, "agy-quota-stdout")
+                val errReader = Thread({
+                    try {
+                        BufferedReader(InputStreamReader(proc.errorStream, Charsets.UTF_8)).use { r ->
+                            val chunk = CharArray(2048)
+                            while (true) {
+                                val n = r.read(chunk)
+                                if (n < 0) break
+                                if (stderrBuf.length < 64 * 1024) {
+                                    stderrBuf.append(chunk, 0, n)
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }, "agy-quota-stderr")
+                outReader.start()
+                errReader.start()
+
+                val finished = proc.waitFor(30, TimeUnit.SECONDS)
+                if (!finished) {
+                    proc.destroyForcibly()
+                    outReader.join(1000)
+                    errReader.join(1000)
+                    callback(Result.failure(IllegalStateException("查询额度超时（30 秒）")))
+                    return@execute
+                }
+                outReader.join(2000)
+                errReader.join(2000)
+                val code = proc.exitValue()
+                callback(
+                    Result.success(
+                        mapOf(
+                            "exitCode" to code,
+                            "apiKeyMode" to false,
+                            "stdout" to stdoutBuf.toString(),
+                            "stderr" to AgyAuthHelper.redactLine(stderrBuf.toString(), currentAuth.apiKey),
+                        ),
+                    ),
+                )
+            } catch (e: Throwable) {
+                try {
+                    proc?.destroyForcibly()
+                } catch (_: Exception) {}
+                callback(Result.failure(e))
             }
         }
     }

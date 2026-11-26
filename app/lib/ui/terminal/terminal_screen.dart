@@ -109,9 +109,26 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
           : '/bin/sh';
       final sysPath =
           Platform.environment['PATH'] ?? '/system/bin:/system/xbin:/bin';
+      final home = runtime.homePath;
+      final hasHome = home != null && home.isNotEmpty;
+      final tmpDir = hasHome ? '$home/.cache/tmp' : Directory.systemTemp.path;
+      if (hasHome) {
+        try {
+          Directory(tmpDir).createSync(recursive: true);
+        } catch (_) {}
+      }
       final env = <String, String>{
-        if (runtime.homePath != null && runtime.homePath!.isNotEmpty)
-          'HOME': runtime.homePath!,
+        if (hasHome) ...{
+          'HOME': home,
+          'XDG_CONFIG_HOME': '$home/.config',
+          'XDG_CACHE_HOME': '$home/.cache',
+          'XDG_DATA_HOME': '$home/.local/share',
+        },
+        'SHELL': shellBin,
+        'TMPDIR': tmpDir,
+        'AGY_CLI_DISABLE_AUTO_UPDATE': 'true',
+        if (runtime.phoneStorageMounted)
+          'AGY_PHONE_STORAGE': runtime.phoneStoragePath,
         'PATH': runtime.binPath != null && runtime.binPath!.isNotEmpty
             ? '${runtime.binPath}:$sysPath'
             : sysPath,

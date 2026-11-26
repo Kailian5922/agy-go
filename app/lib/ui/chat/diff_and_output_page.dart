@@ -9,6 +9,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../state/chat_state.dart';
 import '../../state/hosts_state.dart';
+import '../../state/quota_state.dart';
 import '../../state/runtime_state.dart';
 import '../../state/workspaces_state.dart';
 import '../common/app_sheet.dart';
@@ -18,6 +19,7 @@ import '../common/list_page_row.dart';
 import '../common/settings_widgets.dart';
 import '../shell/page_frame.dart';
 import '../theme/theme.dart';
+import 'quota_card.dart';
 import 'tool_format.dart';
 
 /// Concise preview header strip for message action sheets (mirroring DSH Go's MenuTextPreview).
@@ -539,7 +541,7 @@ class _FullDiffCard extends StatelessWidget {
   }
 }
 
-/// Context & Token Usage sheet (`/context`, `/usage`) with 1-tap `/compact`.
+/// Context, Subscription Quota & Token Usage sheet (`/context`, `/usage`, `/quota`) with 1-tap `/compact`.
 Future<void> showContextUsageSheet(BuildContext context, WidgetRef ref) {
   return showAppSheet<void>(
     context,
@@ -548,8 +550,24 @@ Future<void> showContextUsageSheet(BuildContext context, WidgetRef ref) {
   );
 }
 
-class _ContextUsageSheetBody extends ConsumerWidget {
+class _ContextUsageSheetBody extends ConsumerStatefulWidget {
   const _ContextUsageSheetBody();
+
+  @override
+  ConsumerState<_ContextUsageSheetBody> createState() =>
+      _ContextUsageSheetBodyState();
+}
+
+class _ContextUsageSheetBodyState
+    extends ConsumerState<_ContextUsageSheetBody> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(ref.read(quotaProvider.notifier).ensureLoaded());
+    });
+  }
 
   String _fmtTokens(int n) {
     if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(2)}M';
@@ -558,7 +576,7 @@ class _ContextUsageSheetBody extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final chat = ref.watch(chatProvider);
     final hosts = ref.watch(hostsProvider);
     final runtime = ref.watch(localRuntimeProvider).status;
@@ -583,7 +601,9 @@ class _ContextUsageSheetBody extends ConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const SheetHeader('上下文与用量'),
+            const SheetHeader('额度与上下文'),
+            const QuotaOverviewSection(),
+            const SizedBox(height: 12),
             if (ratio != null)
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 4, 20, 10),

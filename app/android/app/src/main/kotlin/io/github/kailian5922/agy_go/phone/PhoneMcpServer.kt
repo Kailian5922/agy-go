@@ -99,25 +99,67 @@ class PhoneMcpServer(
                 return
             }
 
-            if (method != "POST" || !path.startsWith("/mcp")) {
+            if (!path.startsWith("/mcp")) {
                 writeHttp(output, 404, "Not Found", """{"error":"not_found"}""")
                 return
             }
 
-            val contentLength = headers["content-length"]?.toIntOrNull() ?: 0
-            if (contentLength <= 0 || contentLength > 2 * 1024 * 1024) {
-                writeHttp(output, 400, "Bad Request", """{"error":"invalid_content_length"}""")
-                return
-            }
-            val bodyBytes = ByteArray(contentLength)
-            var offset = 0
-            while (offset < contentLength) {
-                val n = input.read(bodyBytes, offset, contentLength - offset)
-                if (n < 0) break
-                offset += n
+            when (method) {
+                "OPTIONS" -> {
+                    writeHttp(output, 204, "No Content", "", extraHeaders = "Allow: POST, DELETE, OPTIONS\r\n")
+                    return
+                }
+                "GET" -> {
+                    // MCP Streamable HTTP spec: return 405 if server does not open an unsolicited SSE stream.
+                    writeHttp(
+                        output,
+                        405,
+                        "Method Not Allowed",
+                        """{"error":"sse_not_supported"}""",
+                        extraHeaders = "Allow: POST, DELETE, OPTIONS\r\n",
+                    )
+                    return
+                }
+                "DELETE" -> {
+                    writeHttp(output, 200, "OK", """{"ok":true}""")
+                    return
+                }
+                "POST" -> Unit
+                else -> {
+                    writeHttp(
+                        output,
+                        405,
+                        "Method Not Allowed",
+                        """{"error":"method_not_allowed"}""",
+                        extraHeaders = "Allow: POST, DELETE, OPTIONS\r\n",
+                    )
+                    return
+                }
             }
 
-            val body = String(bodyBytes, 0, offset, Charsets.UTF_8)
+            val isChunked = headers["transfer-encoding"]?.lowercase()?.contains("chunked") == true
+            val bodyBytes = if (isChunked) {
+                readChunkedBody(input, MAX_BODY_BYTES) ?: run {
+                    writeHttp(output, 400, "Bad Request", """{"error":"invalid_chunked_body"}""")
+                    return
+                }
+            } else {
+                val contentLength = headers["content-length"]?.toIntOrNull() ?: 0
+                if (contentLength <= 0 || contentLength > MAX_BODY_BYTES) {
+                    writeHttp(output, 400, "Bad Request", """{"error":"invalid_content_length"}""")
+                    return
+                }
+                val buf = ByteArray(contentLength)
+                var offset = 0
+                while (offset < contentLength) {
+                    val n = input.read(buf, offset, contentLength - offset)
+                    if (n < 0) break
+                    offset += n
+                }
+                if (offset == contentLength) buf else buf.copyOf(offset)
+            }
+
+            val body = String(bodyBytes, Charsets.UTF_8)
             val reply = handleJsonRpc(body)
             if (reply == null) {
                 writeHttp(output, 202, "Accepted", "")
@@ -403,11 +445,66 @@ class PhoneMcpServer(
         return null
     }
 
-    private fun writeHttp(output: java.io.OutputStream, status: Int, reason: String, body: String) {
+    private fun readChunkedBody(input: BufferedInputStream, maxBytes: Int): ByteArray? {
+        val out = ByteArrayOutputStream()
+        while (true) {
+            val sizeLine = readCrlfLine(input) ?: return null
+            val hex = sizeLine.substringBefore(';').trim()
+            val chunkSize = hex.toIntOrNull(16) ?: return null
+            if (chunkSize < 0) return null
+            if (chunkSize == 0) {
+                // Consume trailing headers until blank line.
+                while (true) {
+                    val trailer = readCrlfLine(input) ?: break
+                    if (trailer.isEmpty()) break
+                }
+                return out.toByteArray()
+            }
+            if (out.size() + chunkSize > maxBytes) return null
+            val buf = ByteArray(chunkSize)
+            var offset = 0
+            while (offset < chunkSize) {
+                val n = input.read(buf, offset, chunkSize - offset)
+                if (n < 0) return null
+                offset += n
+            }
+            out.write(buf, 0, chunkSize)
+            // Consume CRLF terminating this chunk.
+            val cr = input.read()
+            val lf = input.read()
+            if (cr != '\r'.code || lf != '\n'.code) return null
+        }
+    }
+
+    private fun readCrlfLine(input: BufferedInputStream): String? {
+        val baos = ByteArrayOutputStream()
+        while (baos.size() < 4096) {
+            val b = input.read()
+            if (b < 0) return null
+            if (b == '\r'.code) {
+                val next = input.read()
+                if (next == '\n'.code) {
+                    return String(baos.toByteArray(), Charsets.ISO_8859_1)
+                }
+                return null
+            }
+            baos.write(b)
+        }
+        return null
+    }
+
+    private fun writeHttp(
+        output: java.io.OutputStream,
+        status: Int,
+        reason: String,
+        body: String,
+        extraHeaders: String = "",
+    ) {
         val bytes = body.toByteArray(Charsets.UTF_8)
         val headers = "HTTP/1.1 $status $reason\r\n" +
             "Content-Type: application/json; charset=utf-8\r\n" +
             "Content-Length: ${bytes.size}\r\n" +
+            extraHeaders +
             "Connection: close\r\n\r\n"
         output.write(headers.toByteArray(Charsets.ISO_8859_1))
         if (bytes.isNotEmpty()) output.write(bytes)
@@ -415,6 +512,8 @@ class PhoneMcpServer(
     }
 
     companion object {
+        private const val MAX_BODY_BYTES = 2 * 1024 * 1024
+
         private fun generateToken(): String {
             val bytes = ByteArray(24)
             SecureRandom().nextBytes(bytes)

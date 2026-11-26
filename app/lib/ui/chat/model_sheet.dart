@@ -12,6 +12,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../state/chat_state.dart';
 import '../../state/connection_state.dart';
+import '../../state/quota_state.dart';
 import '../../state/settings_state.dart';
 import '../common/app_sheet.dart';
 import '../common/brief_notice.dart';
@@ -23,6 +24,7 @@ import '../common/smooth_size.dart';
 import '../engine/engine_screen.dart';
 import '../theme/theme.dart';
 import 'permission_controls.dart';
+import 'quota_card.dart';
 
 /// Translates ACP `thought_level` / `reasoning_effort` IDs into concise Chinese labels.
 String thoughtLevelLabel(String id, [String? fallback]) =>
@@ -279,12 +281,15 @@ class _ModelSheetBodyState extends ConsumerState<_ModelSheetBody> {
       if (!mounted) return;
       final conn = ref.read(activeConnectionProvider).value;
       final chat = ref.read(chatProvider);
-      if (conn != null &&
-          chat.modelConfigOption == null &&
-          !chat.isPreparingModels) {
-        unawaited(
-          ref.read(chatProvider.notifier).prepareDraftSession(forceRefresh: true),
-        );
+      if (conn != null) {
+        unawaited(ref.read(quotaProvider.notifier).ensureLoaded());
+        if (chat.modelConfigOption == null && !chat.isPreparingModels) {
+          unawaited(
+            ref
+                .read(chatProvider.notifier)
+                .prepareDraftSession(forceRefresh: true),
+          );
+        }
       }
     });
   }
@@ -358,15 +363,27 @@ class _ModelSheetBodyState extends ConsumerState<_ModelSheetBody> {
     final isPlan = (chat.sessionAgentMode ?? settings.agentMode) == AgyAgentMode.plan;
     final models = modelOpt?.options ?? const <AcpConfigOptionValue>[];
     final currentModelVal = '${modelOpt?.currentValue ?? ''}';
+    final selectedModelChoice = models
+        .where((m) => m.value == currentModelVal)
+        .firstOrNull;
+    final selectedModelLabel = selectedModelChoice != null
+        ? formatModelName(selectedModelChoice)
+        : null;
 
     final groups = <String>[];
     for (final m in models) {
       final g = _inferModelGroup(m);
       if (!groups.contains(g)) groups.add(g);
     }
-    final showGroupFilter = groups.length >= 2 && models.length > 4;
-    final visibleModels = showGroupFilter && _activeGroup != null
-        ? models.where((m) => _inferModelGroup(m) == _activeGroup).toList()
+    final showGroupFilter = groups.length >= 2;
+    final defaultGroup = selectedModelChoice != null
+        ? _inferModelGroup(selectedModelChoice)
+        : (groups.isNotEmpty ? groups.first : null);
+    final effectiveGroup = _activeGroup != null && groups.contains(_activeGroup)
+        ? _activeGroup
+        : defaultGroup;
+    final visibleModels = showGroupFilter && effectiveGroup != null
+        ? models.where((m) => _inferModelGroup(m) == effectiveGroup).toList()
         : models;
 
     final efforts = thoughtOpt?.options ?? const <AcpConfigOptionValue>[];
@@ -461,13 +478,13 @@ class _ModelSheetBodyState extends ConsumerState<_ModelSheetBody> {
                   ),
                 )
               else ...[
-                // Series / Group capsule filter bar (only shown when >4 models across >=2 families)
-                if (showGroupFilter)
+                // Series / Group capsule category tabs (no 「全部」 tab)
+                if (showGroupFilter && effectiveGroup != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 2, bottom: 14),
                     child: _GroupFilterBar(
                       groups: groups,
-                      active: _activeGroup,
+                      active: effectiveGroup,
                       onChanged: (g) => setState(() => _activeGroup = g),
                     ),
                   ),
@@ -486,6 +503,20 @@ class _ModelSheetBodyState extends ConsumerState<_ModelSheetBody> {
                       selectedValue: currentModelVal,
                       onPick: (m) => unawaited(_pickModel(m)),
                     ),
+                  ),
+                ),
+
+                // 5-hour & weekly subscription quota card for the active model category
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    SheetTitleBar.inset,
+                    12,
+                    SheetTitleBar.inset,
+                    0,
+                  ),
+                  child: ModelQuotaCard(
+                    category: effectiveGroup,
+                    selectedModelName: selectedModelLabel,
                   ),
                 ),
 
@@ -733,28 +764,24 @@ class _GroupFilterBar extends StatelessWidget {
   });
 
   final List<String> groups;
-  final String? active;
-  final ValueChanged<String?> onChanged;
+  final String active;
+  final ValueChanged<String> onChanged;
 
   @override
   Widget build(BuildContext context) {
-    final items = <(String?, String)>[
-      (null, '全部'),
-      for (final g in groups) (g, g),
-    ];
     return SizedBox(
       height: 36,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: SheetTitleBar.inset),
-        itemCount: items.length,
+        itemCount: groups.length,
         separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (ctx, i) {
-          final (id, label) = items[i];
+          final group = groups[i];
           return _CapsuleChip(
-            label: label,
-            selected: active == id,
-            onTap: () => onChanged(id),
+            label: group,
+            selected: active == group,
+            onTap: () => onChanged(group),
           );
         },
       ),

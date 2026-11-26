@@ -11,6 +11,7 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.github.kailian5922.agy_go.runtime.AgyAuthHelper
 import io.github.kailian5922.agy_go.runtime.AgyInstaller
+import io.github.kailian5922.agy_go.runtime.RuntimeController
 import org.json.JSONObject
 import java.io.File
 import java.util.ArrayDeque
@@ -74,6 +75,7 @@ class PhonePlugin(
                     mcpServer.stop()
                     syncAgyMcpSettings(register = false)
                 }
+                RuntimeController.get(context).setPhoneControlEnabled(want)
                 emitStatus()
                 result.success(statusSnapshot())
             }
@@ -93,6 +95,7 @@ class PhonePlugin(
                 enabled = false
                 mcpServer.stop()
                 syncAgyMcpSettings(register = false)
+                RuntimeController.get(context).setPhoneControlEnabled(false)
                 emitStatus()
                 result.success(null)
             }

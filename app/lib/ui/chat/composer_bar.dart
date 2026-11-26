@@ -207,7 +207,7 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
             builder: (_) => DiffViewerPage.fromTranscript(transcript),
           ),
         );
-      case 'context' || 'usage':
+      case 'context' || 'usage' || 'quota':
         await showContextUsageSheet(context, ref);
       case 'resume':
         final id = await showSessionSearch(context);
@@ -379,6 +379,8 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
         unawaited(showWorkspaceSheet(context, ref));
       case 'add_dir':
         unawaited(_runAppCommand('add-dir', ''));
+      case 'usage':
+        unawaited(showContextUsageSheet(context, ref));
       case 'phone':
         widget.onOpenDestination?.call(DrawerDestination.phone);
     }
@@ -1346,6 +1348,12 @@ class _PlusPanelBody extends ConsumerWidget {
                       ? null
                       : '${chat.additionalDirectories.length} 个',
                   onTap: () => Navigator.of(context).pop('add_dir'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.diagnostics,
+                  title: '订阅额度与上下文 (/usage)',
+                  subtitle: '查看 5 小时 / 周剩余额度与上下文占用',
+                  onTap: () => Navigator.of(context).pop('usage'),
                 ),
                 ListPageRow(
                   icon: AppIcons.phoneControl,
