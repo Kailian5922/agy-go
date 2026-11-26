@@ -267,13 +267,18 @@ class AcpConfigOptionValue {
     this.group,
   });
 
-  factory AcpConfigOptionValue.fromJson(Map<String, Object?> json, {String? group}) =>
-      AcpConfigOptionValue(
-        value: _asString(json['value']),
-        name: _asString(json['name'], _asString(json['value'])),
-        description: _asNullableString(json['description']),
-        group: group,
-      );
+  factory AcpConfigOptionValue.fromJson(Map<String, Object?> json, {String? group}) {
+    final value =
+        _asNullableString(json['value']) ??
+        _asNullableString(json['modelId']) ??
+        _asString(json['id']);
+    return AcpConfigOptionValue(
+      value: value,
+      name: _asString(json['name'], value),
+      description: _asNullableString(json['description']),
+      group: group,
+    );
+  }
 
   final String value;
   final String name;
@@ -281,7 +286,7 @@ class AcpConfigOptionValue {
   final String? group;
 }
 
-/// Dynamic session option (e.g. `model`, `reasoning_effort`, `mode`).
+/// Dynamic session option (e.g. `model`, `thought_level`, `reasoning_effort`, `mode`).
 class AcpConfigOption {
   const AcpConfigOption({
     required this.id,
@@ -299,7 +304,8 @@ class AcpConfigOption {
       if (raw is! Map) continue;
       final map = Map<String, Object?>.from(raw);
       if (map['options'] is List) {
-        final groupName = _asNullableString(map['name']) ?? _asNullableString(map['group']);
+        final groupName =
+            _asNullableString(map['name']) ?? _asNullableString(map['group']);
         for (final nested in _asList(map['options'])) {
           if (nested is Map) {
             flatOptions.add(
@@ -333,6 +339,37 @@ class AcpConfigOption {
   final String? description;
   final String? category;
   final List<AcpConfigOptionValue> options;
+
+  bool get isModelOption =>
+      category?.toLowerCase() == 'model' || id.toLowerCase() == 'model';
+
+  bool get isThoughtLevelOption {
+    final cat = category?.toLowerCase() ?? '';
+    final lower = id.toLowerCase();
+    return cat == 'thought_level' ||
+        cat == 'reasoning_effort' ||
+        cat == 'thinking_level' ||
+        cat == 'thinking' ||
+        cat == 'effort' ||
+        lower == 'thought_level' ||
+        lower == 'reasoning_effort' ||
+        lower == 'thinking_level' ||
+        lower == 'thinking' ||
+        lower == 'effort';
+  }
+
+  AcpConfigOption copyWith({
+    Object? currentValue,
+    List<AcpConfigOptionValue>? options,
+  }) => AcpConfigOption(
+    id: id,
+    name: name,
+    type: type,
+    currentValue: currentValue ?? this.currentValue,
+    description: description,
+    category: category,
+    options: options ?? this.options,
+  );
 }
 
 /// Handle returned from `session/new`, `session/load`, or `session/resume`.
@@ -348,15 +385,42 @@ class AcpSessionHandle {
     String? fallbackSessionId,
   }) {
     final modesRaw = json['modes'];
+    final configOptions = _asList(json['configOptions'])
+        .whereType<Map>()
+        .map((m) => AcpConfigOption.fromJson(Map<String, Object?>.from(m)))
+        .toList();
+
+    // Fallback: if an ACP server advertises models under `models.availableModels`
+    // without a `configOptions` model select, synthesize one so UI always lists them.
+    if (!configOptions.any((o) => o.isModelOption) && json['models'] is Map) {
+      final modelsMap = Map<String, Object?>.from(json['models'] as Map);
+      final available = _asList(modelsMap['availableModels'])
+          .whereType<Map>()
+          .map((m) => AcpConfigOptionValue.fromJson(Map<String, Object?>.from(m)))
+          .where((v) => v.value.isNotEmpty)
+          .toList();
+      if (available.isNotEmpty) {
+        configOptions.insert(
+          0,
+          AcpConfigOption(
+            id: 'model',
+            name: 'Model',
+            type: 'select',
+            category: 'model',
+            currentValue: _asNullableString(modelsMap['currentModelId']) ??
+                available.first.value,
+            options: available,
+          ),
+        );
+      }
+    }
+
     return AcpSessionHandle(
       sessionId: _asNullableString(json['sessionId']) ?? fallbackSessionId ?? '',
       modes: modesRaw is Map
           ? AcpSessionModeState.fromJson(Map<String, Object?>.from(modesRaw))
           : null,
-      configOptions: _asList(json['configOptions'])
-          .whereType<Map>()
-          .map((m) => AcpConfigOption.fromJson(Map<String, Object?>.from(m)))
-          .toList(),
+      configOptions: configOptions,
     );
   }
 

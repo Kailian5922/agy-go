@@ -183,8 +183,10 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
         if (mounted) showBriefNotice(context, '已开启新对话');
       case 'permissions' || 'mode':
         await showApprovalModeSheet(context, ref);
-      case 'model' || 'effort':
+      case 'model':
         await showModelModeSheet(context);
+      case 'effort':
+        await showModelModeSheet(context, focusEffort: true);
       case 'workspace':
         await showWorkspaceSheet(context, ref);
       case 'add-dir':

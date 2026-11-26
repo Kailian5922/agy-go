@@ -191,5 +191,39 @@ void main() {
       await client.close();
       await agent.close();
     });
+
+    test('AcpSessionHandle synthesizes model option from models.availableModels fallback and detects thought_level', () {
+      final handle = AcpSessionHandle.fromJson({
+        'sessionId': 's_fallback',
+        'models': {
+          'currentModelId': 'gemini-4-hydrogen',
+          'availableModels': [
+            {'modelId': 'gemini-4-hydrogen', 'name': 'Gemini 4 Hydrogen'},
+            {'modelId': 'claude-opus-5-5', 'name': 'Claude Opus 5.5'},
+          ],
+        },
+        'configOptions': [
+          {
+            'id': 'thought_level',
+            'name': 'Thought Level',
+            'type': 'select',
+            'category': 'thought_level',
+            'currentValue': 'high',
+            'options': [
+              {'value': 'low', 'name': 'Low'},
+              {'value': 'high', 'name': 'High'},
+            ],
+          },
+        ],
+      });
+
+      final modelOpt = handle.configOptions.where((o) => o.isModelOption).firstOrNull;
+      final thoughtOpt = handle.configOptions.where((o) => o.isThoughtLevelOption).firstOrNull;
+      expect(modelOpt, isNotNull);
+      expect(modelOpt!.currentValue, 'gemini-4-hydrogen');
+      expect(modelOpt.options.length, 2);
+      expect(thoughtOpt, isNotNull);
+      expect(thoughtOpt!.currentValue, 'high');
+    });
   });
 }

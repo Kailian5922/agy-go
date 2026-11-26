@@ -249,6 +249,18 @@ class AcpClient {
     );
   }
 
+  Future<void> setModel(
+    String sessionId,
+    String modelId, {
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    await _peer.sendRequest(
+      'session/set_model',
+      <String, Object?>{'sessionId': sessionId, 'modelId': modelId},
+      timeout,
+    );
+  }
+
   Future<List<AcpConfigOption>> setConfigOption(
     String sessionId, {
     required String configId,

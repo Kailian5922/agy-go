@@ -5,18 +5,14 @@
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
-import '../../state/chat_state.dart';
-import '../../state/connection_state.dart';
-import '../../state/settings_state.dart';
-import '../common/app_sheet.dart';
-import '../common/list_page_row.dart';
 import '../common/smooth_size.dart';
 import '../common/status_dot.dart';
-import '../engine/engine_screen.dart';
 import '../theme/theme.dart';
+
+export 'model_sheet.dart'
+    show ModelModeChip, formatModelName, showModelModeSheet, thoughtLevelLabel;
 
 /// Header status row: colored dot + concise human label.
 class HeaderStatus {
@@ -28,7 +24,7 @@ class HeaderStatus {
 
 /// Floating chrome-glass chat top bar mirroring DSH Go's ChatHeader:
 ///
-/// `(≡)  ( Title / ● Status · Workspace )    ( ✦ Mode ⌄ )  (+)`
+/// `(≡)  ( Title / ● Status · Workspace )    ( ✦ Model · Effort ⌄ )  (+)`
 class ChatHeader extends StatelessWidget {
   const ChatHeader({
     super.key,
@@ -233,198 +229,6 @@ class ChatHeader extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// Right-hand chrome-glass mode / model pill in [ChatHeader], mirroring DSH Go's ModelChip.
-class ModelModeChip extends ConsumerWidget {
-  const ModelModeChip({super.key, this.grouped = true});
-
-  final bool grouped;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final colors = theme.colorScheme;
-    final chat = ref.watch(
-      chatProvider.select(
-        (c) => (
-          modes: c.transcript.modes,
-          configs: c.transcript.configOptions,
-          hasSession: c.sessionId != null,
-        ),
-      ),
-    );
-    final settings = ref.watch(settingsProvider);
-
-    final modelOpt = chat.configs
-        .where((c) => c.id == 'model' || c.category == 'model')
-        .firstOrNull;
-    final activeMode = chat.modes?.availableModes
-        .where((m) => m.id == chat.modes!.currentModeId)
-        .firstOrNull;
-
-    String label;
-    if (modelOpt != null && modelOpt.currentValue != null) {
-      final raw = '${modelOpt.currentValue}';
-      label = modelOpt.options
-              .where((o) => o.value == raw)
-              .firstOrNull
-              ?.name ??
-          raw;
-    } else if (activeMode != null) {
-      label = activeMode.name;
-    } else {
-      label = settings.authMode == LocalAuthMode.geminiApiKey
-          ? 'Gemini API'
-          : 'Antigravity';
-    }
-    if (label.length > 14) {
-      label = '${label.substring(0, 13)}…';
-    }
-
-    return GlassSurface(
-      tier: GlassTier.chrome,
-      stadium: true,
-      grouped: grouped,
-      onTap: () => showModelModeSheet(context),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 44),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 0, 8, 0),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(AppIcons.providers, size: 15, color: colors.primary),
-              const SizedBox(width: 5),
-              Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.labelMedium?.copyWith(
-                  fontSize: 13,
-                  color: colors.onSurface,
-                ),
-              ),
-              const SizedBox(width: 2),
-              Icon(
-                AppIcons.expand,
-                size: 16,
-                color: DshColors.of(context).textTertiary,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Frosted bottom sheet for switching ACP modes, dynamic config options, and auth.
-Future<void> showModelModeSheet(BuildContext context) {
-  return showAppSheet<void>(
-    context,
-    isScrollControlled: true,
-    builder: (sheet) => const _ModelModeSheetBody(),
-  );
-}
-
-class _ModelModeSheetBody extends ConsumerWidget {
-  const _ModelModeSheetBody();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final chat = ref.watch(chatProvider);
-    final conn = ref.watch(activeConnectionProvider).value;
-    final settings = ref.watch(settingsProvider);
-    final modes = chat.transcript.modes;
-    final configs = chat.transcript.configOptions;
-
-    return SafeArea(
-      top: false,
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.only(bottom: 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const SheetHeader('模型与会话模式'),
-            if (modes != null && modes.availableModes.isNotEmpty)
-              SheetGroup(
-                title: '会话模式（ACP Modes）',
-                children: [
-                  for (final m in modes.availableModes)
-                    ListPageRow(
-                      icon: AppIcons.modes,
-                      title: m.name,
-                      subtitle: m.description,
-                      trailing: m.id == modes.currentModeId
-                          ? Icon(
-                              AppIcons.selected,
-                              size: 18,
-                              color: Theme.of(context).colorScheme.primary,
-                            )
-                          : null,
-                      onTap: () {
-                        ref.read(chatProvider.notifier).setMode(m.id);
-                        Navigator.of(context).pop();
-                      },
-                    ),
-                ],
-              ),
-            for (final opt in configs)
-              if (opt.options.isNotEmpty)
-                SheetGroup(
-                  title: opt.name,
-                  children: [
-                    for (final choice in opt.options)
-                      ListPageRow(
-                        icon: AppIcons.modelItem,
-                        title: choice.name,
-                        subtitle: choice.description,
-                        trailing: '${opt.currentValue}' == choice.value
-                            ? Icon(
-                                AppIcons.selected,
-                                size: 18,
-                                color: Theme.of(context).colorScheme.primary,
-                              )
-                            : null,
-                        onTap: () {
-                          ref
-                              .read(chatProvider.notifier)
-                              .setConfigOption(opt.id, choice.value);
-                          Navigator.of(context).pop();
-                        },
-                      ),
-                  ],
-                ),
-            SheetGroup(
-              title: '认证与连接',
-              children: [
-                ListPageRow(
-                  icon: AppIcons.apiKey,
-                  title: settings.authMode == LocalAuthMode.geminiApiKey
-                      ? 'Gemini API Key'
-                      : 'Google 账号 OAuth',
-                  subtitle: conn != null
-                      ? '当前连接：${conn.label}${conn.initResult.agentInfo != null ? ' · ${conn.initResult.agentInfo!.name} ${conn.initResult.agentInfo!.version}' : ''}'
-                      : '引擎未连接，前往本机引擎配置或启动',
-                  trailing: const Icon(AppIcons.disclosure, size: 16),
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const EngineScreen(),
-                      ),
-                    );
-                  },
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
     );
   }
 }

@@ -179,6 +179,8 @@ class AppSettings {
     this.wallpaperPath,
     this.wallpaperOpacity = 0.22,
     this.quickPanelSwipe = true,
+    this.preferredModelId,
+    this.preferredThoughtLevel,
   });
 
   final bool loaded;
@@ -205,6 +207,8 @@ class AppSettings {
   final String? wallpaperPath;
   final double wallpaperOpacity;
   final bool quickPanelSwipe;
+  final String? preferredModelId;
+  final String? preferredThoughtLevel;
 
   /// Legacy convenience getter kept in sync with [toolPermission].
   bool get autoApproveCommands =>
@@ -243,6 +247,8 @@ class AppSettings {
     String? Function()? wallpaperPath,
     double? wallpaperOpacity,
     bool? quickPanelSwipe,
+    String? Function()? preferredModelId,
+    String? Function()? preferredThoughtLevel,
   }) => AppSettings(
     loaded: loaded ?? this.loaded,
     themeMode: themeMode ?? this.themeMode,
@@ -269,6 +275,12 @@ class AppSettings {
     wallpaperPath: wallpaperPath == null ? this.wallpaperPath : wallpaperPath(),
     wallpaperOpacity: wallpaperOpacity ?? this.wallpaperOpacity,
     quickPanelSwipe: quickPanelSwipe ?? this.quickPanelSwipe,
+    preferredModelId: preferredModelId == null
+        ? this.preferredModelId
+        : preferredModelId(),
+    preferredThoughtLevel: preferredThoughtLevel == null
+        ? this.preferredThoughtLevel
+        : preferredThoughtLevel(),
   );
 }
 
@@ -300,6 +312,8 @@ class SettingsController extends Notifier<AppSettings> {
   static const _kWallpaperPath = 'agy.wallpaperPath';
   static const _kWallpaperOpacity = 'agy.wallpaperOpacity';
   static const _kQuickPanelSwipe = 'agy.quickPanelSwipe';
+  static const _kPreferredModel = 'agy.preferredModelId';
+  static const _kPreferredThought = 'agy.preferredThoughtLevel';
   static const _kApiKey = 'agy.secret.geminiApiKey';
 
   @override
@@ -364,6 +378,8 @@ class SettingsController extends Notifier<AppSettings> {
           0.55,
         ),
         quickPanelSwipe: prefs.getBool(_kQuickPanelSwipe) ?? true,
+        preferredModelId: prefs.getString(_kPreferredModel),
+        preferredThoughtLevel: prefs.getString(_kPreferredThought),
       );
     } catch (_) {
       if (!ref.mounted) return;
@@ -503,6 +519,30 @@ class SettingsController extends Notifier<AppSettings> {
     state = state.copyWith(quickPanelSwipe: enabled);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_kQuickPanelSwipe, enabled);
+  }
+
+  Future<void> setPreferredModelId(String? modelId) async {
+    final clean = modelId?.trim();
+    final value = (clean == null || clean.isEmpty) ? null : clean;
+    state = state.copyWith(preferredModelId: () => value);
+    final prefs = await SharedPreferences.getInstance();
+    if (value == null) {
+      await prefs.remove(_kPreferredModel);
+    } else {
+      await prefs.setString(_kPreferredModel, value);
+    }
+  }
+
+  Future<void> setPreferredThoughtLevel(String? level) async {
+    final clean = level?.trim();
+    final value = (clean == null || clean.isEmpty) ? null : clean;
+    state = state.copyWith(preferredThoughtLevel: () => value);
+    final prefs = await SharedPreferences.getInstance();
+    if (value == null) {
+      await prefs.remove(_kPreferredThought);
+    } else {
+      await prefs.setString(_kPreferredThought, value);
+    }
   }
 
   Future<void> setAuthConfig({
