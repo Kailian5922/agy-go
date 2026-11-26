@@ -80,6 +80,7 @@ class LineStreamAcpTransport extends AcpTransport {
   final _stderr = StreamController<String>.broadcast();
   late final StreamSubscription<String> _inSub;
   StreamSubscription<String>? _errSub;
+  Future<void> _writeQueue = Future<void>.value();
   bool _closed = false;
 
   @override
@@ -113,16 +114,35 @@ class LineStreamAcpTransport extends AcpTransport {
   }
 
   @override
-  Future<void> send(Map<String, Object?> message) async {
+  Future<void> send(Map<String, Object?> message) {
     if (_closed) {
-      throw const AcpTransportException('Cannot send on a closed transport');
+      return Future<void>.error(
+        const AcpTransportException('Cannot send on a closed transport'),
+      );
     }
-    final payload = '${jsonEncode(message)}\n';
-    try {
-      await _writeBytes(utf8.encode(payload));
-    } catch (e) {
-      throw AcpTransportException('Transport write failed', cause: e);
-    }
+    final bytes = utf8.encode('${jsonEncode(message)}\n');
+    final completer = Completer<void>();
+    // Serialize all socket/sink writes strictly in FIFO order so concurrent RPCs
+    // (e.g. session/close + session/load, or session/cancel + session/prompt)
+    // never overlap IOSink.flush() and throw "StreamSink is bound to a stream".
+    _writeQueue = _writeQueue.then((_) async {
+      if (_closed) {
+        completer.completeError(
+          const AcpTransportException('Cannot send on a closed transport'),
+        );
+        return;
+      }
+      try {
+        await _writeBytes(bytes);
+        completer.complete();
+      } catch (e, st) {
+        completer.completeError(
+          AcpTransportException('Transport write failed', cause: e),
+          st,
+        );
+      }
+    });
+    return completer.future;
   }
 
   @override

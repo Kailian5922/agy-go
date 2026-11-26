@@ -87,8 +87,29 @@ class _FakeAgyAgent {
             : 'medium',
         'options': thoughts,
       },
+      {
+        'id': 'mode',
+        'name': 'Mode',
+        'type': 'select',
+        'category': 'mode',
+        'currentValue': 'default',
+        'options': [
+          {'value': 'default', 'name': 'Default', 'description': 'Ask before edits and commands'},
+          {'value': 'accept-edits', 'name': 'Accept edits', 'description': 'Approve file edits'},
+          {'value': 'plan', 'name': 'Plan', 'description': 'Plan carefully'},
+        ],
+      },
     ];
   }
+
+  Map<String, Object?> _modesPayload() => {
+    'currentModeId': 'default',
+    'availableModes': [
+      {'id': 'default', 'name': 'Default', 'description': 'Ask before edits and commands'},
+      {'id': 'accept-edits', 'name': 'Accept edits', 'description': 'Approve file edits'},
+      {'id': 'plan', 'name': 'Plan', 'description': 'Plan carefully'},
+    ],
+  };
 
   void _registerHandlers() {
     agent.onRequest('initialize', (params) async {
@@ -120,6 +141,7 @@ class _FakeAgyAgent {
       promptsBySession[sid] = [];
       return {
         'sessionId': sid,
+        'modes': _modesPayload(),
         'configOptions': _configOptionsFor(sid),
       };
     });
@@ -129,6 +151,7 @@ class _FakeAgyAgent {
       final sid = params['sessionId']! as String;
       return {
         'sessionId': sid,
+        'modes': _modesPayload(),
         'configOptions': _configOptionsFor(sid),
       };
     });
@@ -325,7 +348,27 @@ void main() {
       expect(find.text('思考深度'), findsOneWidget);
       expect(find.text('超高'), findsNothing);
 
+      // Duplicate raw ACP Mode / 会话模式 (Default / Accept edits / Plan) MUST NOT appear!
+      expect(find.text('Mode'), findsNothing);
+      expect(find.text('会话模式'), findsNothing);
+      expect(find.text('Accept edits'), findsNothing);
+
+      // Unified Antigravity official 4-tier permission hierarchy + /plan toggle MUST appear!
+      expect(find.text('权限层级'), findsOneWidget);
+      expect(find.text('询问确认'), findsOneWidget);
+      expect(find.text('严格'), findsOneWidget);
+      expect(find.text('沙箱'), findsOneWidget);
+      expect(find.text('放行'), findsOneWidget);
+      expect(find.text('计划模式（/plan）'), findsOneWidget);
+
+      // Tap 「沙箱」 inside ModelSheet -> switches active permission to 「沙箱放行」 cleanly!
+      await tester.ensureVisible(find.text('沙箱'));
+      await tester.tap(find.text('沙箱'));
+      await tester.pumpAndSettle();
+      expect(find.text('沙箱放行'), findsOneWidget);
+
       // Tap Gemini 4 Hydrogen -> sheet stays open and dynamically reveals 「超高」!
+      await tester.ensureVisible(find.text('Gemini 4 Hydrogen'));
       await tester.tap(find.text('Gemini 4 Hydrogen'));
       await tester.pumpAndSettle();
 
@@ -333,6 +376,7 @@ void main() {
       expect(find.text('超高'), findsOneWidget);
 
       // Tap 「超高」 -> applies xhigh and settles closed cleanly.
+      await tester.ensureVisible(find.text('超高'));
       await tester.tap(find.text('超高'));
       await tester.pump(const Duration(milliseconds: 500));
       await tester.pumpAndSettle();

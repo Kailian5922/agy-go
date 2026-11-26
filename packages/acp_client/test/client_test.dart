@@ -276,5 +276,42 @@ void main() {
         AcpToolStatus.failed,
       );
     });
+
+    test('LineStreamAcpTransport serializes overlapping async writes and isolates write errors', () async {
+      final input = StreamController<List<int>>();
+      var inFlight = 0;
+      var maxInFlight = 0;
+      final written = <String>[];
+      var callCount = 0;
+
+      final transport = LineStreamAcpTransport(
+        kind: 'test',
+        inputBytes: input.stream,
+        writeBytes: (bytes) async {
+          inFlight++;
+          if (inFlight > maxInFlight) maxInFlight = inFlight;
+          callCount++;
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          inFlight--;
+          if (callCount == 2) {
+            throw StateError('transient write error');
+          }
+          written.add(String.fromCharCodes(bytes).trim());
+        },
+        onClose: () async => input.close(),
+      );
+      addTearDown(transport.close);
+
+      final f1 = transport.send({'seq': 1});
+      final f2 = transport.send({'seq': 2});
+      final f3 = transport.send({'seq': 3});
+
+      await f1;
+      await expectLater(f2, throwsA(isA<AcpTransportException>()));
+      await f3;
+
+      expect(maxInFlight, 1);
+      expect(written, ['{"seq":1}', '{"seq":3}']);
+    });
   });
 }

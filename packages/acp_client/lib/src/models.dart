@@ -358,6 +358,16 @@ class AcpConfigOption {
         lower == 'effort';
   }
 
+  bool get isModeOption {
+    final cat = category?.toLowerCase() ?? '';
+    final lower = id.toLowerCase();
+    return cat == 'mode' ||
+        cat == 'approval_mode' ||
+        lower == 'mode' ||
+        lower == 'agent_mode' ||
+        lower == 'approval_mode';
+  }
+
   AcpConfigOption copyWith({
     Object? currentValue,
     List<AcpConfigOptionValue>? options,

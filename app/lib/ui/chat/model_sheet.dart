@@ -12,7 +12,9 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../state/chat_state.dart';
 import '../../state/connection_state.dart';
+import '../../state/settings_state.dart';
 import '../common/app_sheet.dart';
+import '../common/brief_notice.dart';
 import '../common/empty_view.dart';
 import '../common/list_page_row.dart';
 import '../common/pressable.dart';
@@ -20,6 +22,7 @@ import '../common/segmented_pill.dart';
 import '../common/smooth_size.dart';
 import '../engine/engine_screen.dart';
 import '../theme/theme.dart';
+import 'permission_controls.dart';
 
 /// Translates ACP `thought_level` / `reasoning_effort` IDs into concise Chinese labels.
 String thoughtLevelLabel(String id, [String? fallback]) =>
@@ -311,6 +314,27 @@ class _ModelSheetBodyState extends ConsumerState<_ModelSheetBody> {
     });
   }
 
+  Future<void> _pickPermission(AgyToolPermission perm) async {
+    final settings = ref.read(settingsProvider);
+    final chat = ref.read(chatProvider);
+    final current = chat.sessionToolPermission ?? settings.toolPermission;
+    if (perm == current) return;
+    if (perm.isHighRisk) {
+      final confirmed = await confirmHighRiskAction(
+        context,
+        title: '开启「完全放行」？',
+        body:
+            '开启后 Antigravity CLI 将跳过命令执行、文件修改与工具调用的逐次确认（等同 --dangerously-skip-permissions）。仅建议在受控工作区内使用；手机操控的支付安全闸门仍独立拦截。',
+        confirmLabel: '确认放行',
+      );
+      if (!confirmed || !mounted) return;
+    }
+    await ref.read(chatProvider.notifier).setSessionToolPermission(perm);
+    if (mounted) {
+      showBriefNotice(context, '权限已切换为「${perm.label}」');
+    }
+  }
+
   void _openEnginePage() {
     Navigator.of(context).pop();
     Navigator.of(context).push(
@@ -322,6 +346,7 @@ class _ModelSheetBodyState extends ConsumerState<_ModelSheetBody> {
   Widget build(BuildContext context) {
     final conn = ref.watch(activeConnectionProvider).value;
     final chat = ref.watch(chatProvider);
+    final settings = ref.watch(settingsProvider);
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final dsh = DshColors.of(context);
@@ -329,7 +354,8 @@ class _ModelSheetBodyState extends ConsumerState<_ModelSheetBody> {
     final modelOpt = chat.modelConfigOption;
     final thoughtOpt = chat.thoughtLevelOption;
     final otherOpts = chat.otherConfigOptions;
-    final modes = chat.transcript.modes;
+    final activePerm = chat.sessionToolPermission ?? settings.toolPermission;
+    final isPlan = (chat.sessionAgentMode ?? settings.agentMode) == AgyAgentMode.plan;
     final models = modelOpt?.options ?? const <AcpConfigOptionValue>[];
     final currentModelVal = '${modelOpt?.currentValue ?? ''}';
 
@@ -579,32 +605,92 @@ class _ModelSheetBodyState extends ConsumerState<_ModelSheetBody> {
                     ),
                   ],
 
-                // ACP Session Modes (only if agent advertises > 1 mode)
-                if (modes != null && modes.availableModes.length > 1) ...[
-                  const SizedBox(height: 14),
-                  SheetGroup(
-                    title: '会话模式',
+                // Unified Antigravity official 4-tier permission hierarchy + /plan toggle
+                const SizedBox(height: 18),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    SheetTitleBar.inset + 4,
+                    0,
+                    SheetTitleBar.inset + 4,
+                    8,
+                  ),
+                  child: Row(
                     children: [
-                      for (final m in modes.availableModes)
-                        ListPageRow(
-                          icon: AppIcons.modes,
-                          title: m.name,
-                          subtitle: m.description,
-                          trailing: m.id == modes.currentModeId
-                              ? Icon(
-                                  AppIcons.selected,
-                                  size: 18,
-                                  color: colors.primary,
-                                )
-                              : null,
-                          chevron: false,
-                          onTap: () => unawaited(
-                            ref.read(chatProvider.notifier).setMode(m.id),
-                          ),
+                      Text(
+                        '权限层级',
+                        style: groupTitleStyle(context)?.copyWith(
+                          color: dsh.textTertiary,
                         ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        activePerm.label,
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: activePerm.isHighRisk
+                              ? dsh.danger
+                              : colors.primary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ],
                   ),
-                ],
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: SheetTitleBar.inset,
+                  ),
+                  child: SegmentedPill<AgyToolPermission>(
+                    segments: const [
+                      PillSegment(AgyToolPermission.strict, '严格'),
+                      PillSegment(AgyToolPermission.requestReview, '询问'),
+                      PillSegment(AgyToolPermission.proceedInSandbox, '沙箱'),
+                      PillSegment(AgyToolPermission.alwaysProceed, '放行'),
+                    ],
+                    selected: activePerm,
+                    onChanged: (p) => unawaited(_pickPermission(p)),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    SheetTitleBar.inset + 4,
+                    7,
+                    SheetTitleBar.inset + 4,
+                    0,
+                  ),
+                  child: Text(
+                    activePerm.description,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: activePerm.isHighRisk
+                          ? dsh.danger
+                          : dsh.textTertiary,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SheetGroup(
+                  children: [
+                    ListPageRow(
+                      icon: AppIcons.planMode,
+                      iconColor: isPlan ? colors.primary : null,
+                      title: '计划模式（/plan）',
+                      subtitle: '只读调研并先输出方案，经你同意后再修改代码',
+                      trailing: Switch.adaptive(
+                        value: isPlan,
+                        onChanged: (v) => unawaited(
+                          ref.read(chatProvider.notifier).setExecutionMode(
+                            v ? AgyAgentMode.plan : AgyAgentMode.standard,
+                          ),
+                        ),
+                      ),
+                      chevron: false,
+                      onTap: () => unawaited(
+                        ref.read(chatProvider.notifier).setExecutionMode(
+                          isPlan ? AgyAgentMode.standard : AgyAgentMode.plan,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
 
                 // Unobtrusive bottom link to Engine & Auth (matching DSH Go's ManageModelsLink)
                 const SizedBox(height: 12),

@@ -83,6 +83,73 @@ void main() {
         throwsA(isA<AcpTransportException>()),
       );
     });
+
+    test('serializes concurrent RPC writes (closeSession + loadSession) without StreamSink errors', () async {
+      const token = 'concurrent-test-token';
+      final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(server.close);
+
+      final receivedMethods = <String>[];
+      unawaited(
+        server.first.then((socket) {
+          var authed = false;
+          socket
+              .cast<List<int>>()
+              .transform(utf8.decoder)
+              .transform(const LineSplitter())
+              .listen((line) {
+                final msg = jsonDecode(line) as Map<String, dynamic>;
+                if (!authed) {
+                  authed = msg['auth'] == token;
+                  socket.writeln(jsonEncode({'ok': authed}));
+                  return;
+                }
+                final method = msg['method'] as String;
+                receivedMethods.add(method);
+                final result = switch (method) {
+                  'initialize' => {
+                    'protocolVersion': 1,
+                    'agentCapabilities': {
+                      'loadSession': true,
+                      'sessionCapabilities': {'close': {}, 'list': {}},
+                    },
+                  },
+                  'session/load' => {'sessionId': (msg['params'] as Map)['sessionId']},
+                  'session/list' => {'sessions': const <Object?>[]},
+                  _ => <String, Object?>{},
+                };
+                socket.writeln(
+                  jsonEncode({
+                    'jsonrpc': '2.0',
+                    'id': msg['id'],
+                    'result': result,
+                  }),
+                );
+              });
+        }),
+      );
+
+      final transport = await LoopbackAcpTransport.connect(
+        port: server.port,
+        token: token,
+      );
+      final client = AcpClient(transport);
+      addTearDown(client.close);
+
+      await client.initialize();
+
+      // Reproduce switching from a new chat (closing draft) to a previous chat (loading history)
+      // plus listing sessions all in the exact same event-loop turn.
+      final results = await Future.wait<Object?>([
+        client.closeSession('draft-1').then((_) => 'closed'),
+        client.loadSession(sessionId: 'old-session-1', cwd: '/tmp'),
+        client.listSessions(),
+      ]);
+
+      expect(results[0], 'closed');
+      expect((results[1] as AcpSessionHandle).sessionId, 'old-session-1');
+      expect(receivedMethods, ['initialize', 'session/close', 'session/load', 'session/list']);
+    });
   });
 
   group('SshAcpConnection helpers', () {

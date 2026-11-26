@@ -119,7 +119,7 @@ class ChatState {
       transcript.configOptions.where((c) => c.isThoughtLevelOption).firstOrNull;
 
   List<AcpConfigOption> get otherConfigOptions => transcript.configOptions
-      .where((c) => !c.isModelOption && !c.isThoughtLevelOption)
+      .where((c) => !c.isModelOption && !c.isThoughtLevelOption && !c.isModeOption)
       .toList();
 
   ChatState copyWith({
