@@ -216,32 +216,58 @@ class _SessionsDrawerState extends ConsumerState<SessionsDrawer> {
                 onTap: () => unawaited(openSearch()),
               ),
             ),
-            Row(
-              children: [
-                Expanded(
-                  child: WorkspaceSwitcher(
-                    onManage: () => widget.onOpen(DrawerDestination.workspaces),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 2, 10, 2),
+              child: Row(
+                children: [
+                  Icon(
+                    AppIcons.workspaceGroup,
+                    size: 16,
+                    color: DshColors.of(context).textTertiary,
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(right: 10),
-                  child: Tooltip(
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '工作区',
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: DshColors.of(context).textTertiary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Tooltip(
                     message: '添加工作区',
                     child: InkWell(
                       onTap: () => unawaited(addWorkspaceFlow(context, ref)),
                       customBorder: Squircle.border(AppShape.md),
                       child: SizedBox.square(
-                        dimension: 34,
+                        dimension: 32,
                         child: Icon(
                           AppIcons.newFolder,
-                          size: 18,
+                          size: 17,
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ),
                     ),
                   ),
-                ),
-              ],
+                  const SizedBox(width: 2),
+                  Tooltip(
+                    message: '管理工作区',
+                    child: InkWell(
+                      onTap: () => widget.onOpen(DrawerDestination.workspaces),
+                      customBorder: Squircle.border(AppShape.md),
+                      child: SizedBox.square(
+                        dimension: 32,
+                        child: Icon(
+                          AppIcons.configure,
+                          size: 16,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
             _FilterChipsRow(
               selecting: _selecting,
@@ -749,6 +775,15 @@ class _SessionList extends ConsumerWidget {
                   chevron: false,
                   onTap: () => Navigator.pop(sheet, 'manage'),
                 ),
+                if (!group.isDefault)
+                  ListPageRow(
+                    icon: AppIcons.remove,
+                    title: '移出工作区',
+                    subtitle: '移出列表并清理该工作区会话，不删除手机原文件',
+                    danger: true,
+                    chevron: false,
+                    onTap: () => Navigator.pop(sheet, 'remove'),
+                  ),
               ],
             ),
             const SizedBox(height: 12),
@@ -767,6 +802,20 @@ class _SessionList extends ConsumerWidget {
         onOpen(DrawerDestination.files);
       case 'manage':
         onOpen(DrawerDestination.workspaces);
+      case 'remove':
+        final wsCtrl = ref.read(workspacesProvider.notifier);
+        final sessCtrl = ref.read(sessionsProvider.notifier);
+        if (group.workspace != null) {
+          await wsCtrl.remove(group.workspace!.id);
+        } else if (group.path.isNotEmpty) {
+          await wsCtrl.hidePath(group.path);
+        }
+        if (group.path.isNotEmpty) {
+          await sessCtrl.removeWorkspaceSessions(group.path);
+        }
+        if (context.mounted) {
+          showBriefNotice(context, '已移出工作区「${group.title}」');
+        }
     }
   }
 

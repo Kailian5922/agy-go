@@ -19,6 +19,7 @@ class SessionsState {
     this.error,
     this.pinnedIds = const [],
     this.archivedIds = const [],
+    this.deletedIds = const [],
     this.customTitles = const {},
     this.folders = const [],
     this.sessionFolders = const {},
@@ -34,6 +35,10 @@ class SessionsState {
   final String? error;
   final List<String> pinnedIds;
   final List<String> archivedIds;
+
+  /// Persisted deleted session IDs so conversations stay deleted across restarts
+  /// even when an ACP engine does not advertise `session/delete`.
+  final List<String> deletedIds;
   final Map<String, String> customTitles;
   final List<String> folders;
   final Map<String, String> sessionFolders;
@@ -71,6 +76,7 @@ class SessionsState {
 
   bool isPinned(String id) => pinnedIds.contains(id);
   bool isArchived(String id) => archivedIds.contains(id);
+  bool isDeleted(String id) => deletedIds.contains(id);
   String? folderOf(String id) => sessionFolders[id];
   bool isWorkspaceCollapsed(String key) => collapsedWorkspaceKeys.contains(key);
 
@@ -83,6 +89,7 @@ class SessionsState {
     bool clearError = false,
     List<String>? pinnedIds,
     List<String>? archivedIds,
+    List<String>? deletedIds,
     Map<String, String>? customTitles,
     List<String>? folders,
     Map<String, String>? sessionFolders,
@@ -99,6 +106,7 @@ class SessionsState {
     error: clearError ? null : (error ?? this.error),
     pinnedIds: pinnedIds ?? this.pinnedIds,
     archivedIds: archivedIds ?? this.archivedIds,
+    deletedIds: deletedIds ?? this.deletedIds,
     customTitles: customTitles ?? this.customTitles,
     folders: folders ?? this.folders,
     sessionFolders: sessionFolders ?? this.sessionFolders,
@@ -148,11 +156,25 @@ class SessionsController extends Notifier<SessionsState> {
         return;
       }
       final map = jsonDecode(raw) as Map<String, Object?>;
+      final deleted =
+          (map['deleted'] as List?)?.whereType<String>().toList() ?? const [];
+      final deletedSet = deleted.toSet();
+      final filteredSessions = deletedSet.isEmpty
+          ? state.sessions
+          : state.sessions
+                .where((s) => !deletedSet.contains(s.sessionId))
+                .toList();
+      final clearCurrent =
+          state.currentSessionId != null &&
+          deletedSet.contains(state.currentSessionId);
       state = state.copyWith(
+        sessions: filteredSessions,
+        clearCurrent: clearCurrent,
         pinnedIds:
             (map['pinned'] as List?)?.whereType<String>().toList() ?? const [],
         archivedIds:
             (map['archived'] as List?)?.whereType<String>().toList() ?? const [],
+        deletedIds: deleted,
         customTitles: {
           if (map['titles'] is Map)
             for (final e in (map['titles'] as Map).entries)
@@ -171,7 +193,7 @@ class SessionsController extends Notifier<SessionsState> {
           if (map['sessionWorkspaces'] is Map)
             for (final e in (map['sessionWorkspaces'] as Map).entries)
               if (e.key is String && e.value is String)
-                e.key as String: e.value as String,
+                e.key as String: normalizeWorkspacePath(e.value as String),
         },
         collapsedWorkspaceKeys:
             (map['collapsedWorkspaces'] as List?)?.whereType<String>().toList() ??
@@ -190,6 +212,7 @@ class SessionsController extends Notifier<SessionsState> {
         jsonEncode({
           'pinned': state.pinnedIds,
           'archived': state.archivedIds,
+          'deleted': state.deletedIds,
           'titles': state.customTitles,
           'folders': state.folders,
           'sessionFolders': state.sessionFolders,
@@ -215,14 +238,19 @@ class SessionsController extends Notifier<SessionsState> {
     state = state.copyWith(loading: true, clearError: true);
     try {
       final byId = <String, AcpSessionInfo>{};
+      final deletedSet = state.deletedIds.toSet();
       void ingest(List<AcpSessionInfo> list, {String? fallbackCwd}) {
         for (final s in list) {
+          if (deletedSet.contains(s.sessionId)) continue;
           final existing = byId[s.sessionId];
-          final resolvedCwd = s.cwd.trim().isNotEmpty
+          final rawCwd = s.cwd.trim().isNotEmpty
               ? s.cwd.trim()
               : (existing?.cwd.trim().isNotEmpty == true
                     ? existing!.cwd.trim()
                     : (fallbackCwd ?? state.sessionWorkspaces[s.sessionId] ?? ''));
+          final resolvedCwd = rawCwd.isEmpty
+              ? ''
+              : normalizeWorkspacePath(rawCwd);
           final resolvedTitle = s.title?.trim().isNotEmpty == true
               ? s.title
               : existing?.title;
@@ -264,9 +292,15 @@ class SessionsController extends Notifier<SessionsState> {
         }
       }
 
+      // Re-check latest deletedIds in case _loadMeta or deleteSession ran mid-refresh.
+      final latestDeleted = state.deletedIds.toSet();
+      byId.removeWhere((id, _) => latestDeleted.contains(id));
+
       // Preserve the active just-created session if not yet flushed on disk.
       final active = state.currentSession;
-      if (active != null && !byId.containsKey(active.sessionId)) {
+      if (active != null &&
+          !latestDeleted.contains(active.sessionId) &&
+          !byId.containsKey(active.sessionId)) {
         byId[active.sessionId] = active;
       }
 
@@ -396,12 +430,35 @@ class SessionsController extends Notifier<SessionsState> {
     }
   }
 
+  /// Removes/hides all sessions scoped to [workspacePath] when that workspace is removed.
+  Future<void> removeWorkspaceSessions(String workspacePath) async {
+    final normWs = normalizeWorkspacePath(workspacePath);
+    if (normWs.isEmpty) return;
+    final ids = <String>{};
+    for (final s in state.sessions) {
+      final cwd = state.effectiveCwdOf(s);
+      final inside =
+          cwd == normWs ||
+          (normWs == '/' ? cwd.startsWith('/') : cwd.startsWith('$normWs/'));
+      if (inside) ids.add(s.sessionId);
+    }
+    if (ids.isNotEmpty) {
+      await batchDelete(ids);
+    }
+  }
+
   void registerCreatedSession(AcpSessionInfo info) {
     final normCwd = info.cwd.trim().isEmpty
         ? ''
         : normalizeWorkspacePath(info.cwd);
+    final normalized = AcpSessionInfo(
+      sessionId: info.sessionId,
+      cwd: normCwd,
+      title: info.title,
+      updatedAt: info.updatedAt,
+    );
     final next = [
-      info,
+      normalized,
       ...state.sessions.where((s) => s.sessionId != info.sessionId),
     ];
     final nextWorkspaces = Map<String, String>.from(state.sessionWorkspaces);
@@ -425,6 +482,7 @@ class SessionsController extends Notifier<SessionsState> {
     state = state.copyWith(
       sessions: next,
       currentSessionId: info.sessionId,
+      deletedIds: state.deletedIds.where((id) => id != info.sessionId).toList(),
       sessionWorkspaces: nextWorkspaces,
       collapsedWorkspaceKeys: nextCollapsed,
     );
@@ -498,12 +556,17 @@ class SessionsController extends Notifier<SessionsState> {
       ..remove(sessionId);
     final nextWorkspaces = Map<String, String>.from(state.sessionWorkspaces)
       ..remove(sessionId);
+    final nextDeleted = [
+      ...state.deletedIds,
+      if (!state.deletedIds.contains(sessionId)) sessionId,
+    ];
     state = state.copyWith(
       sessions: next,
       currentSessionId: nextCurrent,
       clearCurrent: nextCurrent == null,
       pinnedIds: state.pinnedIds.where((id) => id != sessionId).toList(),
       archivedIds: state.archivedIds.where((id) => id != sessionId).toList(),
+      deletedIds: nextDeleted,
       customTitles: nextTitles,
       sessionFolders: nextFolders,
       sessionWorkspaces: nextWorkspaces,
@@ -544,6 +607,7 @@ final workspaceSessionGroupsProvider = Provider<List<WorkspaceSessionGroup>>((
   final sessionsState = ref.watch(sessionsProvider);
   final wsState = ref.watch(workspacesProvider);
   final archivedSet = sessionsState.archivedIds.toSet();
+  final deletedSet = sessionsState.deletedIds.toSet();
   final pinnedSet = sessionsState.pinnedIds.toSet();
   final pinnedOrder = {
     for (var i = 0; i < sessionsState.pinnedIds.length; i++)
@@ -560,6 +624,7 @@ final workspaceSessionGroupsProvider = Provider<List<WorkspaceSessionGroup>>((
       wsState.workspaces.firstOrNull;
 
   for (final s in sessionsState.sessions) {
+    if (deletedSet.contains(s.sessionId)) continue;
     if (!_matchesFilter(
       s,
       sessionsState.filter,
@@ -575,6 +640,8 @@ final workspaceSessionGroupsProvider = Provider<List<WorkspaceSessionGroup>>((
     if (matched != null) {
       buckets.putIfAbsent(matched.id, () => []).add(s);
     } else if (cwd.isNotEmpty) {
+      // Never resurrect a workspace the user explicitly removed.
+      if (wsState.isPathRemoved(cwd)) continue;
       final key = 'path:$cwd';
       unregisteredPaths[key] = cwd;
       buckets.putIfAbsent(key, () => []).add(s);
@@ -665,20 +732,22 @@ final filteredSessionsProvider = Provider<List<AcpSessionInfo>>((ref) {
   final state = ref.watch(sessionsProvider);
   final selectedWs = ref.watch(selectedWorkspaceProvider);
   final archivedSet = state.archivedIds.toSet();
+  final deletedSet = state.deletedIds.toSet();
   final pinnedSet = state.pinnedIds.toSet();
 
   return [
     for (final s in state.sessions)
-      if (_matches(
-        s,
-        state.filter,
-        state.activeFolder,
-        state.sessionFolders[s.sessionId],
-        selectedWs,
-        archivedSet,
-        pinnedSet,
-        state.effectiveCwdOf(s),
-      ))
+      if (!deletedSet.contains(s.sessionId) &&
+          _matches(
+            s,
+            state.filter,
+            state.activeFolder,
+            state.sessionFolders[s.sessionId],
+            selectedWs,
+            archivedSet,
+            pinnedSet,
+            state.effectiveCwdOf(s),
+          ))
         s,
   ];
 });

@@ -84,6 +84,7 @@ class WorkspacesState {
     this.pinnedIds = const [],
     this.groups = const {},
     this.recentPaths = const [],
+    this.removedPaths = const [],
   });
 
   final bool loaded;
@@ -92,6 +93,20 @@ class WorkspacesState {
   final List<String> pinnedIds;
   final Map<String, String> groups;
   final List<String> recentPaths;
+
+  /// Normalized paths explicitly removed by the user so they are neither
+  /// auto-readded as presets nor resurrected from legacy `agy acp` sessions.
+  final List<String> removedPaths;
+
+  bool isPathRemoved(String rawPath) {
+    final norm = normalizeWorkspacePath(rawPath);
+    if (norm.isEmpty) return false;
+    for (final removed in removedPaths) {
+      if (norm == removed) return true;
+      if (removed != '/' && norm.startsWith('$removed/')) return true;
+    }
+    return false;
+  }
 
   WorkspaceItem? byId(String? id) {
     if (id == null) return null;
@@ -150,6 +165,7 @@ class WorkspacesState {
     List<String>? pinnedIds,
     Map<String, String>? groups,
     List<String>? recentPaths,
+    List<String>? removedPaths,
   }) => WorkspacesState(
     loaded: loaded ?? this.loaded,
     workspaces: workspaces ?? this.workspaces,
@@ -157,6 +173,7 @@ class WorkspacesState {
     pinnedIds: pinnedIds ?? this.pinnedIds,
     groups: groups ?? this.groups,
     recentPaths: recentPaths ?? this.recentPaths,
+    removedPaths: removedPaths ?? this.removedPaths,
   );
 }
 
@@ -240,6 +257,7 @@ class WorkspacesController extends Notifier<WorkspacesState> {
       var pinnedIds = <String>[];
       var groups = <String, String>{};
       var recent = <String>[];
+      var removedPaths = <String>[];
 
       if (raw != null && raw.isNotEmpty) {
         final map = jsonDecode(raw) as Map<String, Object?>;
@@ -249,7 +267,12 @@ class WorkspacesController extends Notifier<WorkspacesState> {
               Map<String, Object?>.from(item),
             );
             if (parsed.id.isNotEmpty && parsed.path.isNotEmpty) {
-              workspaces.add(parsed);
+              final cleanPath = normalizeWorkspacePath(parsed.path);
+              workspaces.add(
+                cleanPath == parsed.path
+                    ? parsed
+                    : parsed.copyWith(path: cleanPath),
+              );
             }
           }
         }
@@ -267,18 +290,27 @@ class WorkspacesController extends Notifier<WorkspacesState> {
         if (map['recentPaths'] is List) {
           recent = (map['recentPaths'] as List).whereType<String>().toList();
         }
+        if (map['removedPaths'] is List) {
+          removedPaths = (map['removedPaths'] as List)
+              .whereType<String>()
+              .map(normalizeWorkspacePath)
+              .where((p) => p.isNotEmpty)
+              .toSet()
+              .toList();
+        }
       }
 
       // Always keep the default workspace entry synchronized with the active runtime path.
+      final normDefault = normalizeWorkspacePath(defaultPath);
       final defaultIdx = workspaces.indexWhere((w) => w.id == 'default');
       if (defaultIdx >= 0) {
-        workspaces[defaultIdx] = workspaces[defaultIdx].copyWith(path: defaultPath);
+        workspaces[defaultIdx] = workspaces[defaultIdx].copyWith(path: normDefault);
       } else {
         workspaces.insert(
           0,
           WorkspaceItem(
             id: 'default',
-            path: defaultPath,
+            path: normDefault,
             title: 'default-workspace',
             isDefault: true,
             createdAt: DateTime.now(),
@@ -286,13 +318,16 @@ class WorkspacesController extends Notifier<WorkspacesState> {
         );
       }
 
-      // Convenience entry when phone storage is newly authorized & mounted.
+      // Convenience entry when phone storage is newly authorized & mounted,
+      // unless the user explicitly removed it before.
+      final normStorage = normalizeWorkspacePath(storageRoot);
       if (includeStoragePreset &&
-          !workspaces.any((w) => w.path == storageRoot)) {
+          !removedPaths.contains(normStorage) &&
+          !workspaces.any((w) => normalizeWorkspacePath(w.path) == normStorage)) {
         workspaces.add(
           WorkspaceItem(
             id: 'phone-storage',
-            path: storageRoot,
+            path: normStorage,
             title: '手机存储',
             createdAt: DateTime.now(),
           ),
@@ -311,6 +346,7 @@ class WorkspacesController extends Notifier<WorkspacesState> {
         pinnedIds: pinnedIds,
         groups: groups,
         recentPaths: recent,
+        removedPaths: removedPaths,
       );
       _cache[key] = loadedState;
       state = loadedState;
@@ -338,6 +374,7 @@ class WorkspacesController extends Notifier<WorkspacesState> {
           'pinnedIds': next.pinnedIds,
           'groups': next.groups,
           'recentPaths': next.recentPaths,
+          'removedPaths': next.removedPaths,
         }),
       );
     } catch (_) {}
@@ -355,10 +392,16 @@ class WorkspacesController extends Notifier<WorkspacesState> {
   }
 
   Future<WorkspaceItem> add(String rawPath, {String? title}) async {
-    final clean = _normalizePath(rawPath);
+    final clean = normalizeWorkspacePath(rawPath);
+    final nextRemoved = state.removedPaths.where((p) => p != clean).toList();
     for (final existing in state.workspaces) {
-      if (existing.path == clean) {
-        await select(existing.id);
+      if (normalizeWorkspacePath(existing.path) == clean) {
+        await _save(
+          state.copyWith(
+            selectedId: () => existing.id,
+            removedPaths: nextRemoved,
+          ),
+        );
         return existing;
       }
     }
@@ -383,6 +426,7 @@ class WorkspacesController extends Notifier<WorkspacesState> {
       workspaces: [...state.workspaces, item],
       selectedId: () => item.id,
       recentPaths: nextRecent,
+      removedPaths: nextRemoved,
     );
     await _save(next);
     return item;
@@ -420,9 +464,16 @@ class WorkspacesController extends Notifier<WorkspacesState> {
 
   Future<void> remove(String workspaceId) async {
     if (workspaceId == 'default') return;
+    final target = state.byId(workspaceId);
+    final targetPath = target != null ? normalizeWorkspacePath(target.path) : '';
     final nextList = state.workspaces.where((w) => w.id != workspaceId).toList();
     final nextGroups = Map<String, String>.from(state.groups)..remove(workspaceId);
     final nextPins = state.pinnedIds.where((id) => id != workspaceId).toList();
+    final nextRemoved = [
+      ...state.removedPaths,
+      if (targetPath.isNotEmpty && !state.removedPaths.contains(targetPath))
+        targetPath,
+    ];
     await _save(
       state.copyWith(
         workspaces: nextList,
@@ -430,16 +481,16 @@ class WorkspacesController extends Notifier<WorkspacesState> {
             state.selectedId == workspaceId ? null : state.selectedId,
         pinnedIds: nextPins,
         groups: nextGroups,
+        removedPaths: nextRemoved,
       ),
     );
   }
 
-  static String _normalizePath(String raw) {
-    final trimmed = raw.trim();
-    if (trimmed.length > 1 && trimmed.endsWith('/')) {
-      return trimmed.substring(0, trimmed.length - 1);
-    }
-    return trimmed;
+  /// Hides an unregistered historical workspace path permanently (until re-added).
+  Future<void> hidePath(String rawPath) async {
+    final norm = normalizeWorkspacePath(rawPath);
+    if (norm.isEmpty || state.removedPaths.contains(norm)) return;
+    await _save(state.copyWith(removedPaths: [...state.removedPaths, norm]));
   }
 
   static String _folderName(String path) {
@@ -538,11 +589,12 @@ final effectiveWorkingDirProvider = Provider<String>((ref) {
 
 /// Human-readable short display path (mirrors DSH Go's workspace_format).
 String displayWorkspacePath(
-  String path, {
+  String rawPath, {
   required bool local,
   String? homePath,
   String storageRoot = '/storage/emulated/0',
 }) {
+  final path = decodeWorkspacePath(rawPath);
   if (local) {
     if (path == storageRoot || path == '/sdcard') return '手机存储';
     if (path.startsWith('$storageRoot/')) {
@@ -562,10 +614,41 @@ String displayWorkspacePath(
   return path;
 }
 
-/// Canonicalizes workspace/session paths (trims trailing `/` and unifies Android
-/// `/sdcard` with `/storage/emulated/0`) so sessions reliably match their workspace.
-String normalizeWorkspacePath(String raw) {
+/// Safely decodes `file://` prefixes and per-segment URL percent-encoded UTF-8
+/// (e.g. `%E5%86%AC%E6%97%A5...%5Bv.2.15%5D` -> `冬日...[v.2.15]`) returned by
+/// `agy acp` in `session/list`, while leaving malformed literal `%` intact.
+String decodeWorkspacePath(String raw) {
   var p = raw.trim();
+  if (p.startsWith('file://')) {
+    p = p.substring('file://'.length);
+  }
+  if (!p.contains('%')) return p;
+  final pct = RegExp(r'%[0-9A-Fa-f]{2}');
+  for (var pass = 0; pass < 2; pass++) {
+    var changed = false;
+    final segments = p.split('/');
+    for (var i = 0; i < segments.length; i++) {
+      final seg = segments[i];
+      if (!pct.hasMatch(seg)) continue;
+      try {
+        final decoded = Uri.decodeComponent(seg);
+        if (decoded != seg) {
+          segments[i] = decoded;
+          changed = true;
+        }
+      } catch (_) {}
+    }
+    if (!changed) break;
+    p = segments.join('/');
+  }
+  return p;
+}
+
+/// Canonicalizes workspace/session paths (decodes percent-encoding & `file://`,
+/// trims trailing `/`, and unifies Android `/sdcard` with `/storage/emulated/0`)
+/// so sessions reliably match their workspace.
+String normalizeWorkspacePath(String raw) {
+  var p = decodeWorkspacePath(raw);
   while (p.length > 1 && p.endsWith('/')) {
     p = p.substring(0, p.length - 1);
   }

@@ -8,6 +8,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../state/connection_state.dart';
 import '../../state/hosts_state.dart';
 import '../../state/runtime_state.dart';
+import '../../state/sessions_state.dart';
 import '../../state/settings_state.dart';
 import '../../state/workspace_state.dart';
 import '../../state/workspaces_state.dart';
@@ -905,6 +906,7 @@ class _WorkspaceActionsBody extends ConsumerWidget {
                   title: '重命名',
                   chevron: false,
                   onTap: () async {
+                    final wsCtrl = ref.read(workspacesProvider.notifier);
                     onClose();
                     final next = await showTextPromptDialog(
                       context,
@@ -914,9 +916,7 @@ class _WorkspaceActionsBody extends ConsumerWidget {
                       validate: (v) => v.isEmpty ? '请输入名称' : null,
                     );
                     if (next != null && next.isNotEmpty) {
-                      await ref
-                          .read(workspacesProvider.notifier)
-                          .rename(w.id, next);
+                      await wsCtrl.rename(w.id, next);
                     }
                   },
                 ),
@@ -949,8 +949,11 @@ class _WorkspaceActionsBody extends ConsumerWidget {
                     danger: true,
                     chevron: false,
                     onTap: () async {
+                      final wsCtrl = ref.read(workspacesProvider.notifier);
+                      final sessCtrl = ref.read(sessionsProvider.notifier);
                       onClose();
-                      await ref.read(workspacesProvider.notifier).remove(w.id);
+                      await wsCtrl.remove(w.id);
+                      await sessCtrl.removeWorkspaceSessions(w.path);
                     },
                   ),
                 ],

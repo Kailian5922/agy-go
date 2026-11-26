@@ -312,7 +312,8 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        expect(find.text('Alpha 项目'), findsWidgets);
+        // Selected workspace must appear EXACTLY ONCE in the drawer (not duplicated in top switcher).
+        expect(find.text('Alpha 项目'), findsOneWidget);
         expect(find.text('Alpha 的第一个对话'), findsOneWidget);
         expect(find.text('Alpha 的第二个对话'), findsOneWidget);
 
@@ -329,6 +330,92 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('Alpha 的第一个对话'), findsNothing);
+      },
+    );
+
+    test(
+      'decodes percent-encoded UTF-8 cwds from agy acp and keeps deleted workspaces & sessions gone after restart',
+      () async {
+        // 1. Percent-encoded Chinese + bracket paths (like %E5%86%AC%E6%97%A5...%5Bv.2.15%5D) decode cleanly.
+        expect(
+          normalizeWorkspacePath(
+            'file:///storage/emulated/0/Download/%E5%86%AC%E6%97%A5%E7%8B%82%E6%83%B3%E6%9B%B2%20%5Bv.2.15%5D/',
+          ),
+          '/storage/emulated/0/Download/冬日狂想曲 [v.2.15]',
+        );
+        expect(
+          normalizeWorkspacePath('/sdcard/%E6%B5%8B%E8%AF%95'),
+          '/storage/emulated/0/测试',
+        );
+
+        final container1 = ProviderContainer();
+        addTearDown(container1.dispose);
+        // Let initial async _load finish before mutating.
+        container1.read(workspacesProvider);
+        container1.read(sessionsProvider);
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+
+        final ws1 = await container1
+            .read(workspacesProvider.notifier)
+            .add('/storage/emulated/0/Download/冬日狂想曲 [v.2.15]');
+        final ws2 = await container1
+            .read(workspacesProvider.notifier)
+            .add('/storage/emulated/0/测试');
+
+        // Register sessions arriving with percent-encoded cwds (as emitted by agy acp).
+        final sess1 = container1.read(sessionsProvider.notifier);
+        sess1.registerCreatedSession(
+          AcpSessionInfo(
+            sessionId: 's_winter_1',
+            cwd: '/storage/emulated/0/Download/%E5%86%AC%E6%97%A5%E7%8B%82%E6%83%B3%E6%9B%B2%20%5Bv.2.15%5D',
+            title: '冬日对话 1',
+            updatedAt: DateTime(2026, 11, 26, 10, 0),
+          ),
+        );
+        sess1.registerCreatedSession(
+          AcpSessionInfo(
+            sessionId: 's_test_1',
+            cwd: '/storage/emulated/0/%E6%B5%8B%E8%AF%95',
+            title: '测试对话 1',
+            updatedAt: DateTime(2026, 11, 26, 9, 0),
+          ),
+        );
+
+        final beforeDelete = container1.read(workspaceSessionGroupsProvider);
+        expect(
+          beforeDelete.singleWhere((g) => g.key == ws1.id).sessions.map((s) => s.sessionId),
+          ['s_winter_1'],
+        );
+        expect(
+          beforeDelete.where((g) => g.title.contains('%')),
+          isEmpty,
+        );
+
+        // 2. Remove workspace `测试` and its sessions, and delete `s_winter_1`.
+        await container1.read(workspacesProvider.notifier).remove(ws2.id);
+        await sess1.removeWorkspaceSessions(ws2.path);
+        await sess1.deleteSession('s_winter_1');
+
+        final afterDelete = container1.read(workspaceSessionGroupsProvider);
+        expect(afterDelete.any((g) => g.key == ws2.id || g.title == '测试'), isFalse);
+        expect(afterDelete.singleWhere((g) => g.key == ws1.id).sessions, isEmpty);
+
+        // 3. Simulate full app restart with a fresh ProviderContainer reading SharedPreferences.
+        final container2 = ProviderContainer();
+        addTearDown(container2.dispose);
+        container2.read(workspacesProvider);
+        container2.read(sessionsProvider);
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+
+        // Removed workspace `测试` does NOT come back after restart!
+        final wsAfterRestart = container2.read(workspacesProvider);
+        expect(wsAfterRestart.workspaces.any((w) => w.path.contains('测试')), isFalse);
+        expect(wsAfterRestart.isPathRemoved('/storage/emulated/0/%E6%B5%8B%E8%AF%95'), isTrue);
+
+        // Deleted session IDs survive restart and stay hidden even if present in state.
+        final sessAfterRestart = container2.read(sessionsProvider);
+        expect(sessAfterRestart.isDeleted('s_winter_1'), isTrue);
+        expect(sessAfterRestart.isDeleted('s_test_1'), isTrue);
       },
     );
 
