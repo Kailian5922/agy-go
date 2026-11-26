@@ -86,6 +86,21 @@ class RuntimePlugin(
                 controller.setAuthConfig(mode, apiKey, baseUrl)
                 result.success(null)
             }
+            "setExecutionPolicy" -> {
+                val agentMode = call.argument<String>("agentMode") ?: ""
+                val toolPermission = call.argument<String>("toolPermission") ?: "request-review"
+                val artifactReviewPolicy = call.argument<String>("artifactReviewPolicy") ?: "asks-for-review"
+                val allowNonWorkspaceAccess = call.argument<Boolean>("allowNonWorkspaceAccess") ?: true
+                val queuedMessages = call.argument<String>("queuedMessages") ?: "queue"
+                controller.setExecutionPolicy(
+                    agentMode = agentMode,
+                    toolPermission = toolPermission,
+                    artifactReviewPolicy = artifactReviewPolicy,
+                    allowNonWorkspaceAccess = allowNonWorkspaceAccess,
+                    queuedMessages = queuedMessages,
+                )
+                result.success(null)
+            }
             "setPreferProot" -> {
                 val enabled = call.argument<Boolean>("enabled") ?: false
                 controller.setPreferProot(enabled)

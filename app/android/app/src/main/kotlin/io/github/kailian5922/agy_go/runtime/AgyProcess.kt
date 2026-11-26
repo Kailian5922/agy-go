@@ -28,6 +28,7 @@ class AgyProcess(
     private val context: Context,
     private val installer: AgyInstaller,
     private val authConfig: AgyAuthHelper.AuthConfig,
+    private val executionPolicy: AgyAuthHelper.ExecutionPolicy,
     private val useProot: Boolean,
     private val phoneStorageMounted: Boolean,
     private val extraWorkspaceBinds: List<String>,
@@ -58,7 +59,7 @@ class AgyProcess(
 
     fun start() {
         installer.ensureDirectories()
-        AgyAuthHelper.applySettings(installer.homeDir, authConfig)
+        AgyAuthHelper.applySettings(installer.homeDir, authConfig, executionPolicy)
         PhoneStorage.syncShortcuts(installer.homeDir, installer.prootRootfsDir, phoneStorageMounted)
         GuestWorkspaceSetup.writeInstructions(
             homeDir = installer.homeDir,
@@ -98,7 +99,7 @@ class AgyProcess(
         }
 
         listener.onLog(
-            "[runtime] launching ($executionMode, storage=${if (phoneStorageMounted) "mounted" else "isolated"}): ${cmd.joinToString(" ")}",
+            "[runtime] launching ($executionMode, storage=${if (phoneStorageMounted) "mounted" else "isolated"}, policy=${executionPolicy.toolPermission}): ${cmd.joinToString(" ")}",
             "system",
         )
         val proc = pb.start()
@@ -179,6 +180,30 @@ class AgyProcess(
         cleanupResources()
     }
 
+    private fun buildAcpArgs(): List<String> {
+        val args = ArrayList<String>()
+        args.add("acp")
+        if (executionPolicy.skipPermissions) {
+            args.add("--dangerously-skip-permissions")
+        }
+        val addDirs = LinkedHashSet<String>()
+        if (phoneStorageMounted) {
+            val storageDir = if (executionMode == "proot") PhoneStorage.GUEST_PATH else PhoneStorage.hostRoot()
+            addDirs += storageDir
+        }
+        for (raw in extraWorkspaceBinds) {
+            val clean = raw.trim()
+            if (clean.startsWith("/") && File(clean).isDirectory) {
+                addDirs += clean
+            }
+        }
+        for (dir in addDirs.take(5)) {
+            args.add("--add-dir")
+            args.add(dir)
+        }
+        return args
+    }
+
     private fun buildCommand(): List<String> {
         if (useProot && installer.isProotAvailable()) {
             executionMode = "proot"
@@ -202,12 +227,15 @@ class AgyProcess(
                     add("AGY_PHONE_STORAGE=${PhoneStorage.GUEST_PATH}")
                 }
                 add("/root/.local/bin/agy")
-                add("acp")
+                addAll(buildAcpArgs())
             }
             return cmd
         }
         executionMode = "native_bionic"
-        return listOf(installer.agyBinary.absolutePath, "acp")
+        return buildList {
+            add(installer.agyBinary.absolutePath)
+            addAll(buildAcpArgs())
+        }
     }
 
     private fun handleClientConnection(socket: Socket) {

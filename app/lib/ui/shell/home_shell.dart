@@ -222,6 +222,11 @@ class _HomeShellState extends ConsumerState<HomeShell>
     final quickPanelOn = ref.watch(
       settingsProvider.select((s) => s.quickPanelSwipe),
     );
+    final wallpaper = ref.watch(
+      settingsProvider.select(
+        (s) => (path: s.wallpaperPath, opacity: s.wallpaperOpacity),
+      ),
+    );
     final chat =
         widget.chatBuilder?.call(_openDrawer) ??
         ChatScreen(
@@ -243,6 +248,8 @@ class _HomeShellState extends ConsumerState<HomeShell>
       child: AnnotatedRegion<SystemUiOverlayStyle>(
         value: dshSystemOverlay(Theme.of(context).brightness),
         child: AppBackdrop(
+          wallpaperPath: wallpaper.path,
+          wallpaperOpacity: wallpaper.opacity,
           child: Scaffold(
             backgroundColor: Colors.transparent,
             resizeToAvoidBottomInset: false,

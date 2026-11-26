@@ -9,6 +9,7 @@ import 'package:material_ui/material_ui.dart';
 import '../common/brief_notice.dart';
 import '../common/expand_reveal.dart';
 import '../theme/theme.dart';
+import 'diff_and_output_page.dart';
 
 /// 32dp single-line tool call row mirroring DSH Go's ToolRow, expanding
 /// smoothly into a JetBrains Mono code/diff well.
@@ -290,6 +291,66 @@ class _ToolCallCardState extends State<ToolCallCard> {
                           ),
                         ),
                       },
+                    if (counts != null ||
+                        tc.content.any((b) => b is AcpBlockToolContent)) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          if (counts != null)
+                            TextButton.icon(
+                              style: TextButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                              ),
+                              icon: const Icon(AppIcons.diff, size: 14),
+                              label: const Text('全屏 Diff'),
+                              onPressed: () => Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                  builder: (_) =>
+                                      DiffViewerPage.fromToolCall(tc),
+                                ),
+                              ),
+                            ),
+                          if (tc.content.any((b) => b is AcpBlockToolContent))
+                            TextButton.icon(
+                              style: TextButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                              ),
+                              icon: const Icon(AppIcons.openExternal, size: 14),
+                              label: const Text('完整输出'),
+                              onPressed: () {
+                                final fullText = tc.content
+                                    .whereType<AcpBlockToolContent>()
+                                    .map((b) => b.block is AcpTextBlock
+                                        ? (b.block as AcpTextBlock).text
+                                        : b.block.toString())
+                                    .join('\n\n');
+                                Navigator.of(context).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => OutputViewerPage(
+                                      title: tc.title.isNotEmpty
+                                          ? tc.title
+                                          : (tc.name ?? '工具输出'),
+                                      subtitle: tc.locations.isNotEmpty
+                                          ? tc.locations.first.path
+                                          : tc.kind.name,
+                                      output: fullText,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                        ],
+                      ),
+                    ],
                   ],
                 ),
               ),

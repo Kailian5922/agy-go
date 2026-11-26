@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 // Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
 
+import 'dart:async';
+
 import 'package:acp_client/acp_client.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -26,7 +28,9 @@ import '../shell/sessions_drawer.dart';
 import '../theme/theme.dart';
 import '../workspace/workspaces_ui.dart';
 import 'chat_header.dart';
+import 'diff_and_output_page.dart';
 import 'empty_state.dart';
+import 'permission_controls.dart';
 import 'tool_call_card.dart';
 
 class ChatList extends ConsumerWidget {
@@ -58,9 +62,15 @@ class ChatList extends ConsumerWidget {
       final runtime = ref.watch(localRuntimeProvider);
       final connAsync = ref.watch(activeConnectionProvider);
       final selectedWs = ref.watch(selectedWorkspaceProvider);
-      final autoApprove = ref.watch(
-        settingsProvider.select((s) => s.autoApproveCommands),
-      );
+      final settings = ref.watch(settingsProvider);
+      final activeMode = chat.sessionAgentMode ?? settings.agentMode;
+      final activePerm = chat.sessionToolPermission ?? settings.toolPermission;
+      final isRisky = activePerm.isHighRisk;
+      final modePillLabel = isRisky
+          ? '完全放行 (YOLO)'
+          : activeMode != AgyAgentMode.standard
+          ? activeMode.label
+          : activePerm.label;
       final connected = connAsync.value != null;
       final st = runtime.status;
 
@@ -111,15 +121,23 @@ class ChatList extends ConsumerWidget {
             spacing: 4,
             children: [
               SetupItem(
-                icon: autoApprove ? AppIcons.permissionRisky : AppIcons.permissions,
-                label: autoApprove ? '自动批准命令' : '标准审批',
-                accentColor: autoApprove ? DshColors.of(context).warning : null,
-                onTap: () => ref
-                    .read(settingsProvider.notifier)
-                    .setAutoApproveCommands(!autoApprove),
+                icon: isRisky
+                    ? AppIcons.permissionRisky
+                    : activeMode == AgyAgentMode.plan
+                    ? AppIcons.planMode
+                    : AppIcons.permissions,
+                label: modePillLabel,
+                accentColor: isRisky
+                    ? DshColors.of(context).danger
+                    : activeMode == AgyAgentMode.auto
+                    ? DshColors.of(context).warning
+                    : null,
+                onTap: () => unawaited(showApprovalModeSheet(context, ref)),
               ),
               SetupItem(
-                icon: hosts.active.isLocal ? AppIcons.thisPhone : AppIcons.sshHost,
+                icon: hosts.active.isLocal
+                    ? AppIcons.thisPhone
+                    : AppIcons.sshHost,
                 label: hosts.activeLabel(),
                 onTap: () => showHostSwitcherSheet(context, ref),
               ),
@@ -189,33 +207,50 @@ class _UserBubble extends ConsumerWidget {
   final ValueChanged<String> onQuote;
   final ValueChanged<String> onEdit;
 
-  Future<void> _openMenu(BuildContext context) async {
+  Future<void> _openMenu(BuildContext context, WidgetRef ref) async {
     final split = _splitQuote(item.text);
+    final cleanText = split.body.isNotEmpty ? split.body : item.text;
     final action = await showAppSheet<String>(
       context,
+      isScrollControlled: true,
       builder: (sheet) => SafeArea(
         top: false,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const SheetHeader('消息操作'),
+            MenuTextPreview(text: cleanText, label: '我的消息'),
             SheetGroup(
               children: [
                 ListPageRow(
                   icon: AppIcons.copy,
                   title: '复制',
+                  chevron: false,
                   onTap: () => Navigator.of(sheet).pop('copy'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.selectText,
+                  title: '自由选字',
+                  chevron: false,
+                  onTap: () => Navigator.of(sheet).pop('select'),
                 ),
                 ListPageRow(
                   icon: AppIcons.quote,
                   title: '引用追问',
+                  chevron: false,
                   onTap: () => Navigator.of(sheet).pop('quote'),
                 ),
                 ListPageRow(
                   icon: AppIcons.edit,
                   title: '编辑并重发',
+                  chevron: false,
                   onTap: () => Navigator.of(sheet).pop('edit'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.fork,
+                  title: '从此处分支新对话',
+                  chevron: false,
+                  onTap: () => Navigator.of(sheet).pop('fork'),
                 ),
               ],
             ),
@@ -229,10 +264,19 @@ class _UserBubble extends ConsumerWidget {
       case 'copy':
         await Clipboard.setData(ClipboardData(text: item.text));
         if (context.mounted) showBriefNotice(context, '已复制');
+      case 'select':
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => SelectTextPage(text: cleanText),
+          ),
+        );
       case 'quote':
-        onQuote(split.body.isNotEmpty ? split.body : item.text);
+        onQuote(cleanText);
       case 'edit':
-        onEdit(split.body.isNotEmpty ? split.body : item.text);
+        onEdit(cleanText);
+      case 'fork':
+        await ref.read(chatProvider.notifier).forkFromText(cleanText);
+        if (context.mounted) showBriefNotice(context, '已创建新分支并载入引用上下文');
     }
   }
 
@@ -253,7 +297,7 @@ class _UserBubble extends ConsumerWidget {
         child: ConstrainedBox(
           constraints: BoxConstraints(maxWidth: constraints.maxWidth * 0.82),
           child: GestureDetector(
-            onLongPress: () => _openMenu(context),
+            onLongPress: () => unawaited(_openMenu(context, ref)),
             child: DecoratedBox(
               decoration: ShapeDecoration(
                 color: surfaces.userBubble,
@@ -456,6 +500,13 @@ class _AssistantTurnViewState extends ConsumerState<_AssistantTurnView> {
                     onTap: () => widget.onQuote(item.text),
                   ),
                   _ActionIcon(
+                    icon: AppIcons.regenerate,
+                    tooltip: '重新生成',
+                    onTap: () => unawaited(
+                      ref.read(chatProvider.notifier).regenerateLast(),
+                    ),
+                  ),
+                  _ActionIcon(
                     icon: AppIcons.share,
                     tooltip: '分享与导出',
                     onTap: () => Navigator.of(context).push(
@@ -463,6 +514,11 @@ class _AssistantTurnViewState extends ConsumerState<_AssistantTurnView> {
                         builder: (_) => const ShareScreen(),
                       ),
                     ),
+                  ),
+                  _ActionIcon(
+                    icon: AppIcons.more,
+                    tooltip: '更多操作',
+                    onTap: () => unawaited(_openMoreMenu(context, item.text)),
                   ),
                 ],
               ),
@@ -486,6 +542,101 @@ class _AssistantTurnViewState extends ConsumerState<_AssistantTurnView> {
           ),
       ],
     );
+  }
+
+  Future<void> _openMoreMenu(BuildContext context, String text) async {
+    final isSpeaking = ref.read(voiceProvider).isSpeaking;
+    final action = await showAppSheet<String>(
+      context,
+      isScrollControlled: true,
+      builder: (sheet) => SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            MenuTextPreview(text: text, label: 'Antigravity 回复'),
+            SheetGroup(
+              children: [
+                ListPageRow(
+                  icon: AppIcons.copy,
+                  title: '复制全文',
+                  chevron: false,
+                  onTap: () => Navigator.of(sheet).pop('copy'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.selectText,
+                  title: '自由选字',
+                  chevron: false,
+                  onTap: () => Navigator.of(sheet).pop('select'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.regenerate,
+                  title: '重新生成',
+                  chevron: false,
+                  onTap: () => Navigator.of(sheet).pop('regen'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.quote,
+                  title: '引用追问',
+                  chevron: false,
+                  onTap: () => Navigator.of(sheet).pop('quote'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.fork,
+                  title: '从此处分支新对话',
+                  chevron: false,
+                  onTap: () => Navigator.of(sheet).pop('fork'),
+                ),
+                ListPageRow(
+                  icon: isSpeaking
+                      ? AppIcons.stopGenerating
+                      : AppIcons.readAloud,
+                  title: isSpeaking ? '停止朗读' : '语音朗读',
+                  chevron: false,
+                  onTap: () => Navigator.of(sheet).pop('speak'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.share,
+                  title: '分享长图 / 导出',
+                  chevron: false,
+                  onTap: () => Navigator.of(sheet).pop('share'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+          ],
+        ),
+      ),
+    );
+    if (!context.mounted || action == null) return;
+    switch (action) {
+      case 'copy':
+        await Clipboard.setData(ClipboardData(text: text));
+        if (context.mounted) showBriefNotice(context, '已复制');
+      case 'select':
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => SelectTextPage(text: text)),
+        );
+      case 'regen':
+        await ref.read(chatProvider.notifier).regenerateLast();
+      case 'quote':
+        widget.onQuote(text);
+      case 'fork':
+        await ref.read(chatProvider.notifier).forkFromText(text);
+        if (context.mounted) showBriefNotice(context, '已创建新分支并载入引用上下文');
+      case 'speak':
+        final v = ref.read(voiceProvider.notifier);
+        if (isSpeaking) {
+          v.stopSpeaking();
+        } else {
+          v.speak(text);
+        }
+      case 'share':
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => const ShareScreen()),
+        );
+    }
   }
 
   String _processSummary(AssistantTranscriptItem item) {

@@ -34,6 +34,13 @@ class RuntimeController private constructor(private val context: Context) {
     @Volatile private var token: String? = null
     @Volatile private var lastError: String? = null
     @Volatile private var authConfig: AgyAuthHelper.AuthConfig = AgyAuthHelper.AuthConfig()
+    @Volatile private var executionPolicy: AgyAuthHelper.ExecutionPolicy = AgyAuthHelper.ExecutionPolicy(
+        agentMode = prefs.getString(K_AGENT_MODE, "") ?: "",
+        toolPermission = prefs.getString(K_TOOL_PERMISSION, "request-review") ?: "request-review",
+        artifactReviewPolicy = prefs.getString(K_ARTIFACT_REVIEW, "asks-for-review") ?: "asks-for-review",
+        allowNonWorkspaceAccess = prefs.getBoolean(K_ALLOW_NON_WS, true),
+        queuedMessages = prefs.getString(K_QUEUED_MESSAGES, "queue") ?: "queue",
+    )
     @Volatile private var preferProot: Boolean = prefs.getBoolean(K_PREFER_PROOT, false)
     @Volatile private var phoneStorageEnabled: Boolean = prefs.getBoolean(K_PHONE_STORAGE, false)
     @Volatile private var phoneControlEnabled: Boolean = false
@@ -71,6 +78,7 @@ class RuntimeController private constructor(private val context: Context) {
             "installedVersion" to installedVersion,
             "workspacePath" to installer.workspaceDir.absolutePath,
             "homePath" to installer.homeDir.absolutePath,
+            "binPath" to installer.binDir.absolutePath,
             "phoneStorageEnabled" to phoneStorageEnabled,
             "phoneStorageGranted" to storageGranted,
             "phoneStorageMounted" to (phoneStorageEnabled && storageGranted),
@@ -87,7 +95,34 @@ class RuntimeController private constructor(private val context: Context) {
     fun setAuthConfig(mode: String, apiKey: String, baseUrl: String) {
         synchronized(lock) {
             authConfig = AgyAuthHelper.AuthConfig(mode = mode, apiKey = apiKey, baseUrl = baseUrl)
-            AgyAuthHelper.applySettings(installer.homeDir, authConfig)
+            AgyAuthHelper.applySettings(installer.homeDir, authConfig, executionPolicy)
+        }
+        emitStatus()
+    }
+
+    fun setExecutionPolicy(
+        agentMode: String,
+        toolPermission: String,
+        artifactReviewPolicy: String,
+        allowNonWorkspaceAccess: Boolean,
+        queuedMessages: String,
+    ) {
+        synchronized(lock) {
+            executionPolicy = AgyAuthHelper.ExecutionPolicy(
+                agentMode = agentMode,
+                toolPermission = toolPermission,
+                artifactReviewPolicy = artifactReviewPolicy,
+                allowNonWorkspaceAccess = allowNonWorkspaceAccess,
+                queuedMessages = queuedMessages,
+            )
+            prefs.edit()
+                .putString(K_AGENT_MODE, agentMode)
+                .putString(K_TOOL_PERMISSION, toolPermission)
+                .putString(K_ARTIFACT_REVIEW, artifactReviewPolicy)
+                .putBoolean(K_ALLOW_NON_WS, allowNonWorkspaceAccess)
+                .putString(K_QUEUED_MESSAGES, queuedMessages)
+                .apply()
+            AgyAuthHelper.applyExecutionPolicy(installer.homeDir, executionPolicy)
         }
         emitStatus()
     }
@@ -203,6 +238,7 @@ class RuntimeController private constructor(private val context: Context) {
         worker.execute {
             val useProot: Boolean
             val currentAuth: AgyAuthHelper.AuthConfig
+            val currentPolicy: AgyAuthHelper.ExecutionPolicy
             val mountStorage: Boolean
             val binds: List<String>
             val phoneCtrl: Boolean
@@ -232,6 +268,7 @@ class RuntimeController private constructor(private val context: Context) {
                 token = null
                 useProot = preferProot && installer.isProotAvailable()
                 currentAuth = authConfig
+                currentPolicy = executionPolicy
                 mountStorage = phoneStorageEnabled && PhoneStorage.isGranted(context)
                 binds = extraWorkspaceBinds
                 phoneCtrl = phoneControlEnabled
@@ -246,6 +283,7 @@ class RuntimeController private constructor(private val context: Context) {
                     context = context,
                     installer = installer,
                     authConfig = currentAuth,
+                    executionPolicy = currentPolicy,
                     useProot = useProot,
                     phoneStorageMounted = mountStorage,
                     extraWorkspaceBinds = binds,
@@ -470,6 +508,11 @@ class RuntimeController private constructor(private val context: Context) {
         private const val PREFS_NAME = "agy_runtime_prefs"
         private const val K_PREFER_PROOT = "prefer_proot"
         private const val K_PHONE_STORAGE = "phone_storage"
+        private const val K_AGENT_MODE = "agent_mode"
+        private const val K_TOOL_PERMISSION = "tool_permission"
+        private const val K_ARTIFACT_REVIEW = "artifact_review_policy"
+        private const val K_ALLOW_NON_WS = "allow_non_workspace_access"
+        private const val K_QUEUED_MESSAGES = "queued_messages"
 
         @Volatile private var instance: RuntimeController? = null
 

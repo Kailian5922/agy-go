@@ -5,6 +5,32 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+class PickedMediaItem {
+  const PickedMediaItem({
+    required this.name,
+    required this.path,
+    required this.mimeType,
+    this.sizeBytes = 0,
+    this.bytes,
+  });
+
+  factory PickedMediaItem.fromMap(Map<Object?, Object?> raw) => PickedMediaItem(
+    name: raw['name'] as String? ?? 'attachment',
+    path: raw['path'] as String? ?? '',
+    mimeType: raw['mimeType'] as String? ?? 'application/octet-stream',
+    sizeBytes: (raw['sizeBytes'] as num?)?.toInt() ?? 0,
+    bytes: raw['bytes'] is Uint8List ? raw['bytes'] as Uint8List : null,
+  );
+
+  final String name;
+  final String path;
+  final String mimeType;
+  final int sizeBytes;
+  final Uint8List? bytes;
+
+  bool get isImage => mimeType.toLowerCase().startsWith('image/');
+}
+
 class DeviceSystemInfo {
   const DeviceSystemInfo({
     this.manufacturer = 'Android',
@@ -138,6 +164,40 @@ class SystemToolsController extends Notifier<SystemToolsState> {
       'mimeType': mimeType,
       'title': title,
     });
+  }
+
+  Future<PickedMediaItem?> pickImage() => _invokePicker('pickImage');
+
+  Future<PickedMediaItem?> capturePhoto() => _invokePicker('capturePhoto');
+
+  Future<PickedMediaItem?> pickFile() => _invokePicker('pickFile');
+
+  Future<PickedMediaItem?> _invokePicker(String method) async {
+    try {
+      final raw = await _channel.invokeMethod<Map<Object?, Object?>>(method);
+      if (raw == null) return null;
+      return PickedMediaItem.fromMap(raw);
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  Future<void> notifyTurnEvent({
+    required String title,
+    required String body,
+    bool urgent = false,
+  }) async {
+    try {
+      await _channel.invokeMethod<bool>('notifyTurnEvent', {
+        'title': title,
+        'body': body,
+        'urgent': urgent,
+      });
+    } on MissingPluginException {
+      // Non-Android environment.
+    }
   }
 
   Future<void> checkAppUpdate() async {

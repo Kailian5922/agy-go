@@ -42,8 +42,9 @@ Color sessionSelectionColor(BuildContext context) {
 
 /// Left sessions drawer mirroring DSH Go's exact anatomy:
 /// Brand lockup + solid "新对话" pill -> Search capsule -> Workspace switcher ->
-/// Filter chips -> Edge-faded grouped sessions list -> Bottom IdentityBar.
-class SessionsDrawer extends ConsumerWidget {
+/// Filter & custom folder pills -> Edge-faded grouped sessions list (with multi-select) ->
+/// Bottom IdentityBar or batch-action toolbar.
+class SessionsDrawer extends ConsumerStatefulWidget {
   const SessionsDrawer({
     super.key,
     required this.onClose,
@@ -58,17 +59,115 @@ class SessionsDrawer extends ConsumerWidget {
   static const contentEdge = 10.0;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SessionsDrawer> createState() => _SessionsDrawerState();
+}
+
+class _SessionsDrawerState extends ConsumerState<SessionsDrawer> {
+  bool _selecting = false;
+  final Set<String> _selectedIds = {};
+
+  void _enterSelectMode([String? initialId]) {
+    setState(() {
+      _selecting = true;
+      _selectedIds.clear();
+      if (initialId != null) _selectedIds.add(initialId);
+    });
+  }
+
+  void _exitSelectMode() {
+    setState(() {
+      _selecting = false;
+      _selectedIds.clear();
+    });
+  }
+
+  void _toggleSelected(String id) {
+    setState(() {
+      if (!_selectedIds.remove(id)) {
+        _selectedIds.add(id);
+      }
+    });
+  }
+
+  Future<void> _pickFolderFor(Set<String> ids) async {
+    final folders = ref.read(sessionsProvider).folders;
+    final choice = await showAppSheet<String>(
+      context,
+      isScrollControlled: true,
+      builder: (sheet) => SafeArea(
+        top: false,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.only(bottom: 14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SheetHeader(
+                ids.length == 1 ? '移动到文件夹' : '批量移动 ${ids.length} 个对话',
+              ),
+              SheetGroup(
+                children: [
+                  ListPageRow(
+                    icon: AppIcons.noFolder,
+                    title: '未分组（移出文件夹）',
+                    chevron: false,
+                    onTap: () => Navigator.of(sheet).pop(''),
+                  ),
+                  for (final f in folders)
+                    ListPageRow(
+                      icon: AppIcons.folderMark,
+                      title: f,
+                      chevron: false,
+                      onTap: () => Navigator.of(sheet).pop(f),
+                    ),
+                  ListPageRow(
+                    icon: AppIcons.newFolder,
+                    title: '新建文件夹并移入…',
+                    chevron: false,
+                    onTap: () => Navigator.of(sheet).pop('__new__'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    String? target = choice;
+    if (choice == '__new__') {
+      final created = await showTextPromptDialog(
+        context,
+        title: '新建会话文件夹',
+        hint: '例如 工作项目 / 调试 / 学习',
+        confirmLabel: '创建',
+      );
+      if (created == null || created.trim().isEmpty) return;
+      target = created.trim();
+    }
+    await ref
+        .read(sessionsProvider.notifier)
+        .batchMoveToFolder(ids, target.isEmpty ? null : target);
+    if (mounted) {
+      showBriefNotice(
+        context,
+        target.isEmpty ? '已移出文件夹' : '已移至「$target」',
+      );
+      if (_selecting) _exitSelectMode();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     void newChat() {
       ref.read(chatProvider.notifier).startNewChat();
-      onClose();
+      widget.onClose();
     }
 
     Future<void> openSearch() async {
       final id = await showSessionSearch(context);
       if (id != null && context.mounted) {
         ref.read(sessionsProvider.notifier).selectSession(id);
-        onClose();
+        widget.onClose();
       }
     }
 
@@ -98,7 +197,13 @@ class SessionsDrawer extends ConsumerWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  NewChatButton(onTap: newChat),
+                  if (_selecting)
+                    TextButton(
+                      onPressed: _exitSelectMode,
+                      child: const Text('完成'),
+                    )
+                  else
+                    NewChatButton(onTap: newChat),
                 ],
               ),
             ),
@@ -110,30 +215,106 @@ class SessionsDrawer extends ConsumerWidget {
               ),
             ),
             WorkspaceSwitcher(
-              onManage: () => onOpen(DrawerDestination.workspaces),
+              onManage: () => widget.onOpen(DrawerDestination.workspaces),
             ),
-            const _FilterChipsRow(),
+            _FilterChipsRow(
+              selecting: _selecting,
+              onToggleSelectMode: () =>
+                  _selecting ? _exitSelectMode() : _enterSelectMode(),
+            ),
             Expanded(
               child: _EdgeFade(
-                child: _SessionList(onClose: onClose, onOpen: onOpen),
+                child: _SessionList(
+                  onClose: widget.onClose,
+                  onOpen: widget.onOpen,
+                  selecting: _selecting,
+                  selectedIds: _selectedIds,
+                  onToggleSelect: _toggleSelected,
+                  onStartMultiSelect: _enterSelectMode,
+                  onMoveToFolder: (id) => unawaited(_pickFolderFor({id})),
+                ),
               ),
             ),
-            IdentityBar(
-              onHost: () => showHostSwitcherSheet(
-                context,
-                ref,
-                onManage: () => onOpen(DrawerDestination.remote),
+            if (_selecting)
+              _BatchBar(
+                count: _selectedIds.length,
+                onMove: _selectedIds.isEmpty
+                    ? null
+                    : () => unawaited(_pickFolderFor(Set.from(_selectedIds))),
+                onArchive: _selectedIds.isEmpty
+                    ? null
+                    : () async {
+                        final isArchivedView =
+                            ref.read(sessionsProvider).filter ==
+                            DrawerSessionFilter.archived;
+                        await ref
+                            .read(sessionsProvider.notifier)
+                            .batchArchive(
+                              Set.from(_selectedIds),
+                              !isArchivedView,
+                            );
+                        if (context.mounted) {
+                          showBriefNotice(
+                            context,
+                            isArchivedView ? '已批量移出归档' : '已批量归档',
+                          );
+                          _exitSelectMode();
+                        }
+                      },
+                onDelete: _selectedIds.isEmpty
+                    ? null
+                    : () async {
+                        final count = _selectedIds.length;
+                        final ok = await showAppDialog<bool>(
+                          context: context,
+                          builder: (d) => AlertDialog(
+                            title: Text('批量删除 $count 个对话？'),
+                            content: const Text('删除后所选会话记录将从列表移除。'),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(d, false),
+                                child: const Text('取消'),
+                              ),
+                              FilledButton(
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: DshColors.of(d).danger,
+                                  foregroundColor: DshColors.of(d).onDanger,
+                                ),
+                                onPressed: () => Navigator.pop(d, true),
+                                child: const Text('删除'),
+                              ),
+                            ],
+                          ),
+                        );
+                        if (ok == true) {
+                          await ref
+                              .read(sessionsProvider.notifier)
+                              .batchDelete(Set.from(_selectedIds));
+                          if (context.mounted) {
+                            showBriefNotice(context, '已删除 $count 个对话');
+                            _exitSelectMode();
+                          }
+                        }
+                      },
+                onCancel: _exitSelectMode,
+              )
+            else
+              IdentityBar(
+                onHost: () => showHostSwitcherSheet(
+                  context,
+                  ref,
+                  onManage: () => widget.onOpen(DrawerDestination.remote),
+                ),
+                onLocalDetails: () => widget.onOpen(DrawerDestination.engine),
+                onFeatures: () => widget.onOpen(DrawerDestination.features),
+                onSettings: () => widget.onOpen(DrawerDestination.settings),
               ),
-              onLocalDetails: () => onOpen(DrawerDestination.engine),
-              onFeatures: () => onOpen(DrawerDestination.features),
-              onSettings: () => onOpen(DrawerDestination.settings),
-            ),
           ],
         ),
       ),
     );
 
-    final motion = drawerMotion;
+    final motion = widget.drawerMotion;
     if (motion == null) {
       return GlassSurface(
         tier: GlassTier.sheet,
@@ -146,6 +327,68 @@ class SessionsDrawer extends ConsumerWidget {
       tier: GlassTier.sheet,
       borderRadius: radius,
       child: content,
+    );
+  }
+}
+
+class _BatchBar extends StatelessWidget {
+  const _BatchBar({
+    required this.count,
+    required this.onMove,
+    required this.onArchive,
+    required this.onDelete,
+    required this.onCancel,
+  });
+
+  final int count;
+  final VoidCallback? onMove;
+  final VoidCallback? onArchive;
+  final VoidCallback? onDelete;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final dsh = DshColors.of(context);
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+      child: GlassSurface(
+        tier: GlassTier.card,
+        borderRadius: AppShape.radiusLg,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                '已选 $count 项',
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                  color: scheme.onSurface,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(AppIcons.moveToFolder, size: 19),
+              tooltip: '移至文件夹',
+              onPressed: onMove,
+            ),
+            IconButton(
+              icon: const Icon(AppIcons.archive, size: 19),
+              tooltip: '归档 / 恢复',
+              onPressed: onArchive,
+            ),
+            IconButton(
+              icon: Icon(
+                AppIcons.delete,
+                size: 19,
+                color: onDelete == null ? dsh.textDisabled : dsh.danger,
+              ),
+              tooltip: '删除',
+              onPressed: onDelete,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -192,25 +435,38 @@ class NewChatButton extends StatelessWidget {
 }
 
 class _FilterChipsRow extends ConsumerWidget {
-  const _FilterChipsRow();
+  const _FilterChipsRow({
+    required this.selecting,
+    required this.onToggleSelectMode,
+  });
+
+  final bool selecting;
+  final VoidCallback onToggleSelectMode;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final current = ref.watch(sessionsProvider.select((s) => s.filter));
-    final archivedCount = ref.watch(
-      sessionsProvider.select((s) => s.archivedIds.length),
-    );
-    final pinnedCount = ref.watch(
-      sessionsProvider.select((s) => s.pinnedIds.length),
-    );
-    if (archivedCount == 0 && pinnedCount == 0) {
+    final st = ref.watch(sessionsProvider);
+    final current = st.filter;
+    final activeFolder = st.activeFolder;
+    final archivedCount = st.archivedIds.length;
+    final pinnedCount = st.pinnedIds.length;
+    final folders = st.folders;
+    final hasAnySessions = st.sessions.isNotEmpty;
+
+    if (!hasAnySessions && folders.isEmpty) {
       return const SizedBox(height: 4);
     }
+
     final scheme = Theme.of(context).colorScheme;
     final dark = Theme.of(context).brightness == Brightness.dark;
 
-    Widget pill(DrawerSessionFilter filter, String label) {
-      final selected = current == filter;
+    Widget chip({
+      required String label,
+      required bool selected,
+      required VoidCallback onTap,
+      VoidCallback? onLongPress,
+      IconData? icon,
+    }) {
       final bg = selected
           ? scheme.primaryContainer
           : (dark
@@ -224,29 +480,129 @@ class _FilterChipsRow extends ConsumerWidget {
         shape: const StadiumBorder(),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: () => ref.read(sessionsProvider.notifier).setFilter(filter),
+          onTap: onTap,
+          onLongPress: onLongPress,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
-            child: Text(
-              label,
-              style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                color: fg,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-              ),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (icon != null) ...[
+                  Icon(icon, size: 13, color: fg),
+                  const SizedBox(width: 4),
+                ],
+                Text(
+                  label,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: fg,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                  ),
+                ),
+              ],
             ),
           ),
         ),
       );
     }
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-      child: Wrap(
-        spacing: 6,
+    return SizedBox(
+      height: 36,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
         children: [
-          pill(DrawerSessionFilter.all, '全部'),
-          if (pinnedCount > 0) pill(DrawerSessionFilter.pinned, '置顶'),
-          if (archivedCount > 0) pill(DrawerSessionFilter.archived, '归档'),
+          chip(
+            label: '全部',
+            selected: activeFolder == null && current == DrawerSessionFilter.all,
+            onTap: () => ref
+                .read(sessionsProvider.notifier)
+                .setFilter(DrawerSessionFilter.all),
+          ),
+          if (pinnedCount > 0) ...[
+            const SizedBox(width: 6),
+            chip(
+              label: '置顶',
+              selected:
+                  activeFolder == null && current == DrawerSessionFilter.pinned,
+              onTap: () => ref
+                  .read(sessionsProvider.notifier)
+                  .setFilter(DrawerSessionFilter.pinned),
+            ),
+          ],
+          if (archivedCount > 0) ...[
+            const SizedBox(width: 6),
+            chip(
+              label: '归档',
+              selected:
+                  activeFolder == null &&
+                  current == DrawerSessionFilter.archived,
+              onTap: () => ref
+                  .read(sessionsProvider.notifier)
+                  .setFilter(DrawerSessionFilter.archived),
+            ),
+          ],
+          for (final folder in folders) ...[
+            const SizedBox(width: 6),
+            chip(
+              icon: AppIcons.folderMark,
+              label: folder,
+              selected: activeFolder == folder,
+              onTap: () =>
+                  ref.read(sessionsProvider.notifier).selectFolder(folder),
+              onLongPress: () async {
+                final ok = await showAppDialog<bool>(
+                  context: context,
+                  builder: (d) => AlertDialog(
+                    title: Text('删除文件夹「$folder」？'),
+                    content: const Text('文件夹内的对话不会被删除，仅回到未分组状态。'),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(d, false),
+                        child: const Text('取消'),
+                      ),
+                      FilledButton(
+                        onPressed: () => Navigator.pop(d, true),
+                        child: const Text('删除'),
+                      ),
+                    ],
+                  ),
+                );
+                if (ok == true) {
+                  await ref
+                      .read(sessionsProvider.notifier)
+                      .deleteFolder(folder);
+                }
+              },
+            ),
+          ],
+          const SizedBox(width: 6),
+          chip(
+            icon: AppIcons.newFolder,
+            label: '文件夹',
+            selected: false,
+            onTap: () async {
+              final name = await showTextPromptDialog(
+                context,
+                title: '新建会话文件夹',
+                hint: '例如 工作 / 调试 / 日常',
+                confirmLabel: '创建',
+              );
+              if (name != null && name.trim().isNotEmpty) {
+                await ref
+                    .read(sessionsProvider.notifier)
+                    .createFolder(name.trim());
+              }
+            },
+          ),
+          if (hasAnySessions) ...[
+            const SizedBox(width: 6),
+            chip(
+              icon: AppIcons.multiSelect,
+              label: selecting ? '退出多选' : '多选',
+              selected: selecting,
+              onTap: onToggleSelectMode,
+            ),
+          ],
         ],
       ),
     );
@@ -287,10 +643,23 @@ class _EdgeFade extends StatelessWidget {
 }
 
 class _SessionList extends ConsumerWidget {
-  const _SessionList({required this.onClose, required this.onOpen});
+  const _SessionList({
+    required this.onClose,
+    required this.onOpen,
+    required this.selecting,
+    required this.selectedIds,
+    required this.onToggleSelect,
+    required this.onStartMultiSelect,
+    required this.onMoveToFolder,
+  });
 
   final VoidCallback onClose;
   final ValueChanged<DrawerDestination> onOpen;
+  final bool selecting;
+  final Set<String> selectedIds;
+  final ValueChanged<String> onToggleSelect;
+  final ValueChanged<String> onStartMultiSelect;
+  final ValueChanged<String> onMoveToFolder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -322,7 +691,8 @@ class _SessionList extends ConsumerWidget {
                 : '前往本机引擎一键拉取 Google 官方 Android 原生客户端。',
             actionLabel: installed ? '启动引擎' : '前往安装',
             onAction: installed
-                ? () => unawaited(ref.read(localRuntimeProvider.notifier).start())
+                ? () =>
+                      unawaited(ref.read(localRuntimeProvider.notifier).start())
                 : () => onOpen(DrawerDestination.engine),
           ),
         );
@@ -340,12 +710,18 @@ class _SessionList extends ConsumerWidget {
           ),
         );
       }
-      return const Center(
+      return Center(
         child: EmptyView(
           compact: true,
-          icon: AppIcons.chat,
-          title: '还没有对话',
-          message: '点击右上角「新对话」开始第一次交流。',
+          icon: sessionsState.activeFolder != null
+              ? AppIcons.folder
+              : AppIcons.chat,
+          title: sessionsState.activeFolder != null
+              ? '「${sessionsState.activeFolder}」内暂无对话'
+              : '还没有对话',
+          message: sessionsState.activeFolder != null
+              ? '长按任意对话即可移入此文件夹。'
+              : '点击右上角「新对话」开始第一次交流。',
         ),
       );
     }
@@ -409,14 +785,27 @@ class _SessionList extends ConsumerWidget {
             for (final s in items)
               _SessionRow(
                 title: sessionsState.displayTitle(s),
+                folderTag: sessionsState.activeFolder == null
+                    ? sessionsState.folderOf(s.sessionId)
+                    : null,
                 selected: s.sessionId == sessionsState.currentSessionId,
+                selecting: selecting,
+                checked: selectedIds.contains(s.sessionId),
                 pinned: sessionsState.isPinned(s.sessionId),
                 busy: chatBusy && s.sessionId == sessionsState.currentSessionId,
                 onTap: () {
-                  ref.read(sessionsProvider.notifier).selectSession(s.sessionId);
-                  onClose();
+                  if (selecting) {
+                    onToggleSelect(s.sessionId);
+                  } else {
+                    ref
+                        .read(sessionsProvider.notifier)
+                        .selectSession(s.sessionId);
+                    onClose();
+                  }
                 },
-                onLongPress: () => unawaited(_showSessionActions(context, ref, s)),
+                onLongPress: () => selecting
+                    ? onToggleSelect(s.sessionId)
+                    : unawaited(_showSessionActions(context, ref, s)),
               ),
           ],
         ],
@@ -455,6 +844,19 @@ class _SessionList extends ConsumerWidget {
                   title: '重命名',
                   chevron: false,
                   onTap: () => Navigator.pop(sheet, 'rename'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.moveToFolder,
+                  title: '移动到文件夹',
+                  value: st.folderOf(s.sessionId),
+                  chevron: false,
+                  onTap: () => Navigator.pop(sheet, 'folder'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.multiSelect,
+                  title: '多选批量管理',
+                  chevron: false,
+                  onTap: () => Navigator.pop(sheet, 'multi'),
                 ),
                 ListPageRow(
                   icon: AppIcons.share,
@@ -498,6 +900,10 @@ class _SessionList extends ConsumerWidget {
         if (next != null && next.isNotEmpty) {
           await ctrl.renameSession(s.sessionId, next);
         }
+      case 'folder':
+        onMoveToFolder(s.sessionId);
+      case 'multi':
+        onStartMultiSelect(s.sessionId);
       case 'share':
         ctrl.selectSession(s.sessionId);
         onClose();
@@ -544,14 +950,20 @@ class _SessionRow extends StatelessWidget {
   const _SessionRow({
     required this.title,
     required this.selected,
+    required this.selecting,
+    required this.checked,
     required this.pinned,
     required this.busy,
     required this.onTap,
     required this.onLongPress,
+    this.folderTag,
   });
 
   final String title;
+  final String? folderTag;
   final bool selected;
+  final bool selecting;
+  final bool checked;
   final bool pinned;
   final bool busy;
   final VoidCallback onTap;
@@ -564,7 +976,9 @@ class _SessionRow extends StatelessWidget {
     final colors = DshColors.of(context);
     final shape = Squircle.border(AppShape.md);
     return Material(
-      color: selected ? sessionSelectionColor(context) : Colors.transparent,
+      color: (selecting ? checked : selected)
+          ? sessionSelectionColor(context)
+          : Colors.transparent,
       shape: shape,
       clipBehavior: Clip.antiAlias,
       child: InkWell(
@@ -580,6 +994,14 @@ class _SessionRow extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 10),
             child: Row(
               children: [
+                if (selecting) ...[
+                  Icon(
+                    checked ? AppIcons.checkboxOn : AppIcons.checkboxOff,
+                    size: 18,
+                    color: checked ? scheme.primary : colors.textTertiary,
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 Expanded(
                   child: Text(
                     title,
@@ -593,6 +1015,15 @@ class _SessionRow extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (folderTag != null && folderTag!.isNotEmpty) ...[
+                  const SizedBox(width: 6),
+                  Text(
+                    folderTag!,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: colors.textTertiary,
+                    ),
+                  ),
+                ],
                 if (busy) ...[
                   const SizedBox(width: 8),
                   const StatusDot(tone: StatusTone.busy, size: 7),

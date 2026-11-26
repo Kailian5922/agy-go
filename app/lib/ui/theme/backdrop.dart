@@ -2,22 +2,34 @@
 // SPDX-License-Identifier: MIT
 // Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
 
+import 'dart:io';
+
 import 'package:material_ui/material_ui.dart';
 
 import 'feather.dart';
 import 'surfaces.dart';
 
 /// Full-screen Mist Glass backdrop: vertical low-chroma mist/night gradient plus
-/// two subtle ambient corner glows so frosted chrome/sheet glass picks up soft colour.
+/// two subtle ambient corner glows (and optional custom wallpaper under a mist scrim)
+/// so frosted chrome/sheet glass picks up soft colour.
 class AppBackdrop extends StatelessWidget {
-  const AppBackdrop({super.key, required this.child, this.glow = true});
+  const AppBackdrop({
+    super.key,
+    required this.child,
+    this.glow = true,
+    this.wallpaperPath,
+    this.wallpaperOpacity = 0.22,
+  });
 
   final Widget child;
   final bool glow;
+  final String? wallpaperPath;
+  final double wallpaperOpacity;
 
   @override
   Widget build(BuildContext context) {
     final s = DshSurfaces.of(context);
+    final hasWallpaper = wallpaperPath != null && wallpaperPath!.isNotEmpty;
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -35,6 +47,19 @@ class AppBackdrop extends StatelessWidget {
             ),
           ),
         ),
+        if (hasWallpaper)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Opacity(
+                opacity: wallpaperOpacity.clamp(0.05, 0.65),
+                child: Image.file(
+                  File(wallpaperPath!),
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                ),
+              ),
+            ),
+          ),
         Material(type: MaterialType.transparency, child: child),
       ],
     );

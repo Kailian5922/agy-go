@@ -36,6 +36,123 @@ enum LocalAuthMode {
       raw == 'gemini_api_key' ? LocalAuthMode.geminiApiKey : LocalAuthMode.oauth;
 }
 
+/// Official Antigravity CLI (`agy`) execution modes (`agentMode` in settings.json).
+enum AgyAgentMode {
+  standard,
+  acceptEdits,
+  auto,
+  plan;
+
+  String get wireValue => switch (this) {
+    AgyAgentMode.standard => '',
+    AgyAgentMode.acceptEdits => 'accept-edits',
+    AgyAgentMode.auto => 'auto',
+    AgyAgentMode.plan => 'plan',
+  };
+
+  /// Candidate ACP `session/set_mode` IDs tried against live `availableModes`.
+  List<String> get acpModeAliases => switch (this) {
+    AgyAgentMode.standard => const ['default', 'code', 'ask', 'standard'],
+    AgyAgentMode.acceptEdits => const ['accept-edits', 'accept_edits', 'auto_edit', 'auto-edit'],
+    AgyAgentMode.auto => const ['auto', 'autonomous'],
+    AgyAgentMode.plan => const ['plan', 'architect'],
+  };
+
+  String get label => switch (this) {
+    AgyAgentMode.standard => '标准审查',
+    AgyAgentMode.acceptEdits => '自动改写',
+    AgyAgentMode.auto => '智能自动',
+    AgyAgentMode.plan => '计划模式',
+  };
+
+  String get description => switch (this) {
+    AgyAgentMode.standard => '修改文件展示 Diff 确认，执行终端命令前询问',
+    AgyAgentMode.acceptEdits => '自动批准工作区内文件修改，终端命令仍需确认',
+    AgyAgentMode.auto => '自动批准安全修改与可逆命令，高风险动作仍需确认',
+    AgyAgentMode.plan => '只读调研并先输出实施方案，经你同意后再动代码',
+  };
+
+  static AgyAgentMode parse(String? raw) => switch (raw?.trim().toLowerCase()) {
+    'accept-edits' || 'accept_edits' || 'auto_edit' || 'acceptedits' =>
+      AgyAgentMode.acceptEdits,
+    'auto' => AgyAgentMode.auto,
+    'plan' => AgyAgentMode.plan,
+    _ => AgyAgentMode.standard,
+  };
+}
+
+/// Official Antigravity CLI (`agy`) global tool permission presets (`toolPermission` in settings.json).
+enum AgyToolPermission {
+  strict,
+  requestReview,
+  proceedInSandbox,
+  alwaysProceed;
+
+  String get wireValue => switch (this) {
+    AgyToolPermission.strict => 'strict',
+    AgyToolPermission.requestReview => 'request-review',
+    AgyToolPermission.proceedInSandbox => 'proceed-in-sandbox',
+    AgyToolPermission.alwaysProceed => 'always-proceed',
+  };
+
+  String get label => switch (this) {
+    AgyToolPermission.strict => '严格逐次确认',
+    AgyToolPermission.requestReview => '标准审批',
+    AgyToolPermission.proceedInSandbox => '沙箱内放行',
+    AgyToolPermission.alwaysProceed => '完全放行 (YOLO)',
+  };
+
+  String get description => switch (this) {
+    AgyToolPermission.strict => '包括读取文件在内的每次工具调用都询问确认',
+    AgyToolPermission.requestReview => '写文件、终端命令、联网和 MCP 调用前弹出确认卡',
+    AgyToolPermission.proceedInSandbox => '隔离沙箱内命令自动放行，沙箱外操作继续确认',
+    AgyToolPermission.alwaysProceed => '跳过全部工具与命令确认（高风险，建议仅在受控工作区使用）',
+  };
+
+  bool get isHighRisk => this == AgyToolPermission.alwaysProceed;
+
+  static AgyToolPermission parse(String? raw) => switch (raw?.trim().toLowerCase()) {
+    'strict' => AgyToolPermission.strict,
+    'proceed-in-sandbox' || 'proceedinsandbox' =>
+      AgyToolPermission.proceedInSandbox,
+    'always-proceed' || 'alwaysproceed' || 'danger-full-access' || 'yolo' =>
+      AgyToolPermission.alwaysProceed,
+    _ => AgyToolPermission.requestReview,
+  };
+}
+
+enum AgyArtifactReviewPolicy {
+  asksForReview,
+  alwaysProceed;
+
+  String get wireValue =>
+      this == AgyArtifactReviewPolicy.alwaysProceed ? 'always-proceed' : 'asks-for-review';
+
+  String get label =>
+      this == AgyArtifactReviewPolicy.alwaysProceed ? '自动继续' : '等待审核';
+
+  static AgyArtifactReviewPolicy parse(String? raw) =>
+      raw == 'always-proceed'
+          ? AgyArtifactReviewPolicy.alwaysProceed
+          : AgyArtifactReviewPolicy.asksForReview;
+}
+
+enum AgyQueuedMessageBehavior {
+  queue,
+  steer;
+
+  String get wireValue =>
+      this == AgyQueuedMessageBehavior.steer ? 'send-immediately' : 'queue';
+
+  String get label =>
+      this == AgyQueuedMessageBehavior.steer ? '立即插话引导' : '排队等待本轮结束';
+
+  static AgyQueuedMessageBehavior parse(String? raw) =>
+      raw == 'send-immediately' || raw == 'steer'
+          ? AgyQueuedMessageBehavior.steer
+          : AgyQueuedMessageBehavior.queue;
+}
+
 class AppSettings {
   const AppSettings({
     this.loaded = false,
@@ -52,7 +169,15 @@ class AppSettings {
     this.customBaseUrl = '',
     this.autoStartLocalEngine = true,
     this.phoneStorage = false,
-    this.autoApproveCommands = false,
+    this.agentMode = AgyAgentMode.standard,
+    this.toolPermission = AgyToolPermission.requestReview,
+    this.artifactReviewPolicy = AgyArtifactReviewPolicy.asksForReview,
+    this.allowNonWorkspaceAccess = true,
+    this.queuedBehavior = AgyQueuedMessageBehavior.queue,
+    this.notifyOnTurnComplete = true,
+    this.notifyOnApproval = true,
+    this.wallpaperPath,
+    this.wallpaperOpacity = 0.22,
     this.quickPanelSwipe = true,
   });
 
@@ -70,8 +195,20 @@ class AppSettings {
   final String customBaseUrl;
   final bool autoStartLocalEngine;
   final bool phoneStorage;
-  final bool autoApproveCommands;
+  final AgyAgentMode agentMode;
+  final AgyToolPermission toolPermission;
+  final AgyArtifactReviewPolicy artifactReviewPolicy;
+  final bool allowNonWorkspaceAccess;
+  final AgyQueuedMessageBehavior queuedBehavior;
+  final bool notifyOnTurnComplete;
+  final bool notifyOnApproval;
+  final String? wallpaperPath;
+  final double wallpaperOpacity;
   final bool quickPanelSwipe;
+
+  /// Legacy convenience getter kept in sync with [toolPermission].
+  bool get autoApproveCommands =>
+      toolPermission == AgyToolPermission.alwaysProceed;
 
   bool get hasApiKey => apiKey.trim().isNotEmpty;
 
@@ -96,7 +233,15 @@ class AppSettings {
     String? customBaseUrl,
     bool? autoStartLocalEngine,
     bool? phoneStorage,
-    bool? autoApproveCommands,
+    AgyAgentMode? agentMode,
+    AgyToolPermission? toolPermission,
+    AgyArtifactReviewPolicy? artifactReviewPolicy,
+    bool? allowNonWorkspaceAccess,
+    AgyQueuedMessageBehavior? queuedBehavior,
+    bool? notifyOnTurnComplete,
+    bool? notifyOnApproval,
+    String? Function()? wallpaperPath,
+    double? wallpaperOpacity,
     bool? quickPanelSwipe,
   }) => AppSettings(
     loaded: loaded ?? this.loaded,
@@ -113,7 +258,16 @@ class AppSettings {
     customBaseUrl: customBaseUrl ?? this.customBaseUrl,
     autoStartLocalEngine: autoStartLocalEngine ?? this.autoStartLocalEngine,
     phoneStorage: phoneStorage ?? this.phoneStorage,
-    autoApproveCommands: autoApproveCommands ?? this.autoApproveCommands,
+    agentMode: agentMode ?? this.agentMode,
+    toolPermission: toolPermission ?? this.toolPermission,
+    artifactReviewPolicy: artifactReviewPolicy ?? this.artifactReviewPolicy,
+    allowNonWorkspaceAccess:
+        allowNonWorkspaceAccess ?? this.allowNonWorkspaceAccess,
+    queuedBehavior: queuedBehavior ?? this.queuedBehavior,
+    notifyOnTurnComplete: notifyOnTurnComplete ?? this.notifyOnTurnComplete,
+    notifyOnApproval: notifyOnApproval ?? this.notifyOnApproval,
+    wallpaperPath: wallpaperPath == null ? this.wallpaperPath : wallpaperPath(),
+    wallpaperOpacity: wallpaperOpacity ?? this.wallpaperOpacity,
     quickPanelSwipe: quickPanelSwipe ?? this.quickPanelSwipe,
   );
 }
@@ -135,7 +289,16 @@ class SettingsController extends Notifier<AppSettings> {
   static const _kBaseUrl = 'agy.customBaseUrl';
   static const _kAutoStart = 'agy.autoStartLocal';
   static const _kPhoneStorage = 'agy.phoneStorage';
-  static const _kAutoApprove = 'agy.autoApproveCommands';
+  static const _kAutoApproveLegacy = 'agy.autoApproveCommands';
+  static const _kAgentMode = 'agy.agentMode';
+  static const _kToolPermission = 'agy.toolPermission';
+  static const _kArtifactReview = 'agy.artifactReviewPolicy';
+  static const _kAllowNonWs = 'agy.allowNonWorkspaceAccess';
+  static const _kQueuedBehavior = 'agy.queuedBehavior';
+  static const _kNotifyComplete = 'agy.notifyOnTurnComplete';
+  static const _kNotifyApproval = 'agy.notifyOnApproval';
+  static const _kWallpaperPath = 'agy.wallpaperPath';
+  static const _kWallpaperOpacity = 'agy.wallpaperOpacity';
   static const _kQuickPanelSwipe = 'agy.quickPanelSwipe';
   static const _kApiKey = 'agy.secret.geminiApiKey';
 
@@ -160,6 +323,14 @@ class SettingsController extends Notifier<AppSettings> {
           ? ThemeMode.values[themeIdx]
           : ThemeMode.system;
 
+      final savedToolPerm = prefs.getString(_kToolPermission);
+      final legacyAutoApprove = prefs.getBool(_kAutoApproveLegacy) ?? false;
+      final toolPermission = savedToolPerm != null
+          ? AgyToolPermission.parse(savedToolPerm)
+          : (legacyAutoApprove
+                ? AgyToolPermission.alwaysProceed
+                : AgyToolPermission.requestReview);
+
       if (!ref.mounted) return;
       state = AppSettings(
         loaded: true,
@@ -176,7 +347,22 @@ class SettingsController extends Notifier<AppSettings> {
         customBaseUrl: prefs.getString(_kBaseUrl) ?? '',
         autoStartLocalEngine: prefs.getBool(_kAutoStart) ?? true,
         phoneStorage: prefs.getBool(_kPhoneStorage) ?? false,
-        autoApproveCommands: prefs.getBool(_kAutoApprove) ?? false,
+        agentMode: AgyAgentMode.parse(prefs.getString(_kAgentMode)),
+        toolPermission: toolPermission,
+        artifactReviewPolicy: AgyArtifactReviewPolicy.parse(
+          prefs.getString(_kArtifactReview),
+        ),
+        allowNonWorkspaceAccess: prefs.getBool(_kAllowNonWs) ?? true,
+        queuedBehavior: AgyQueuedMessageBehavior.parse(
+          prefs.getString(_kQueuedBehavior),
+        ),
+        notifyOnTurnComplete: prefs.getBool(_kNotifyComplete) ?? true,
+        notifyOnApproval: prefs.getBool(_kNotifyApproval) ?? true,
+        wallpaperPath: prefs.getString(_kWallpaperPath),
+        wallpaperOpacity: (prefs.getDouble(_kWallpaperOpacity) ?? 0.22).clamp(
+          0.08,
+          0.55,
+        ),
         quickPanelSwipe: prefs.getBool(_kQuickPanelSwipe) ?? true,
       );
     } catch (_) {
@@ -246,10 +432,71 @@ class SettingsController extends Notifier<AppSettings> {
     await prefs.setBool(_kPhoneStorage, enabled);
   }
 
-  Future<void> setAutoApproveCommands(bool enabled) async {
-    state = state.copyWith(autoApproveCommands: enabled);
+  Future<void> setAgentMode(AgyAgentMode mode) async {
+    state = state.copyWith(agentMode: mode);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_kAutoApprove, enabled);
+    await prefs.setString(_kAgentMode, mode.wireValue);
+  }
+
+  Future<void> setToolPermission(AgyToolPermission permission) async {
+    state = state.copyWith(toolPermission: permission);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kToolPermission, permission.wireValue);
+    await prefs.setBool(
+      _kAutoApproveLegacy,
+      permission == AgyToolPermission.alwaysProceed,
+    );
+  }
+
+  Future<void> setAutoApproveCommands(bool enabled) => setToolPermission(
+    enabled ? AgyToolPermission.alwaysProceed : AgyToolPermission.requestReview,
+  );
+
+  Future<void> setArtifactReviewPolicy(AgyArtifactReviewPolicy policy) async {
+    state = state.copyWith(artifactReviewPolicy: policy);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kArtifactReview, policy.wireValue);
+  }
+
+  Future<void> setAllowNonWorkspaceAccess(bool enabled) async {
+    state = state.copyWith(allowNonWorkspaceAccess: enabled);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kAllowNonWs, enabled);
+  }
+
+  Future<void> setQueuedBehavior(AgyQueuedMessageBehavior behavior) async {
+    state = state.copyWith(queuedBehavior: behavior);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kQueuedBehavior, behavior.wireValue);
+  }
+
+  Future<void> setNotifyOnTurnComplete(bool enabled) async {
+    state = state.copyWith(notifyOnTurnComplete: enabled);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kNotifyComplete, enabled);
+  }
+
+  Future<void> setNotifyOnApproval(bool enabled) async {
+    state = state.copyWith(notifyOnApproval: enabled);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kNotifyApproval, enabled);
+  }
+
+  Future<void> setWallpaperPath(String? path) async {
+    state = state.copyWith(wallpaperPath: () => path);
+    final prefs = await SharedPreferences.getInstance();
+    if (path == null || path.isEmpty) {
+      await prefs.remove(_kWallpaperPath);
+    } else {
+      await prefs.setString(_kWallpaperPath, path);
+    }
+  }
+
+  Future<void> setWallpaperOpacity(double opacity) async {
+    final clamped = opacity.clamp(0.08, 0.55);
+    state = state.copyWith(wallpaperOpacity: clamped);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_kWallpaperOpacity, clamped);
   }
 
   Future<void> setQuickPanelSwipe(bool enabled) async {
@@ -260,23 +507,27 @@ class SettingsController extends Notifier<AppSettings> {
 
   Future<void> setAuthConfig({
     required LocalAuthMode mode,
-    required String apiKey,
-    required String customBaseUrl,
+    String? apiKey,
+    String? customBaseUrl,
   }) async {
+    final nextKey = apiKey ?? state.apiKey;
+    final nextBase = customBaseUrl ?? state.customBaseUrl;
     state = state.copyWith(
       authMode: mode,
-      apiKey: apiKey.trim(),
-      customBaseUrl: customBaseUrl.trim(),
+      apiKey: nextKey,
+      customBaseUrl: nextBase,
     );
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kAuthMode, mode.wireValue);
-    await prefs.setString(_kBaseUrl, customBaseUrl.trim());
+    await prefs.setString(_kBaseUrl, nextBase);
     try {
-      final storage = ref.read(secureStorageProvider);
-      if (apiKey.trim().isEmpty) {
-        await storage.delete(key: _kApiKey);
+      if (nextKey.trim().isEmpty) {
+        await ref.read(secureStorageProvider).delete(key: _kApiKey);
       } else {
-        await storage.write(key: _kApiKey, value: apiKey.trim());
+        await ref.read(secureStorageProvider).write(
+          key: _kApiKey,
+          value: nextKey.trim(),
+        );
       }
     } catch (_) {}
   }

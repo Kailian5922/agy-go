@@ -1,5 +1,7 @@
 // Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
 
+import 'dart:async';
+
 import 'package:acp_client/acp_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
@@ -8,6 +10,7 @@ import '../../state/chat_state.dart';
 import '../../state/hosts_state.dart';
 import '../../state/runtime_state.dart';
 import '../../state/sessions_state.dart';
+import '../../state/settings_state.dart';
 import '../../state/workspaces_state.dart';
 import '../common/empty_view.dart';
 import '../common/list_page_row.dart';
@@ -17,8 +20,10 @@ import '../shell/page_frame.dart';
 import '../terminal/terminal_screen.dart';
 import '../theme/theme.dart';
 import '../workspace/workspace_screen.dart';
+import 'diff_and_output_page.dart';
+import 'permission_controls.dart';
 
-/// Conversation details & tool trajectory page mirroring DSH Go's SessionDetailPage.
+/// Conversation details, live plan checklist, tool trajectory & diffs page.
 class SessionDetailPage extends ConsumerStatefulWidget {
   const SessionDetailPage({super.key});
 
@@ -34,6 +39,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
     final chat = ref.watch(chatProvider);
     final sessions = ref.watch(sessionsProvider);
     final hosts = ref.watch(hostsProvider);
+    final settings = ref.watch(settingsProvider);
     final runtime = ref.watch(localRuntimeProvider).status;
     final current = sessions.currentSession;
     final title = current != null ? sessions.displayTitle(current) : '对话详情';
@@ -41,7 +47,13 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
       for (final item in chat.transcript.items)
         if (item is AssistantTranscriptItem) ...item.toolCalls,
     ];
+    final plan = chat.transcript.plan;
+    final diffs = collectTranscriptDiffs(chat.transcript);
     final usage = chat.transcript.usage;
+    final activeMode = chat.sessionAgentMode ?? settings.agentMode;
+    final activePerm = chat.sessionToolPermission ?? settings.toolPermission;
+    final scheme = Theme.of(context).colorScheme;
+    final dsh = DshColors.of(context);
 
     return AppPage.list(
       title: '对话详情',
@@ -52,10 +64,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
           child: SegmentedPill<int>(
             selected: _tab,
             onChanged: (v) => setState(() => _tab = v),
-            segments: const [
-              PillSegment(0, '概览'),
-              PillSegment(1, '工具轨迹'),
-              PillSegment(2, '快捷入口'),
+            segments: [
+              const PillSegment(0, '概览'),
+              PillSegment(1, plan.isEmpty ? '计划' : '计划(${plan.length})'),
+              PillSegment(2, '轨迹(${toolCalls.length})'),
+              PillSegment(3, 'Diff(${diffs.length})'),
             ],
           ),
         ),
@@ -80,13 +93,20 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
                 ),
                 mono: true,
               ),
+              if (chat.additionalDirectories.isNotEmpty)
+                InfoRow(
+                  label: '额外挂载目录',
+                  value: chat.additionalDirectories.join(', '),
+                  mono: true,
+                ),
               InfoRow(
-                label: '当前模式',
-                value: chat.transcript.modes?.currentModeId ?? '默认',
+                label: '执行 / 审批模式',
+                value: '${activeMode.label} · ${activePerm.label}',
               ),
               InfoRow(
                 label: '消息 / 工具数',
-                value: '${chat.transcript.items.length} 条（含 ${toolCalls.length} 次工具调用）',
+                value:
+                    '${chat.transcript.items.length} 条（含 ${toolCalls.length} 次工具调用）',
               ),
             ],
           ),
@@ -107,7 +127,85 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
                   ),
               ],
             ),
+          ListPageCard(
+            title: '对当前对话操作',
+            children: [
+              ListPageRow(
+                icon: AppIcons.permissions,
+                title: '审批与执行模式',
+                subtitle: '${activeMode.label} · ${activePerm.label}',
+                onTap: () => unawaited(showApprovalModeSheet(context, ref)),
+              ),
+              ListPageRow(
+                icon: AppIcons.diagnostics,
+                title: '上下文用量与一键压缩',
+                subtitle: '查看窗口占比并执行 /compact',
+                onTap: () => unawaited(showContextUsageSheet(context, ref)),
+              ),
+              ListPageRow(
+                icon: AppIcons.files,
+                title: '打开工作区文件',
+                subtitle: '查看或编辑工作区目录内容',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const WorkspaceScreen(),
+                  ),
+                ),
+              ),
+              ListPageRow(
+                icon: AppIcons.terminal,
+                title: '打开终端',
+                subtitle: '本机 Shell 或 SSH PTY 交互终端',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const TerminalScreen(),
+                  ),
+                ),
+              ),
+              ListPageRow(
+                icon: AppIcons.share,
+                title: '分享长图 / 导出 / 回放',
+                subtitle: '自动脱敏密钥后生成图片或 Markdown',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const ShareScreen()),
+                ),
+              ),
+            ],
+          ),
         ] else if (_tab == 1) ...[
+          if (plan.isEmpty)
+            const EmptyView(
+              icon: AppIcons.todo,
+              title: '暂无任务计划清单',
+              message: '开启 /plan 计划模式或触发复杂任务后，Antigravity 输出的实时步骤清单会显示在这里。',
+            )
+          else
+            ListPageCard(
+              title:
+                  '已完成 ${plan.where((p) => p.status.toLowerCase() == 'completed').length} / ${plan.length}',
+              children: [
+                for (final entry in plan)
+                  ListPageRow(
+                    icon: switch (entry.status.toLowerCase()) {
+                      'completed' => AppIcons.success,
+                      'in_progress' => AppIcons.inProgress,
+                      'failed' => AppIcons.stepFailed,
+                      _ => AppIcons.pending,
+                    },
+                    iconColor: switch (entry.status.toLowerCase()) {
+                      'completed' => dsh.success,
+                      'in_progress' => scheme.primary,
+                      'failed' => dsh.danger,
+                      _ => dsh.textTertiary,
+                    },
+                    title: entry.content,
+                    titleMaxLines: 3,
+                    meta: entry.priority,
+                    chevron: false,
+                  ),
+              ],
+            ),
+        ] else if (_tab == 2) ...[
           if (toolCalls.isEmpty)
             const EmptyView(
               icon: AppIcons.terminal,
@@ -133,41 +231,40 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
               ],
             ),
         ] else ...[
-          ListPageCard(
-            title: '对当前对话操作',
-            children: [
-              ListPageRow(
-                icon: AppIcons.files,
-                title: '打开工作区文件',
-                subtitle: '查看或编辑工作区目录内容',
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const WorkspaceScreen(),
+          if (diffs.isEmpty)
+            const EmptyView(
+              icon: AppIcons.diff,
+              title: '暂无文件变更 Diff',
+              message: '当 Antigravity 修改工作区文件后，变更汇总会显示在这里，并支持全屏审阅。',
+            )
+          else
+            ListPageCard(
+              title: '共 ${diffs.length} 处文件变更',
+              children: [
+                for (final d in diffs)
+                  ListPageRow(
+                    icon: AppIcons.diff,
+                    title: d.path,
+                    subtitle: '+${d.addedLines} / −${d.removedLines}',
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            DiffViewerPage(entries: [d], title: d.path),
+                      ),
+                    ),
+                  ),
+                ListPageRow(
+                  icon: AppIcons.openExternal,
+                  title: '全屏查看全部变更 Diff',
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          DiffViewerPage.fromTranscript(chat.transcript),
+                    ),
                   ),
                 ),
-              ),
-              ListPageRow(
-                icon: AppIcons.terminal,
-                title: '打开远程终端',
-                subtitle: 'SSH PTY 终端会话',
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const TerminalScreen(),
-                  ),
-                ),
-              ),
-              ListPageRow(
-                icon: AppIcons.share,
-                title: '分享长图 / 导出 / 回放',
-                subtitle: '自动脱敏密钥后生成图片或 Markdown',
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const ShareScreen(),
-                  ),
-                ),
-              ),
-            ],
-          ),
+              ],
+            ),
         ],
       ],
     );

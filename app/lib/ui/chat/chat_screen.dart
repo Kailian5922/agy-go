@@ -19,10 +19,12 @@ import '../phone/phone_control_screen.dart';
 import '../shell/drawer_destination.dart';
 import '../shell/sessions_drawer.dart';
 import '../theme/theme.dart';
+import 'activity_strip.dart';
 import 'chat_header.dart';
 import 'chat_list.dart';
 import 'composer_bar.dart';
 import 'permission_card.dart';
+import 'permission_controls.dart';
 import 'session_detail_page.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
@@ -338,6 +340,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                               ),
                             ),
                           ),
+                        const ActivityStrip(),
+                        const PermissionStatusPill(),
                         ComposerBar(
                           controller: _composerController,
                           enabled: connected,

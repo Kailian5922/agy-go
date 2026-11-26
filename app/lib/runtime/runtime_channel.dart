@@ -74,6 +74,26 @@ class RuntimeChannel {
     }
   }
 
+  Future<void> setExecutionPolicy({
+    required String agentMode,
+    required String toolPermission,
+    required String artifactReviewPolicy,
+    required bool allowNonWorkspaceAccess,
+    required String queuedMessages,
+  }) async {
+    try {
+      await _methods.invokeMethod<void>('setExecutionPolicy', {
+        'agentMode': agentMode,
+        'toolPermission': toolPermission,
+        'artifactReviewPolicy': artifactReviewPolicy,
+        'allowNonWorkspaceAccess': allowNonWorkspaceAccess,
+        'queuedMessages': queuedMessages,
+      });
+    } on MissingPluginException {
+      // Non-Android desktop/test environments.
+    }
+  }
+
   Future<void> setPreferProot(bool enabled) async {
     try {
       await _methods.invokeMethod<void>('setPreferProot', {'enabled': enabled});

@@ -52,15 +52,29 @@ jobs:
       - name: Optional PRoot Ubuntu 24.04 arm64 rootfs
         if: ${{ inputs.include_proot == true }}
         run: bash runtime/build-rootfs.sh arm64-v8a
-      - name: Build Android arm64 test APK (Release AOT, no GitHub Release)
+      - name: Build Android arm64 test APK (Release AOT, fixed package & signing key, no GitHub Release)
+        env:
+          AGY_KEYSTORE_BASE64: ${{ secrets.AGY_KEYSTORE_BASE64 }}
+          AGY_KEYSTORE_PASSWORD: ${{ secrets.AGY_KEYSTORE_PASSWORD }}
+          AGY_KEY_ALIAS: ${{ secrets.AGY_KEY_ALIAS }}
+          AGY_KEY_PASSWORD: ${{ secrets.AGY_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+          SIGNED_MODE="debug-ephemeral"
+          if [ -n "${AGY_KEYSTORE_BASE64:-}" ]; then
+            export AGY_KEYSTORE_PATH="$RUNNER_TEMP/agy-signing.jks"
+            printf '%s' "$AGY_KEYSTORE_BASE64" | base64 -d > "$AGY_KEYSTORE_PATH"
+            SIGNED_MODE="stable-ci-keystore"
+          fi
           bash tooling/build-apk.sh --release --abi arm64
-          cp app/build/app/outputs/flutter-apk/app-release.apk agy-go-arm64-test.apk
-          SHA="$(sha256sum agy-go-arm64-test.apk | awk '{print $1}')"
-          SIZE="$(du -h agy-go-arm64-test.apk | awk '{print $1}')"
+          cp app/build/app/outputs/flutter-apk/app-release.apk agy-go-arm64.apk
+          SHA="$(sha256sum agy-go-arm64.apk | awk '{print $1}')"
+          SIZE="$(du -h agy-go-arm64.apk | awk '{print $1}')"
           {
             echo "### Android arm64 Test APK (Not Released)"
-            echo "- File: \`agy-go-arm64-test.apk\`"
+            echo "- Application ID: \`io.github.kailian5922.agy_go\`"
+            echo "- File: \`agy-go-arm64.apk\`"
+            echo "- Signing: \`$SIGNED_MODE\`"
             echo "- Size: \`$SIZE\`"
             echo "- SHA-256: \`$SHA\`"
             echo "- PRoot Ubuntu bundled: \`${{ inputs.include_proot == true }}\`"
@@ -69,6 +83,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: agy-go-arm64-test-apk
-          path: agy-go-arm64-test.apk
+          path: agy-go-arm64.apk
           retention-days: 14
           if-no-files-found: error

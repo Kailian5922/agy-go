@@ -10,6 +10,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../runtime/runtime_models.dart';
+import '../../state/agy_config_state.dart';
 import '../../state/hosts_state.dart';
 import '../../state/pet_state.dart';
 import '../../state/phone_state.dart';
@@ -18,12 +19,17 @@ import '../../state/settings_state.dart';
 import '../../state/system_state.dart';
 import '../../state/voice_state.dart';
 import '../../state/workspaces_state.dart';
+import '../chat/permission_controls.dart';
+import '../common/app_sheet.dart';
 import '../common/brief_notice.dart';
+import '../common/list_page_row.dart';
 import '../common/overview_card.dart';
 import '../common/pressable.dart';
+import '../common/search_capsule.dart';
 import '../common/settings_widgets.dart';
 import '../common/status_chip.dart';
 import '../engine/engine_screen.dart';
+import '../features/agy_extensions_pages.dart';
 import '../pet/starling_pet.dart';
 import '../phone/phone_control_screen.dart';
 import '../remote/ssh_hosts_screen.dart';
@@ -33,6 +39,7 @@ import '../shell/page_frame.dart';
 import '../system/keep_alive_screen.dart';
 import '../theme/theme.dart';
 import '../workspace/workspaces_ui.dart';
+import 'settings_search_page.dart';
 
 /// One hue per group on the settings hub (exact DSH Go SettingsHues).
 abstract final class SettingsHues {
@@ -67,7 +74,7 @@ String _maskKey(String key) {
 };
 
 /// Settings hub mirroring DSH Go's exact information architecture:
-/// Overview card (Auth + live engine footer), then six hue-grouped sections.
+/// Search capsule + Overview card (Auth + live engine footer), then six hue-grouped sections.
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
@@ -82,7 +89,10 @@ class SettingsScreen extends ConsumerWidget {
     final pet = ref.watch(petSettingsProvider);
     final hosts = ref.watch(hostsProvider);
     final sys = ref.watch(systemToolsProvider);
-    final wsCount = ref.watch(workspacesProvider.select((w) => w.workspaces.length));
+    final agyConfig = ref.watch(agyConfigProvider);
+    final wsCount = ref.watch(
+      workspacesProvider.select((w) => w.workspaces.length),
+    );
     final colors = DshColors.of(context);
     final notifier = ref.read(settingsProvider.notifier);
 
@@ -95,10 +105,22 @@ class SettingsScreen extends ConsumerWidget {
     final storageValue = settings.phoneStorage
         ? (runtime.storage.granted ? '已挂载' : '需授权')
         : '未开启';
+    final permSummary = settings.toolPermission.isHighRisk
+        ? 'YOLO'
+        : settings.agentMode != AgyAgentMode.standard
+        ? settings.agentMode.label
+        : settings.toolPermission.label;
 
     return AppPage.list(
       title: '设置',
       children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          child: SearchCapsuleButton(
+            hint: '搜索设置、审批、MCP、壁纸…',
+            onTap: () => _push(context, const SettingsSearchPage()),
+          ),
+        ),
         const SettingsOverview(),
         SettingsSection(
           title: 'AI 与工作区',
@@ -115,16 +137,38 @@ class SettingsScreen extends ConsumerWidget {
               onTap: () => _push(context, const EngineScreen()),
             ),
             SettingsTile(
-              icon: AppIcons.permissions,
-              tint: SettingsHues.ai,
-              title: '命令与工具权限',
+              icon: settings.toolPermission.isHighRisk
+                  ? AppIcons.permissionRisky
+                  : AppIcons.permissions,
+              tint: settings.toolPermission.isHighRisk ? 3 : SettingsHues.ai,
+              title: '审批与执行模式',
               value: Text(
-                settings.autoApproveCommands ? '自动批准' : '标准审批',
-                style: settings.autoApproveCommands
-                    ? TextStyle(color: colors.warning)
+                permSummary,
+                style: settings.toolPermission.isHighRisk
+                    ? TextStyle(color: colors.danger)
                     : null,
               ),
               onTap: () => _push(context, const PermissionPage()),
+            ),
+            SettingsTile(
+              icon: AppIcons.plugin,
+              tint: SettingsHues.ai,
+              title: 'MCP 服务管理',
+              value: Text('${agyConfig.mcpServers.length} 个配置'),
+              onTap: () => _push(context, const McpServersPage()),
+            ),
+            SettingsTile(
+              icon: AppIcons.skill,
+              tint: SettingsHues.ai,
+              title: 'Skills 与记忆规则',
+              value: Text('${agyConfig.skills.length} 个技能'),
+              onTap: () => _push(context, const SkillsAndRulesPage()),
+            ),
+            SettingsTile(
+              icon: AppIcons.configure,
+              tint: SettingsHues.ai,
+              title: '引擎参数与规则 (settings.json)',
+              onTap: () => _push(context, const AgyEngineParamsPage()),
             ),
             SettingsTile(
               icon: AppIcons.workspace,
@@ -182,7 +226,7 @@ class SettingsScreen extends ConsumerWidget {
             SettingsTile(
               icon: AppIcons.theme,
               tint: SettingsHues.appearance,
-              title: '外观与配色',
+              title: '外观、配色与壁纸',
               value: Text(AppAccent.fromId(settings.accent).label),
               onTap: () => _push(context, const AppearancePage()),
             ),
@@ -228,6 +272,17 @@ class SettingsScreen extends ConsumerWidget {
               ],
               selected: settings.localeCode,
               onChanged: (code) => unawaited(notifier.setLocaleCode(code)),
+            ),
+            SettingsTile(
+              icon: AppIcons.notifications,
+              tint: SettingsHues.general,
+              title: '后台通知提醒',
+              value: Text(
+                settings.notifyOnApproval || settings.notifyOnTurnComplete
+                    ? '已开启'
+                    : '已关闭',
+              ),
+              onTap: () => _push(context, const NotificationSettingsPage()),
             ),
             SettingsSwitchTile(
               icon: AppIcons.sidebar,
@@ -592,6 +647,71 @@ class AppearancePage extends ConsumerWidget {
           ],
         ),
         SettingsSection(
+          title: '聊天壁纸',
+          footer: const Text(
+            '自定义图片会叠放在雾面玻璃底色之上，磨砂顶栏、抽屉和输入框会自动柔化背景细节。',
+          ),
+          children: [
+            SettingsTile(
+              icon: AppIcons.image,
+              tint: SettingsHues.appearance,
+              title: settings.wallpaperPath != null ? '更换聊天壁纸' : '选择聊天壁纸',
+              subtitle: settings.wallpaperPath != null
+                  ? settings.wallpaperPath!.split('/').last
+                  : '从手机相册选择一张图片作为对话背景',
+              onTap: () async {
+                final picked = await ref
+                    .read(systemToolsProvider.notifier)
+                    .pickImage();
+                if (picked != null && picked.path.isNotEmpty) {
+                  await notifier.setWallpaperPath(picked.path);
+                  if (context.mounted) {
+                    showBriefNotice(context, '已应用聊天壁纸');
+                  }
+                }
+              },
+            ),
+            if (settings.wallpaperPath != null) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                child: Row(
+                  children: [
+                    Text(
+                      '壁纸透明度',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Slider.adaptive(
+                        value: settings.wallpaperOpacity,
+                        min: 0.08,
+                        max: 0.55,
+                        onChanged: (v) =>
+                            unawaited(notifier.setWallpaperOpacity(v)),
+                      ),
+                    ),
+                    Text(
+                      '${(settings.wallpaperOpacity * 100).round()}%',
+                      style: AppType.monoLabel(
+                        color: DshColors.of(context).textTertiary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              SettingsTile(
+                icon: AppIcons.delete,
+                tint: 3,
+                title: '清除壁纸',
+                onTap: () async {
+                  await notifier.setWallpaperPath(null);
+                  if (context.mounted) showBriefNotice(context, '已恢复默认雾面背景');
+                },
+              ),
+            ],
+          ],
+        ),
+        SettingsSection(
           title: '视觉与性能',
           children: [
             SettingsSwitchTile(
@@ -695,31 +815,142 @@ class _AccentPill extends StatelessWidget {
 class PermissionPage extends ConsumerWidget {
   const PermissionPage({super.key});
 
+  IconData _modeIcon(AgyAgentMode mode) => switch (mode) {
+    AgyAgentMode.standard => AppIcons.permissions,
+    AgyAgentMode.acceptEdits => AppIcons.edit,
+    AgyAgentMode.auto => AppIcons.running,
+    AgyAgentMode.plan => AppIcons.planMode,
+  };
+
+  IconData _permIcon(AgyToolPermission perm) => switch (perm) {
+    AgyToolPermission.strict => AppIcons.safeMode,
+    AgyToolPermission.requestReview => AppIcons.permissions,
+    AgyToolPermission.proceedInSandbox => AppIcons.verified,
+    AgyToolPermission.alwaysProceed => AppIcons.permissionRisky,
+  };
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final autoApprove = ref.watch(
-      settingsProvider.select((s) => s.autoApproveCommands),
-    );
+    final settings = ref.watch(settingsProvider);
+    final notifier = ref.read(settingsProvider.notifier);
+    final dsh = DshColors.of(context);
+    final scheme = Theme.of(context).colorScheme;
+
     return AppPage.list(
-      title: '命令与工具权限',
-      subtitle: const Text('控制 Antigravity CLI 执行命令与文件改动前的确认策略'),
+      title: '审批与执行模式',
+      subtitle: const Text('全局默认策略，同步写入 ~/.gemini/antigravity-cli/settings.json'),
       children: [
         SettingsSection(
-          title: '默认审批策略',
+          title: '默认执行模式 (agentMode)',
           footer: const Text(
-            '标准审批会在运行命令、删除或写文件前弹出确认卡，保障手机与工作区安全；开启自动批准后，所有常规 ACP 权限请求将自动放行（手机操控的高风险拦截闸门始终独立生效）。',
+            '执行模式决定新对话默认如何协作：可在对话中随时通过输入框顶部状态胶囊、+ 面板或 /mode /plan 单独覆盖当前会话。',
           ),
           children: [
+            for (final mode in AgyAgentMode.values)
+              ListPageRow(
+                icon: _modeIcon(mode),
+                iconColor: mode == settings.agentMode ? scheme.primary : null,
+                title: mode.label,
+                subtitle: mode.description,
+                subtitleMaxLines: 2,
+                trailing: Icon(
+                  mode == settings.agentMode
+                      ? AppIcons.radioOn
+                      : AppIcons.radioOff,
+                  size: 20,
+                  color: mode == settings.agentMode
+                      ? scheme.primary
+                      : dsh.textTertiary,
+                ),
+                chevron: false,
+                onTap: () => unawaited(notifier.setAgentMode(mode)),
+              ),
+          ],
+        ),
+        SettingsSection(
+          title: '工具权限预设 (toolPermission)',
+          footer: const Text(
+            '「完全放行 (YOLO)」会在启动本机 agy 时附加 --dangerously-skip-permissions 并跳过常规工具审批；手机操控的银行/支付安全闸门仍独立强制生效。',
+          ),
+          children: [
+            for (final perm in AgyToolPermission.values)
+              ListPageRow(
+                icon: _permIcon(perm),
+                iconColor: perm.isHighRisk
+                    ? dsh.danger
+                    : (perm == settings.toolPermission ? scheme.primary : null),
+                title: perm.label,
+                subtitle: perm.description,
+                subtitleMaxLines: 2,
+                danger: perm.isHighRisk && perm == settings.toolPermission,
+                trailing: Icon(
+                  perm == settings.toolPermission
+                      ? AppIcons.radioOn
+                      : AppIcons.radioOff,
+                  size: 20,
+                  color: perm == settings.toolPermission
+                      ? (perm.isHighRisk ? dsh.danger : scheme.primary)
+                      : dsh.textTertiary,
+                ),
+                chevron: false,
+                onTap: () async {
+                  if (perm.isHighRisk && settings.toolPermission != perm) {
+                    final confirmed = await confirmHighRiskAction(
+                      context,
+                      title: '将「完全放行 (YOLO)」设为默认？',
+                      body:
+                          '开启后每次启动本机 Antigravity CLI 与新建对话都将跳过命令、改文件、联网和 MCP 的逐次确认。仅建议在受控工作区内启用。',
+                      confirmLabel: '确认开启',
+                    );
+                    if (!confirmed) return;
+                  }
+                  await notifier.setToolPermission(perm);
+                },
+              ),
+          ],
+        ),
+        SettingsSection(
+          title: '工作流与细粒度规则',
+          children: [
+            SettingsSegmentTile<AgyArtifactReviewPolicy>(
+              icon: AppIcons.plan,
+              tint: SettingsHues.ai,
+              title: '计划产物审核策略',
+              segments: const [
+                PillSegment(AgyArtifactReviewPolicy.asksForReview, '等待审核'),
+                PillSegment(AgyArtifactReviewPolicy.alwaysProceed, '自动继续'),
+              ],
+              selected: settings.artifactReviewPolicy,
+              onChanged: (v) => unawaited(notifier.setArtifactReviewPolicy(v)),
+            ),
+            SettingsSegmentTile<AgyQueuedMessageBehavior>(
+              icon: AppIcons.queued,
+              tint: SettingsHues.ai,
+              title: '生成中再发消息',
+              segments: const [
+                PillSegment(AgyQueuedMessageBehavior.queue, '排队等本轮完'),
+                PillSegment(AgyQueuedMessageBehavior.steer, '立即插话引导'),
+              ],
+              selected: settings.queuedBehavior,
+              onChanged: (v) => unawaited(notifier.setQueuedBehavior(v)),
+            ),
             SettingsSwitchTile(
-              icon: autoApprove
-                  ? AppIcons.permissionRisky
-                  : AppIcons.permissions,
-              tint: autoApprove ? 3 : SettingsHues.ai,
-              title: '自动批准命令与工具调用',
-              subtitle: autoApprove ? '已开启：无需逐次确认（注意安全）' : '已关闭：高危操作前逐次确认',
-              value: autoApprove,
-              onChanged: (v) => unawaited(
-                ref.read(settingsProvider.notifier).setAutoApproveCommands(v),
+              icon: AppIcons.folderOpen,
+              tint: SettingsHues.ai,
+              title: '允许访问工作区外目录',
+              subtitle: '对应 settings.json 的 allowNonWorkspaceAccess',
+              value: settings.allowNonWorkspaceAccess,
+              onChanged: (v) => unawaited(notifier.setAllowNonWorkspaceAccess(v)),
+            ),
+            SettingsTile(
+              icon: AppIcons.configure,
+              tint: SettingsHues.ai,
+              title: '配置 allow / ask / deny 规则与 settings.json',
+              subtitle: '按命令、文件路径、域名与 MCP 工具精细控制权限',
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const AgyEngineParamsPage(),
+                ),
               ),
             ),
           ],
@@ -737,6 +968,67 @@ class PermissionPage extends ConsumerWidget {
                   builder: (_) => const PhoneControlScreen(),
                 ),
               ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// Notification settings for background turn completion & urgent permission prompts.
+class NotificationSettingsPage extends ConsumerWidget {
+  const NotificationSettingsPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
+    final notifier = ref.read(settingsProvider.notifier);
+
+    return AppPage.list(
+      title: '后台通知提醒',
+      subtitle: const Text('切出应用或锁屏运行长任务时及时提醒你回来查看或审批'),
+      children: [
+        SettingsSection(
+          title: '通知事件',
+          footer: const Text(
+            '仅在 AGY Go 退到后台或锁屏时推送 Android 系统通知；在前台聊天时不会打扰。',
+          ),
+          children: [
+            SettingsSwitchTile(
+              icon: AppIcons.approval,
+              tint: 3,
+              title: '等待审批确认时高优提醒',
+              subtitle: '工具执行或命令需要你点击允许时发出高优先级通知',
+              value: settings.notifyOnApproval,
+              onChanged: (v) => unawaited(notifier.setNotifyOnApproval(v)),
+            ),
+            SettingsSwitchTile(
+              icon: AppIcons.notificationsOn,
+              tint: SettingsHues.general,
+              title: '长任务回复完成提醒',
+              subtitle: '一轮生成结束后推送完成通知',
+              value: settings.notifyOnTurnComplete,
+              onChanged: (v) => unawaited(notifier.setNotifyOnTurnComplete(v)),
+            ),
+          ],
+        ),
+        SettingsSection(
+          title: '调试',
+          children: [
+            SettingsTile(
+              icon: AppIcons.notifications,
+              tint: SettingsHues.general,
+              title: '发送测试通知',
+              subtitle: '检查系统通知栏与权限是否正常放行',
+              onTap: () async {
+                await ref.read(systemToolsProvider.notifier).notifyTurnEvent(
+                  title: 'AGY Go 通知测试',
+                  body: '当后台任务完成或等待审批时，你将收到类似提醒。',
+                  urgent: false,
+                );
+                if (context.mounted) showBriefNotice(context, '已发送测试通知');
+              },
             ),
           ],
         ),
@@ -1036,16 +1328,119 @@ class AboutPage extends ConsumerWidget {
               icon: AppIcons.checkUpdate,
               tint: SettingsHues.help,
               title: '检查应用更新',
-              subtitle: '查看保活引导与 GitHub 更新',
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => const KeepAliveScreen(),
-                ),
-              ),
+              subtitle: '查询最新版本并在应用内下载安装',
+              onTap: () => unawaited(showUpdateSheet(context, ref)),
             ),
           ],
         ),
       ],
+    );
+  }
+}
+
+/// In-app update sheet checking GitHub latest release & invoking Android APK installer.
+Future<void> showUpdateSheet(BuildContext context, WidgetRef ref) {
+  unawaited(ref.read(systemToolsProvider.notifier).checkAppUpdate());
+  return showAppSheet<void>(
+    context,
+    isScrollControlled: true,
+    builder: (sheet) => const _UpdateSheetBody(),
+  );
+}
+
+class _UpdateSheetBody extends ConsumerWidget {
+  const _UpdateSheetBody();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final sys = ref.watch(systemToolsProvider);
+    final rel = sys.latestRelease;
+    final theme = Theme.of(context);
+    final dsh = DshColors.of(context);
+
+    return SafeArea(
+      top: false,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.only(bottom: 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const SheetHeader('检查应用更新'),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '当前版本：v${sys.device.versionName} (build ${sys.device.versionCode})',
+                    style: AppType.monoLabel(color: dsh.textTertiary),
+                  ),
+                  const SizedBox(height: 12),
+                  if (sys.checkingUpdate)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 20),
+                      child: Center(child: CircularProgressIndicator.adaptive()),
+                    )
+                  else if (sys.updateError != null)
+                    Text(
+                      '检查失败：${sys.updateError}',
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: dsh.danger,
+                      ),
+                    )
+                  else if (rel != null) ...[
+                    Text(
+                      rel.isNewer ? '发现新版本 ${rel.tagName}' : '当前已是最新版本',
+                      style: theme.textTheme.titleMedium,
+                    ),
+                    if (rel.releaseNotes.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        rel.releaseNotes,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: dsh.textTertiary,
+                          height: 1.5,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    if (rel.isNewer && rel.apkUrl != null)
+                      FilledButton.icon(
+                        icon: sys.installingUpdate
+                            ? const SizedBox.square(
+                                dimension: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(AppIcons.download, size: 18),
+                        label: Text(sys.installingUpdate ? '下载安装中…' : '下载并安装更新'),
+                        onPressed: sys.installingUpdate
+                            ? null
+                            : () => unawaited(
+                                ref
+                                    .read(systemToolsProvider.notifier)
+                                    .downloadAndInstallUpdate(),
+                              ),
+                      )
+                    else
+                      OutlinedButton.icon(
+                        icon: const Icon(AppIcons.refresh, size: 17),
+                        label: const Text('重新检查'),
+                        onPressed: () => unawaited(
+                          ref
+                              .read(systemToolsProvider.notifier)
+                              .checkAppUpdate(),
+                        ),
+                      ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

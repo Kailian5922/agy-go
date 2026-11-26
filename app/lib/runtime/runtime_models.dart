@@ -96,6 +96,7 @@ class RuntimeStatus {
     this.installedVersion,
     this.workspacePath,
     this.homePath,
+    this.binPath,
     this.phoneStorageEnabled = false,
     this.phoneStorageGranted = false,
     this.phoneStorageMounted = false,
@@ -118,6 +119,7 @@ class RuntimeStatus {
     installedVersion: raw['installedVersion'] as String?,
     workspacePath: raw['workspacePath'] as String?,
     homePath: raw['homePath'] as String?,
+    binPath: raw['binPath'] as String?,
     phoneStorageEnabled: raw['phoneStorageEnabled'] == true,
     phoneStorageGranted: raw['phoneStorageGranted'] == true,
     phoneStorageMounted: raw['phoneStorageMounted'] == true,
@@ -137,6 +139,7 @@ class RuntimeStatus {
   final String? installedVersion;
   final String? workspacePath;
   final String? homePath;
+  final String? binPath;
   final bool phoneStorageEnabled;
   final bool phoneStorageGranted;
   final bool phoneStorageMounted;

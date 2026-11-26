@@ -3,94 +3,45 @@
 // Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
 
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:acp_client/acp_client.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../state/chat_state.dart';
+import '../../state/commands_state.dart';
 import '../../state/phone_state.dart';
+import '../../state/sessions_state.dart';
 import '../../state/settings_state.dart';
+import '../../state/system_state.dart';
 import '../../state/voice_state.dart';
 import '../../state/workspace_state.dart';
 import '../../state/workspaces_state.dart';
+import '../common/app_dialog.dart';
 import '../common/app_sheet.dart';
+import '../common/brief_notice.dart';
 import '../common/expand_reveal.dart';
 import '../common/list_page_row.dart';
 import '../common/pressable.dart';
+import '../common/sheet_navigator.dart';
 import '../common/smooth_size.dart';
-import '../phone/phone_control_screen.dart';
+import '../features/agy_extensions_pages.dart';
 import '../shell/drawer_destination.dart';
+import '../shell/session_search_page.dart';
 import '../theme/theme.dart';
 import '../workspace/workspaces_ui.dart';
-
-class _SlashItem {
-  const _SlashItem({
-    required this.name,
-    required this.label,
-    required this.description,
-    required this.icon,
-    this.local = false,
-  });
-
-  final String name;
-  final String label;
-  final String description;
-  final IconData icon;
-  final bool local;
-}
-
-const _localSlashItems = <_SlashItem>[
-  _SlashItem(
-    name: 'new',
-    label: '新对话',
-    description: '回到新对话界面',
-    icon: AppIcons.newChat,
-    local: true,
-  ),
-  _SlashItem(
-    name: 'workspace',
-    label: '切换工作区',
-    description: '选择本机目录或已挂载手机存储',
-    icon: AppIcons.workspace,
-    local: true,
-  ),
-  _SlashItem(
-    name: 'files',
-    label: '打开工作区文件',
-    description: '浏览、编辑或新建文件',
-    icon: AppIcons.files,
-    local: true,
-  ),
-  _SlashItem(
-    name: 'terminal',
-    label: '打开终端',
-    description: '启动本机或 SSH 交互终端',
-    icon: AppIcons.terminal,
-    local: true,
-  ),
-  _SlashItem(
-    name: 'phone',
-    label: '手机操控',
-    description: '配置无障碍 MCP 服务与安全闸门',
-    icon: AppIcons.phoneControl,
-    local: true,
-  ),
-  _SlashItem(
-    name: 'share',
-    label: '分享与导出',
-    description: '生成脱敏分享卡、Markdown 或回放包',
-    icon: AppIcons.share,
-    local: true,
-  ),
-];
+import 'chat_header.dart';
+import 'diff_and_output_page.dart';
+import 'permission_controls.dart';
 
 /// Floating 28dp chrome-glass message composer mirroring DSH Go's Composer:
-/// - Concentric 36dp `+` button opening the frosted PlusPanel
-/// - Expanding QuoteChip tray when quoting a message
-/// - Floating glass `/` SlashPalette and `@` workspace file mention picker
-/// - Voice dictation status & 36dp right circle (mic / primary send / stop square)
+/// - Concentric 36dp `+` button opening nested SheetNavigator PlusPanel (相册/拍照/文件/指令/本对话审批)
+/// - Expanding QuoteChip, multimodal attachments strip & queued messages strip
+/// - Floating glass `/` SlashPalette (prefix-first + Chinese alias + Skills + PaletteHint) and `@` workspace picker
+/// - Voice dictation status & 36dp right circle (mic / primary send / mid-turn steer or queue / stop square)
 class ComposerBar extends ConsumerStatefulWidget {
   const ComposerBar({
     super.key,
@@ -119,7 +70,6 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
   TextEditingController? _ownedController;
   final _focusNode = FocusNode();
   bool _hasText = false;
-  String? _slashQuery;
   String? _mentionQuery;
 
   TextEditingController get _ctrl =>
@@ -152,80 +102,208 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
   void _onTextChanged() {
     final text = _ctrl.text;
     final has = text.trim().isNotEmpty;
-    String? slash;
     String? mention;
 
     final trimmedLeft = text.trimLeft();
-    if (trimmedLeft.startsWith('/') && !trimmedLeft.contains(' ') && !trimmedLeft.contains('\n')) {
-      slash = trimmedLeft.substring(1).toLowerCase();
-    } else {
+    if (!trimmedLeft.startsWith('/')) {
       final sel = _ctrl.selection.baseOffset;
-      final prefix = sel >= 0 && sel <= text.length ? text.substring(0, sel) : text;
+      final prefix = sel >= 0 && sel <= text.length
+          ? text.substring(0, sel)
+          : text;
       final m = RegExp(r'(?:^|\s)@([^\s@]*)$').firstMatch(prefix);
       if (m != null) {
         mention = m.group(1)!.toLowerCase();
       }
     }
 
-    if (has != _hasText || slash != _slashQuery || mention != _mentionQuery) {
+    if (has != _hasText || mention != _mentionQuery || trimmedLeft.startsWith('/')) {
       setState(() {
         _hasText = has;
-        _slashQuery = slash;
         _mentionQuery = mention;
       });
     }
   }
 
   void _submit() {
-    if (!widget.enabled || widget.isBusy) return;
+    final hasAttachments = ref.read(chatProvider).attachments.isNotEmpty;
     final text = _ctrl.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty && !hasAttachments) return;
 
-    // Handle local slash shortcuts directly.
-    if (text.startsWith('/')) {
-      final cmd = text.substring(1).trim().toLowerCase();
-      final local = _localSlashItems.where((i) => i.name == cmd).firstOrNull;
-      if (local != null) {
-        _ctrl.clear();
-        _runLocalCommand(local);
-        return;
+    // Intercept `/` slash commands before sending to the engine.
+    final commands = ref.read(slashCommandsProvider);
+    final parsed = parseSlashInput(text);
+    if (parsed != null) {
+      final exact = resolveSlashCommand(commands, parsed.token);
+      if (exact != null) {
+        final args = parsed.rest?.trim() ?? '';
+        if (exact.kind == SlashCommandKind.app) {
+          _ctrl.clear();
+          unawaited(_runAppCommand(exact.name, args));
+          return;
+        }
+        if (exact.name == 'plan' && args.isEmpty) {
+          _ctrl.clear();
+          unawaited(_togglePlanMode());
+          return;
+        }
+      } else if (!parsed.hasArgs && parsed.token.isNotEmpty) {
+        // Pressing send with partial `/tok` executes the highlighted top match (DSH Go ergonomics).
+        final matches = filterSlashCommands(commands, parsed.token);
+        if (matches.isNotEmpty) {
+          _pickSlash(matches.first);
+          return;
+        }
       }
     }
 
+    if (!widget.enabled) return;
     HapticFeedback.lightImpact();
     _ctrl.clear();
     unawaited(widget.onSend(text));
   }
 
-  void _runLocalCommand(_SlashItem item) {
-    switch (item.name) {
-      case 'new':
+  Future<void> _togglePlanMode() async {
+    final notifier = ref.read(chatProvider.notifier);
+    final next = notifier.effectiveAgentMode() == AgyAgentMode.plan
+        ? AgyAgentMode.standard
+        : AgyAgentMode.plan;
+    await notifier.setExecutionMode(next);
+    if (mounted) {
+      showBriefNotice(
+        context,
+        next == AgyAgentMode.plan ? '已切换到计划模式（只读规划）' : '已退出计划模式',
+      );
+    }
+  }
+
+  Future<void> _runAppCommand(String name, String args) async {
+    switch (name) {
+      case 'new' || 'clear':
         ref.read(chatProvider.notifier).startNewChat();
+        if (mounted) showBriefNotice(context, '已开启新对话');
+      case 'permissions' || 'mode':
+        await showApprovalModeSheet(context, ref);
+      case 'model' || 'effort':
+        await showModelModeSheet(context);
       case 'workspace':
-        unawaited(showWorkspaceSheet(context, ref));
+        await showWorkspaceSheet(context, ref);
+      case 'add-dir':
+        final dir = await showDirectoryPicker(
+          context,
+          title: '选择额外挂载目录',
+          confirmLabel: '挂载到本对话',
+        );
+        if (dir != null && dir.isNotEmpty && mounted) {
+          ref.read(chatProvider.notifier).addAdditionalDirectory(dir);
+          showBriefNotice(context, '已挂载额外目录：$dir');
+        }
+      case 'diff':
+        final transcript = ref.read(chatProvider).transcript;
+        if (!mounted) return;
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => DiffViewerPage.fromTranscript(transcript),
+          ),
+        );
+      case 'context' || 'usage':
+        await showContextUsageSheet(context, ref);
+      case 'resume':
+        final id = await showSessionSearch(context);
+        if (id != null && mounted) {
+          ref.read(sessionsProvider.notifier).selectSession(id);
+        }
       case 'files':
         widget.onOpenDestination?.call(DrawerDestination.files);
       case 'terminal':
         widget.onOpenDestination?.call(DrawerDestination.terminal);
+      case 'mcp':
+        if (!mounted) return;
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => const McpServersPage()),
+        );
+      case 'skills':
+        if (!mounted) return;
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => const SkillsAndRulesPage(initialTab: 0),
+          ),
+        );
+      case 'memory' || 'rules':
+        if (!mounted) return;
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => const SkillsAndRulesPage(initialTab: 1),
+          ),
+        );
+      case 'copy':
+        final lastReply = ref
+            .read(chatProvider)
+            .transcript
+            .items
+            .whereType<AssistantTranscriptItem>()
+            .where((i) => i.text.trim().isNotEmpty)
+            .lastOrNull;
+        if (lastReply == null) {
+          if (mounted) showBriefNotice(context, '当前对话还没有可复制的 AI 回复');
+        } else {
+          await Clipboard.setData(ClipboardData(text: lastReply.text));
+          if (mounted) showBriefNotice(context, '已复制上一条回复');
+        }
+      case 'rename':
+        final sid = ref.read(chatProvider).sessionId;
+        if (sid == null) {
+          if (mounted) showBriefNotice(context, '请先发送消息创建对话后再重命名');
+          return;
+        }
+        var nextTitle = args.trim();
+        if (nextTitle.isEmpty && mounted) {
+          final current = ref.read(sessionsProvider).currentSession;
+          final currentTitle = current != null
+              ? ref.read(sessionsProvider).displayTitle(current)
+              : '';
+          nextTitle = (await showTextPromptDialog(
+                    context,
+                    title: '重命名对话',
+                    initial: currentTitle,
+                    hint: '输入新标题',
+                    confirmLabel: '保存',
+                  ))
+                  ?.trim() ??
+              '';
+        }
+        if (nextTitle.isNotEmpty) {
+          await ref.read(sessionsProvider.notifier).renameSession(sid, nextTitle);
+          if (mounted) showBriefNotice(context, '已重命名为「$nextTitle」');
+        }
       case 'phone':
         widget.onOpenDestination?.call(DrawerDestination.phone);
-      case 'share':
+      case 'share' || 'export':
         widget.onOpenDestination?.call(DrawerDestination.share);
+      case 'config' || 'settings':
+        if (!mounted) return;
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => const AgyEngineParamsPage()),
+        );
+      case 'features':
+        widget.onOpenDestination?.call(DrawerDestination.features);
+      case 'logout':
+        final ok = await ref.read(chatProvider.notifier).logoutAgent();
+        if (mounted && ok) showBriefNotice(context, '已断开当前账号登录态');
     }
   }
 
-  void _pickSlash(_SlashItem item) {
-    if (item.local) {
+  void _pickSlash(SlashCommand item) {
+    if (item.kind == SlashCommandKind.app && !item.takesInput) {
       _ctrl.clear();
-      _runLocalCommand(item);
-    } else {
-      final next = '/${item.name} ';
-      _ctrl.value = TextEditingValue(
-        text: next,
-        selection: TextSelection.collapsed(offset: next.length),
-      );
-      _focusNode.requestFocus();
+      unawaited(_runAppCommand(item.name, ''));
+      return;
     }
+    final next = '/${item.name} ';
+    _ctrl.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: next.length),
+    );
+    _focusNode.requestFocus();
   }
 
   void _pickMention(String relativePath) {
@@ -245,15 +323,38 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
     _focusNode.requestFocus();
   }
 
+  Future<void> _attachFrom(Future<PickedMediaItem?> Function() picker) async {
+    final item = await picker();
+    if (!mounted || item == null) return;
+    ref.read(chatProvider.notifier).addAttachment(
+      ChatAttachment(
+        id: '${DateTime.now().microsecondsSinceEpoch}-${item.name}',
+        name: item.name,
+        path: item.path,
+        mimeType: item.mimeType,
+        sizeBytes: item.sizeBytes,
+        bytes: item.bytes,
+      ),
+    );
+  }
+
   Future<void> _openPlusPanel() async {
     _focusNode.unfocus();
     final choice = await showAppSheet<String>(
       context,
       isScrollControlled: true,
-      builder: (sheet) => const _PlusPanelBody(),
+      builder: (sheet) => SheetNavigator(
+        root: (_) => const _PlusPanelBody(),
+      ),
     );
     if (!mounted || choice == null) return;
     switch (choice) {
+      case 'gallery':
+        await _attachFrom(ref.read(systemToolsProvider.notifier).pickImage);
+      case 'camera':
+        await _attachFrom(ref.read(systemToolsProvider.notifier).capturePhoto);
+      case 'pick_file':
+        await _attachFrom(ref.read(systemToolsProvider.notifier).pickFile);
       case 'mention':
         final cur = _ctrl.text;
         final next = cur.isEmpty || cur.endsWith(' ') ? '$cur@' : '$cur @';
@@ -274,18 +375,63 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
         widget.onOpenDestination?.call(DrawerDestination.terminal);
       case 'workspace':
         unawaited(showWorkspaceSheet(context, ref));
+      case 'add_dir':
+        unawaited(_runAppCommand('add-dir', ''));
       case 'phone':
         widget.onOpenDestination?.call(DrawerDestination.phone);
     }
+  }
+
+  void _previewAttachment(ChatAttachment item) {
+    if (!item.isImage) return;
+    unawaited(
+      showAppDialog<void>(
+        context: context,
+        builder: (dialog) => Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(16),
+          child: Stack(
+            children: [
+              ClipRRect(
+                borderRadius: AppShape.radiusLg,
+                child: InteractiveViewer(
+                  child: item.bytes != null && item.bytes!.isNotEmpty
+                      ? Image.memory(item.bytes!, fit: BoxFit.contain)
+                      : Image.file(File(item.path), fit: BoxFit.contain),
+                ),
+              ),
+              Positioned(
+                top: 10,
+                right: 10,
+                child: GlassSurface(
+                  tier: GlassTier.chrome,
+                  circle: true,
+                  onTap: () => Navigator.of(dialog).pop(),
+                  child: const SizedBox.square(
+                    dimension: 36,
+                    child: Icon(AppIcons.close, size: 18),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final voice = ref.watch(voiceProvider);
     final quoted = ref.watch(chatProvider.select((c) => c.quotedText));
-    final acpCommands = ref.watch(
-      chatProvider.select((c) => c.transcript.availableCommands),
+    final attachments = ref.watch(chatProvider.select((c) => c.attachments));
+    final queued = ref.watch(chatProvider.select((c) => c.queuedMessages));
+    final queuedBehavior = ref.watch(
+      settingsProvider.select((s) => s.queuedBehavior),
     );
+    final commands = ref.watch(slashCommandsProvider);
+    final slashContent = SlashPaletteContent.of(commands, _ctrl.text);
+
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final dsh = DshColors.of(context);
@@ -305,26 +451,6 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
         }
       },
     );
-
-    final slashMatches = _slashQuery == null
-        ? const <_SlashItem>[]
-        : [
-            for (final c in acpCommands)
-              _SlashItem(
-                name: c.name,
-                label: '/${c.name}',
-                description: c.description ?? c.inputHint ?? '引擎指令',
-                icon: AppIcons.command,
-              ),
-            ..._localSlashItems,
-          ]
-              .where(
-                (i) =>
-                    _slashQuery!.isEmpty ||
-                    i.name.toLowerCase().contains(_slashQuery!) ||
-                    i.label.toLowerCase().contains(_slashQuery!),
-              )
-              .toList();
 
     final workspaceFiles = _mentionQuery == null
         ? const <String>[]
@@ -346,8 +472,10 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
     final line = MediaQuery.textScalerOf(context).scale(fontSize) * 1.45;
     final textPad = math.max(4.0, (keySize - line) / 2);
 
-    final showStop = widget.isBusy && !_hasText && !voice.isListening;
-    final showMic = !widget.isBusy && !_hasText && !voice.isListening;
+    final canSubmit = _hasText || attachments.isNotEmpty;
+    final showStop = widget.isBusy && !canSubmit && !voice.isListening;
+    final showMic = !widget.isBusy && !canSubmit && !voice.isListening;
+    final isMidTurnSend = widget.isBusy && canSubmit && !voice.isListening;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(
@@ -363,44 +491,122 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Floating `/` SlashPalette
-              if (_slashQuery != null)
+              // Floating `/` SlashPalette (matches or argument hint)
+              if (slashContent != null)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 6),
                   child: _FloatingPopover(
-                    child: slashMatches.isEmpty
-                        ? Padding(
-                            padding: const EdgeInsets.all(14),
-                            child: Text(
-                              '没有匹配的指令',
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: dsh.textTertiary,
+                    child: switch (slashContent) {
+                      SlashPaletteMatches(:final commands, :final typed) =>
+                        commands.isEmpty
+                            ? Padding(
+                                padding: const EdgeInsets.all(14),
+                                child: Text(
+                                  '没有匹配的指令（输入 / 查看全部 agy 指令与 Skill）',
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: dsh.textTertiary,
+                                  ),
+                                ),
+                              )
+                            : ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxHeight: 280,
+                                ),
+                                child: ListView.builder(
+                                  shrinkWrap: true,
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 6,
+                                  ),
+                                  itemCount: commands.length,
+                                  itemBuilder: (ctx, i) {
+                                    final item = commands[i];
+                                    final highlight = typed && i == 0;
+                                    return Container(
+                                      margin: const EdgeInsets.symmetric(
+                                        horizontal: 6,
+                                        vertical: 1,
+                                      ),
+                                      decoration: highlight
+                                          ? ShapeDecoration(
+                                              color: scheme.primary.withValues(
+                                                alpha: 0.12,
+                                              ),
+                                              shape: Squircle.border(12),
+                                            )
+                                          : null,
+                                      child: ListPageRow(
+                                        icon: item.icon,
+                                        iconColor: highlight
+                                            ? scheme.primary
+                                            : null,
+                                        title: item.label,
+                                        titleNote:
+                                            item.kind == SlashCommandKind.skill
+                                            ? 'Skill'
+                                            : null,
+                                        subtitle: item.description,
+                                        trailing: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Text(
+                                              '/${item.name}',
+                                              style: AppType.monoLabel(
+                                                color: highlight
+                                                    ? scheme.primary
+                                                    : dsh.textTertiary,
+                                              ),
+                                            ),
+                                            if (highlight) ...[
+                                              const SizedBox(width: 6),
+                                              Icon(
+                                                AppIcons.enterKey,
+                                                size: 13,
+                                                color: scheme.primary,
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                        chevron: false,
+                                        onTap: () => _pickSlash(item),
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ),
+                      SlashPaletteHint(:final command) => Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 10,
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              command.icon,
+                              size: 16,
+                              color: scheme.primary,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              '/${command.name}',
+                              style: AppType.monoLabel(
+                                color: scheme.primary,
+                              ).copyWith(fontWeight: FontWeight.w600),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                command.hint ?? command.description,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: dsh.textTertiary,
+                                ),
                               ),
                             ),
-                          )
-                        : ConstrainedBox(
-                            constraints: const BoxConstraints(maxHeight: 260),
-                            child: ListView.builder(
-                              shrinkWrap: true,
-                              padding: const EdgeInsets.symmetric(vertical: 6),
-                              itemCount: slashMatches.length,
-                              itemBuilder: (ctx, i) {
-                                final item = slashMatches[i];
-                                return ListPageRow(
-                                  icon: item.icon,
-                                  title: item.label,
-                                  subtitle: item.description,
-                                  trailing: Text(
-                                    '/${item.name}',
-                                    style: AppType.monoLabel(
-                                      color: dsh.textTertiary,
-                                    ),
-                                  ),
-                                  onTap: () => _pickSlash(item),
-                                );
-                              },
-                            ),
-                          ),
+                          ],
+                        ),
+                      ),
+                    },
                   ),
                 ),
 
@@ -474,6 +680,65 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                   ),
                 ),
 
+              // Queued mid-turn messages strip
+              if (queued.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final (idx, msg) in queued.indexed)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: GlassSurface(
+                            tier: GlassTier.chrome,
+                            stadium: true,
+                            child: SizedBox(
+                              height: 32,
+                              child: Row(
+                                children: [
+                                  const SizedBox(width: 10),
+                                  Icon(
+                                    AppIcons.queued,
+                                    size: 14,
+                                    color: scheme.primary,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    '排队 #${idx + 1}',
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                      color: scheme.primary,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
+                                      msg,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: theme.textTheme.bodySmall,
+                                    ),
+                                  ),
+                                  GestureDetector(
+                                    onTap: () => ref
+                                        .read(chatProvider.notifier)
+                                        .removeQueuedMessage(idx),
+                                    behavior: HitTestBehavior.opaque,
+                                    child: const SizedBox.square(
+                                      dimension: 32,
+                                      child: Icon(AppIcons.close, size: 14),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+
               // Main 28dp chrome-glass composer capsule
               GlassSurface(
                 tier: GlassTier.chrome,
@@ -484,6 +749,31 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      ExpandReveal(
+                        open: attachments.isNotEmpty,
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(6, 4, 6, 6),
+                          child: SizedBox(
+                            height: 58,
+                            child: ListView.separated(
+                              scrollDirection: Axis.horizontal,
+                              itemCount: attachments.length,
+                              separatorBuilder: (_, _) =>
+                                  const SizedBox(width: 8),
+                              itemBuilder: (ctx, i) {
+                                final item = attachments[i];
+                                return _AttachmentThumb(
+                                  item: item,
+                                  onTap: () => _previewAttachment(item),
+                                  onRemove: () => ref
+                                      .read(chatProvider.notifier)
+                                      .removeAttachment(item.id),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      ),
                       ExpandReveal(
                         open: quoted != null && quoted.isNotEmpty,
                         child: Padding(
@@ -533,7 +823,7 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                               child: TextField(
                                 controller: _ctrl,
                                 focusNode: _focusNode,
-                                enabled: widget.enabled || _hasText,
+                                enabled: widget.enabled || canSubmit,
                                 minLines: 1,
                                 maxLines: 6,
                                 keyboardType: TextInputType.multiline,
@@ -544,20 +834,26 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                                 ),
                                 cursorColor: scheme.primary,
                                 decoration: InputDecoration(
-                                  hintText: widget.hintText ??
+                                  hintText:
+                                      widget.hintText ??
                                       (voice.isListening
                                           ? '正在聆听…'
                                           : widget.enabled
                                           ? (widget.isBusy
-                                                ? '生成中… 输入可补充或点击右侧停止'
+                                                ? (queuedBehavior ==
+                                                          AgyQueuedMessageBehavior
+                                                              .steer
+                                                      ? '生成中… 输入发送可立即插话引导'
+                                                      : '生成中… 输入可排队，留空点击停止')
                                                 : '给 Antigravity 发消息，或输入 / 与 @…')
                                           : '连接引擎后发送消息…'),
                                   hintMaxLines: 1,
-                                  hintStyle: theme.textTheme.bodyLarge?.copyWith(
-                                    fontSize: fontSize,
-                                    color: dsh.textTertiary,
-                                    height: 1.45,
-                                  ),
+                                  hintStyle: theme.textTheme.bodyLarge
+                                      ?.copyWith(
+                                        fontSize: fontSize,
+                                        color: dsh.textTertiary,
+                                        height: 1.45,
+                                      ),
                                   filled: false,
                                   isDense: true,
                                   border: InputBorder.none,
@@ -571,18 +867,19 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            // Concentric 36dp Send / Stop / Mic circle button
+                            // Concentric 36dp Send / Mid-turn Steer-or-Queue / Stop / Mic circle button
                             Pressable(
-                              enabled: showMic ||
+                              enabled:
+                                  showMic ||
                                   showStop ||
                                   voice.isListening ||
-                                  (widget.enabled && _hasText),
+                                  canSubmit,
                               child: Material(
                                 color: showStop || voice.isListening
                                     ? scheme.primary
                                     : showMic
                                     ? scheme.onSurface.withValues(alpha: 0.06)
-                                    : (widget.enabled && _hasText)
+                                    : canSubmit
                                     ? scheme.primary
                                     : surfaces.card.fallbackFill,
                                 shape: const CircleBorder(),
@@ -602,7 +899,7 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                                       ? () => ref
                                             .read(voiceProvider.notifier)
                                             .toggleListening()
-                                      : (widget.enabled && _hasText)
+                                      : canSubmit
                                       ? _submit
                                       : null,
                                   child: SizedBox.square(
@@ -612,6 +909,12 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                                           ? AppIcons.stopGenerating
                                           : showMic
                                           ? AppIcons.voice
+                                          : isMidTurnSend
+                                          ? (queuedBehavior ==
+                                                    AgyQueuedMessageBehavior
+                                                        .steer
+                                                ? AppIcons.steer
+                                                : AppIcons.queued)
                                           : AppIcons.send,
                                       size: showStop || voice.isListening
                                           ? 16
@@ -620,7 +923,7 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                                           ? scheme.onPrimary
                                           : showMic
                                           ? scheme.onSurfaceVariant
-                                          : (widget.enabled && _hasText)
+                                          : canSubmit
                                           ? scheme.onPrimary
                                           : dsh.textDisabled,
                                     ),
@@ -638,6 +941,105 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _AttachmentThumb extends StatelessWidget {
+  const _AttachmentThumb({
+    required this.item,
+    required this.onTap,
+    required this.onRemove,
+  });
+
+  final ChatAttachment item;
+  final VoidCallback onTap;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final dsh = DshColors.of(context);
+
+    if (item.isImage) {
+      return Stack(
+        clipBehavior: Clip.none,
+        children: [
+          GestureDetector(
+            onTap: onTap,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox.square(
+                dimension: 54,
+                child: item.bytes != null && item.bytes!.isNotEmpty
+                    ? Image.memory(item.bytes!, fit: BoxFit.cover)
+                    : Image.file(
+                        File(item.path),
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => Container(
+                          color: scheme.surfaceContainerHighest,
+                          child: const Icon(AppIcons.imageBroken, size: 20),
+                        ),
+                      ),
+              ),
+            ),
+          ),
+          Positioned(
+            top: -4,
+            right: -4,
+            child: GestureDetector(
+              onTap: onRemove,
+              child: Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  color: scheme.inverseSurface,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  AppIcons.close,
+                  size: 12,
+                  color: scheme.onInverseSurface,
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 168),
+      padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
+      decoration: ShapeDecoration(
+        color: scheme.onSurface.withValues(alpha: 0.06),
+        shape: Squircle.border(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(AppIcons.file, size: 16, color: scheme.primary),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              item.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: scheme.onSurface,
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          GestureDetector(
+            onTap: onRemove,
+            child: Padding(
+              padding: const EdgeInsets.all(2),
+              child: Icon(AppIcons.close, size: 14, color: dsh.textTertiary),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -725,16 +1127,28 @@ class _PlusPanelBody extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final selectedWs = ref.watch(selectedWorkspaceProvider);
-    final autoApprove = ref.watch(
-      settingsProvider.select((s) => s.autoApproveCommands),
-    );
+    final settings = ref.watch(settingsProvider);
+    final chat = ref.watch(chatProvider);
     final phoneOn = ref.watch(phoneControlProvider.select((p) => p.enabled));
     final dsh = DshColors.of(context);
 
-    final tiles = [
-      ('mention', AppIcons.mention, '引用文件', 0),
-      ('slash', AppIcons.command, '斜杠指令', 2),
-      ('files', AppIcons.files, '工作区文件', 4),
+    final activeMode = chat.sessionAgentMode ?? settings.agentMode;
+    final activePerm = chat.sessionToolPermission ?? settings.toolPermission;
+    final planOn = activeMode == AgyAgentMode.plan;
+    final modeSummary = activePerm == AgyToolPermission.alwaysProceed
+        ? 'YOLO · 完全放行'
+        : '${activeMode.label} · ${activePerm.label}';
+
+    final primaryTiles = [
+      ('gallery', AppIcons.gallery, '相册', 1),
+      ('camera', AppIcons.camera, '拍照', 3),
+      ('pick_file', AppIcons.fileNew, '附件', 4),
+      ('slash', AppIcons.command, '指令 /', 0),
+    ];
+
+    final secondaryTiles = [
+      ('mention', AppIcons.mention, '引用 @', 2),
+      ('files', AppIcons.files, '工作区文件', 5),
       ('terminal', AppIcons.terminal, '终端', 6),
     ];
 
@@ -747,11 +1161,11 @@ class _PlusPanelBody extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
               child: Row(
                 spacing: 8,
                 children: [
-                  for (final (id, icon, label, tint) in tiles)
+                  for (final (id, icon, label, tint) in primaryTiles)
                     Expanded(
                       child: _PlusTile(
                         icon: icon,
@@ -763,9 +1177,61 @@ class _PlusPanelBody extends ConsumerWidget {
                 ],
               ),
             ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: Row(
+                spacing: 8,
+                children: [
+                  for (final (id, icon, label, tint) in secondaryTiles)
+                    Expanded(
+                      child: _PlusTile(
+                        icon: icon,
+                        label: label,
+                        tint: tint,
+                        compact: true,
+                        onTap: () => Navigator.of(context).pop(id),
+                      ),
+                    ),
+                ],
+              ),
+            ),
             SheetGroup(
               title: '本对话',
               children: [
+                ListPageRow(
+                  icon: activePerm.isHighRisk
+                      ? AppIcons.permissionRisky
+                      : AppIcons.permissions,
+                  iconColor: activePerm.isHighRisk ? dsh.danger : null,
+                  title: '审批与执行模式',
+                  subtitle: modeSummary,
+                  subtitleColor: activePerm.isHighRisk ? dsh.danger : null,
+                  onTap: () => SheetNavigator.of(context).push(
+                    (_) => const ApprovalModeSheetBody(),
+                  ),
+                ),
+                ListPageRow(
+                  icon: AppIcons.planMode,
+                  title: '计划模式 (Plan)',
+                  subtitle: planOn ? '已开启：只读调研，先出方案再执行' : '先调研并生成可审核的实施方案',
+                  trailing: Switch.adaptive(
+                    value: planOn,
+                    onChanged: (v) => unawaited(
+                      ref
+                          .read(chatProvider.notifier)
+                          .setExecutionMode(
+                            v ? AgyAgentMode.plan : AgyAgentMode.standard,
+                          ),
+                    ),
+                  ),
+                  onTap: () => unawaited(
+                    ref
+                        .read(chatProvider.notifier)
+                        .setExecutionMode(
+                          planOn ? AgyAgentMode.standard : AgyAgentMode.plan,
+                        ),
+                  ),
+                ),
                 ListPageRow(
                   icon: AppIcons.workspace,
                   title: '工作区目录',
@@ -785,22 +1251,16 @@ class _PlusPanelBody extends ConsumerWidget {
                   onTap: () => Navigator.of(context).pop('workspace'),
                 ),
                 ListPageRow(
-                  icon: AppIcons.permissions,
-                  title: '命令自动批准',
-                  subtitle: autoApprove ? '高风险操作仍建议审慎确认' : '敏感工具调用前弹出确认卡',
-                  trailing: Switch.adaptive(
-                    value: autoApprove,
-                    onChanged: (v) => ref
-                        .read(settingsProvider.notifier)
-                        .setAutoApproveCommands(v),
-                  ),
-                  onTap: () => ref
-                      .read(settingsProvider.notifier)
-                      .setAutoApproveCommands(!autoApprove),
+                  icon: AppIcons.newFolder,
+                  title: '挂载额外目录 (--add-dir)',
+                  value: chat.additionalDirectories.isEmpty
+                      ? null
+                      : '${chat.additionalDirectories.length} 个',
+                  onTap: () => Navigator.of(context).pop('add_dir'),
                 ),
                 ListPageRow(
                   icon: AppIcons.phoneControl,
-                  title: '手机操控（MCP）',
+                  title: '手机操控 (MCP)',
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -814,14 +1274,7 @@ class _PlusPanelBody extends ConsumerWidget {
                       const Icon(AppIcons.disclosure, size: 16),
                     ],
                   ),
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const PhoneControlScreen(),
-                      ),
-                    );
-                  },
+                  onTap: () => Navigator.of(context).pop('phone'),
                 ),
               ],
             ),
@@ -838,52 +1291,71 @@ class _PlusTile extends StatelessWidget {
     required this.label,
     required this.tint,
     required this.onTap,
+    this.compact = false,
   });
 
   final IconData icon;
   final String label;
   final int tint;
   final VoidCallback onTap;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     final dsh = DshColors.of(context);
     final bg = dsh.identity[tint % dsh.identity.length];
     final fg = dsh.onIdentity[tint % dsh.onIdentity.length];
+    final dark = Theme.of(context).brightness == Brightness.dark;
+
     return Pressable(
       child: Material(
-        type: MaterialType.transparency,
+        color: bg.withValues(alpha: dark ? 0.35 : 0.65),
+        shape: const RoundedSuperellipseBorder(borderRadius: AppShape.radiusLg),
+        clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onTap,
-          customBorder: const SquircleBorder(borderRadius: AppShape.radiusLg),
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                DecoratedBox(
-                  decoration: ShapeDecoration(
-                    color: bg,
-                    shape: const SquircleBorder(
-                      borderRadius: AppShape.radiusLg,
-                    ),
-                  ),
-                  child: SizedBox.square(
-                    dimension: 56,
-                    child: Icon(icon, size: 24, color: fg),
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
+            padding: EdgeInsets.symmetric(
+              vertical: compact ? 10 : 14,
+              horizontal: 6,
             ),
+            child: compact
+                ? Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(icon, size: 17, color: fg),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelMedium
+                              ?.copyWith(
+                                color: fg,
+                                fontWeight: FontWeight.w600,
+                              ),
+                        ),
+                      ),
+                    ],
+                  )
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(icon, size: 22, color: fg),
+                      const SizedBox(height: 6),
+                      Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelMedium
+                            ?.copyWith(
+                              color: fg,
+                              fontWeight: FontWeight.w600,
+                            ),
+                      ),
+                    ],
+                  ),
           ),
         ),
       ),

@@ -1,10 +1,14 @@
 // Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
 
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../state/chat_state.dart';
 import '../../state/sessions_state.dart';
+import '../chat/diff_and_output_page.dart';
+import '../chat/permission_controls.dart';
 import '../chat/session_detail_page.dart';
 import '../common/app_sheet.dart' show groupTitleStyle;
 import '../common/list_page_row.dart';
@@ -15,6 +19,7 @@ import '../pet/starling_pet.dart';
 import '../phone/phone_control_screen.dart';
 import '../remote/ssh_hosts_screen.dart';
 import '../settings/settings_screen.dart';
+import '../settings/settings_search_page.dart';
 import '../share/share_screen.dart';
 import '../shell/page_frame.dart';
 import '../shell/session_search_page.dart';
@@ -23,6 +28,7 @@ import '../terminal/terminal_screen.dart';
 import '../theme/theme.dart';
 import '../workspace/workspace_screen.dart';
 import '../workspace/workspaces_ui.dart';
+import 'agy_extensions_pages.dart';
 
 /// All Features hub mirroring DSH Go's AllFeaturesPage (2-column FeatureCard TileGrid).
 class AllFeaturesPage extends ConsumerWidget {
@@ -40,7 +46,14 @@ class AllFeaturesPage extends ConsumerWidget {
 
     return AppPage.list(
       title: '全部功能',
-      subtitle: const Text('所有本机引擎、工作区、远程与辅助能力'),
+      subtitle: const Text('所有 Antigravity 引擎、审批、扩展、工作区与辅助能力'),
+      actions: [
+        GlassIconButton(
+          icon: AppIcons.search,
+          tooltip: '搜索设置与功能',
+          onPressed: () => _push(context, const SettingsSearchPage()),
+        ),
+      ],
       children: [
         OverviewCard(
           margin: const EdgeInsets.symmetric(horizontal: 16),
@@ -55,7 +68,7 @@ class AllFeaturesPage extends ConsumerWidget {
           ),
           subtitle: Text(
             hasSession
-                ? '点击返回对话，或查看下方对话详情、文件与导出'
+                ? '点击返回对话，或查看下方对话详情、变更 Diff 与上下文用量'
                 : '从首页开始新对话，或直接进入下方工具',
           ),
           onTap: hasSession
@@ -69,9 +82,35 @@ class AllFeaturesPage extends ConsumerWidget {
               icon: AppIcons.sessionDetails,
               tint: 0,
               title: '对话详情',
-              subtitle: '工具轨迹、目录与用量',
+              subtitle: '计划清单、工具轨迹与目录',
               enabled: hasSession,
               onTap: () => _push(context, const SessionDetailPage()),
+            ),
+            FeatureCard(
+              icon: AppIcons.diff,
+              tint: 3,
+              title: '变更 Diff',
+              subtitle: '全屏审阅本对话文件差异',
+              enabled: hasSession,
+              onTap: () => _push(
+                context,
+                DiffViewerPage.fromTranscript(chat.transcript),
+              ),
+            ),
+            FeatureCard(
+              icon: AppIcons.diagnostics,
+              tint: 1,
+              title: '上下文与用量',
+              subtitle: 'Token 进度条与一键 /compact',
+              enabled: hasSession,
+              onTap: () => unawaited(showContextUsageSheet(context, ref)),
+            ),
+            FeatureCard(
+              icon: AppIcons.permissions,
+              tint: 4,
+              title: '审批与执行模式',
+              subtitle: 'Plan / Auto / YOLO 模式切换',
+              onTap: () => unawaited(showApprovalModeSheet(context, ref)),
             ),
             FeatureCard(
               icon: AppIcons.files,
@@ -83,13 +122,39 @@ class AllFeaturesPage extends ConsumerWidget {
             FeatureCard(
               icon: AppIcons.terminal,
               tint: 6,
-              title: '远程终端',
-              subtitle: 'SSH PTY 交互终端',
+              title: '本机 / SSH 终端',
+              subtitle: '内置 agy PATH 与快捷按键条',
               onTap: () => _push(context, const TerminalScreen()),
+            ),
+          ],
+        ),
+        const _SectionLabel('Antigravity 扩展与规则'),
+        TileGrid(
+          children: [
+            FeatureCard(
+              icon: AppIcons.plugin,
+              tint: 2,
+              title: 'MCP 服务',
+              subtitle: '管理 Stdio / HTTP / SSE 扩展',
+              onTap: () => _push(context, const McpServersPage()),
+            ),
+            FeatureCard(
+              icon: AppIcons.skill,
+              tint: 0,
+              title: 'Skills 与规则',
+              subtitle: '管理 SKILL.md 与 GEMINI.md',
+              onTap: () => _push(context, const SkillsAndRulesPage()),
+            ),
+            FeatureCard(
+              icon: AppIcons.configure,
+              tint: 5,
+              title: '引擎参数',
+              subtitle: 'allow/ask/deny 与 settings.json',
+              onTap: () => _push(context, const AgyEngineParamsPage()),
             ),
             FeatureCard(
               icon: AppIcons.share,
-              tint: 2,
+              tint: 1,
               title: '分享与回放',
               subtitle: '长图卡片、脱敏导出与回放',
               onTap: () => _push(context, const ShareScreen()),
@@ -174,7 +239,7 @@ class AllFeaturesPage extends ConsumerWidget {
             ListPageRow(
               icon: AppIcons.settings,
               title: '全部设置',
-              subtitle: '认证、外观、权限、系统权限与诊断',
+              subtitle: '认证、审批、外观壁纸、通知与系统权限',
               onTap: () => _push(context, const SettingsScreen()),
             ),
           ],

@@ -76,6 +76,23 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
           ),
         );
       }
+      if (prev == null ||
+          prev.loaded != next.loaded ||
+          prev.agentMode != next.agentMode ||
+          prev.toolPermission != next.toolPermission ||
+          prev.artifactReviewPolicy != next.artifactReviewPolicy ||
+          prev.allowNonWorkspaceAccess != next.allowNonWorkspaceAccess ||
+          prev.queuedBehavior != next.queuedBehavior) {
+        unawaited(
+          channel.setExecutionPolicy(
+            agentMode: next.agentMode.wireValue,
+            toolPermission: next.toolPermission.wireValue,
+            artifactReviewPolicy: next.artifactReviewPolicy.wireValue,
+            allowNonWorkspaceAccess: next.allowNonWorkspaceAccess,
+            queuedMessages: next.queuedBehavior.wireValue,
+          ),
+        );
+      }
       if (prev == null || prev.phoneStorage != next.phoneStorage) {
         unawaited(channel.setPhoneStorage(next.phoneStorage));
       }
@@ -104,6 +121,13 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
         mode: settings.authMode.wireValue,
         apiKey: settings.apiKey,
         baseUrl: settings.customBaseUrl,
+      );
+      await channel.setExecutionPolicy(
+        agentMode: settings.agentMode.wireValue,
+        toolPermission: settings.toolPermission.wireValue,
+        artifactReviewPolicy: settings.artifactReviewPolicy.wireValue,
+        allowNonWorkspaceAccess: settings.allowNonWorkspaceAccess,
+        queuedMessages: settings.queuedBehavior.wireValue,
       );
       await channel.setPhoneStorage(settings.phoneStorage);
     }

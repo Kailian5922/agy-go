@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -6,6 +8,30 @@ plugins {
 
 // Optional PRoot Linux rootfs bundles built by runtime/build-rootfs.sh.
 val runtimeOut = rootProject.file("../../runtime/out")
+
+val keyProps = Properties().apply {
+    val file = rootProject.file("key.properties")
+    if (file.isFile) file.inputStream().use(::load)
+}
+
+val releaseStorePath: String? =
+    System.getenv("AGY_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+        ?: keyProps.getProperty("storeFile")?.takeIf { it.isNotBlank() }
+val releaseStorePassword: String? =
+    System.getenv("AGY_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() }
+        ?: keyProps.getProperty("storePassword")?.takeIf { it.isNotBlank() }
+val releaseKeyAlias: String? =
+    System.getenv("AGY_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+        ?: keyProps.getProperty("keyAlias")?.takeIf { it.isNotBlank() }
+val releaseKeyPassword: String? =
+    System.getenv("AGY_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+        ?: keyProps.getProperty("keyPassword")?.takeIf { it.isNotBlank() }
+val hasReleaseSigning: Boolean =
+    releaseStorePath != null &&
+        File(releaseStorePath).isFile &&
+        releaseStorePassword != null &&
+        releaseKeyAlias != null &&
+        releaseKeyPassword != null
 
 android {
     namespace = "io.github.kailian5922.agy_go"
@@ -18,6 +44,7 @@ android {
     }
 
     defaultConfig {
+        // Permanently fixed Android package ID so every build upgrades cleanly in-place.
         applicationId = "io.github.kailian5922.agy_go"
         // java.nio.file & modern Android crypto/network APIs require API 26+.
         minSdk = 26
@@ -49,10 +76,25 @@ android {
         disable += "ExpiredTargetSdkVersion"
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = File(releaseStorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // Local release builds fall back to debug signing until key.properties is configured.
-            signingConfig = signingConfigs.getByName("debug")
+            // Use the stable release keystore when configured (CI secrets or local key.properties).
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

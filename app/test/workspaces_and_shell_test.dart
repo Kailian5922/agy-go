@@ -128,14 +128,20 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('设置'), findsWidgets);
-      expect(find.text('手机存储挂载'), findsOneWidget);
-      expect(find.text('工作区管理'), findsOneWidget);
+      expect(find.text('审批与执行模式'), findsOneWidget);
       await tester.scrollUntilVisible(
-        find.text('外观与配色'),
+        find.text('手机存储挂载'),
         300,
         scrollable: find.byType(Scrollable).first,
       );
-      expect(find.text('外观与配色'), findsOneWidget);
+      expect(find.text('手机存储挂载'), findsOneWidget);
+      expect(find.text('工作区管理'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text('外观、配色与壁纸'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      expect(find.text('外观、配色与壁纸'), findsOneWidget);
     });
 
     testWidgets('AllFeaturesPage renders 2-column feature tiles', (
@@ -147,6 +153,12 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('全部功能'), findsWidgets);
+      expect(find.text('审批与执行模式'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text('工作区管理'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
       expect(find.text('工作区管理'), findsOneWidget);
       await tester.scrollUntilVisible(
         find.text('手机存储挂载'),

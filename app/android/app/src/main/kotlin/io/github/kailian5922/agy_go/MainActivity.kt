@@ -56,6 +56,7 @@ class MainActivity : FlutterActivity() {
         petPlugin = PetPlugin(applicationContext, messenger)
         systemPlugin = SystemPlugin(
             context = applicationContext,
+            activityProvider = { this },
             messenger = messenger,
             onSetHideStatusBar = { enabled ->
                 hideStatusBar = enabled
@@ -66,6 +67,14 @@ class MainActivity : FlutterActivity() {
                 applyStatusBarVisibility()
             },
         )
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        if (systemPlugin?.onActivityResult(requestCode, resultCode, data) == true) {
+            return
+        }
+        super.onActivityResult(requestCode, resultCode, data)
     }
 
     override fun onRequestPermissionsResult(
