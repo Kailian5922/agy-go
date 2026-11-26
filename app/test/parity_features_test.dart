@@ -2,6 +2,7 @@ import 'package:acp_client/acp_client.dart';
 import 'package:agy_go/app.dart';
 import 'package:agy_go/state/agy_config_state.dart';
 import 'package:agy_go/state/commands_state.dart';
+import 'package:agy_go/state/drawer_view_state.dart';
 import 'package:agy_go/state/sessions_state.dart';
 import 'package:agy_go/state/settings_state.dart';
 import 'package:agy_go/ui/chat/diff_and_output_page.dart';
@@ -157,11 +158,12 @@ void main() {
       expect(parsedRules.deny, ['write_file(.git/)']);
     });
 
-    test('SessionsController creates folders, moves, and batch archives/deletes', () async {
+    test('DrawerViewController creates colored/emoji folders, moves sessions, and SessionsController batch archives/deletes', () async {
       final container = ProviderContainer();
       addTearDown(container.dispose);
 
       final ctrl = container.read(sessionsProvider.notifier);
+      final drawer = container.read(drawerViewProvider.notifier);
       ctrl.registerCreatedSession(
         const AcpSessionInfo(sessionId: 's1', cwd: '/w', title: 'Alpha'),
       );
@@ -169,16 +171,15 @@ void main() {
         const AcpSessionInfo(sessionId: 's2', cwd: '/w', title: 'Beta'),
       );
 
-      await ctrl.createFolder('项目A');
-      await ctrl.batchMoveToFolder({'s1', 's2'}, '项目A');
-      expect(container.read(sessionsProvider).folders, contains('项目A'));
-      expect(container.read(sessionsProvider).folderOf('s1'), '项目A');
-
-      ctrl.selectFolder('项目A');
-      expect(container.read(filteredSessionsProvider).length, 2);
+      final folderId = await drawer.createFolder('项目A', tint: 2);
+      expect(folderId, isNotNull);
+      await drawer.moveSessions(['s1', 's2'], folderId);
+      expect(container.read(drawerViewProvider).folderOf['s1'], folderId);
+      expect(container.read(drawerScopeProvider).sessions.length, 2);
 
       await ctrl.batchArchive({'s1'}, true);
       expect(container.read(sessionsProvider).isArchived('s1'), isTrue);
+      expect(container.read(drawerScopeProvider).sessions.length, 1);
 
       await ctrl.batchDelete({'s2'});
       expect(

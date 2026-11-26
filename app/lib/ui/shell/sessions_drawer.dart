@@ -847,7 +847,7 @@ class IdentityBar extends ConsumerWidget {
     final conn = ref.watch(activeConnectionProvider);
     final isLocal = hosts.active.isLocal;
     final name = isLocal
-        ? '本机 Android'
+        ? '本机'
         : (hosts.sshById(hosts.active.id)?.name ?? 'SSH 主机');
 
     final (StatusTone tone, String statusLabel) = isLocal
@@ -1098,7 +1098,7 @@ Future<void> showHostSwitcherSheet(
                   children: [
                     ListPageRow(
                       icon: AppIcons.thisPhone,
-                      title: '本机 Android',
+                      title: '本机',
                       subtitle: runtime.isRunning
                           ? '运行中 (${runtime.executionMode})'
                           : (runtime.installedVersion != null

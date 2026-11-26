@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../../state/chat_state.dart';
 import '../../state/connection_state.dart';
 import '../../state/drawer_view_state.dart';
 import '../../state/hosts_state.dart';
@@ -889,6 +890,8 @@ class _WorkspaceActionsBody extends ConsumerWidget {
                   chevron: false,
                   onTap: () {
                     unawaited(ref.read(workspacesProvider.notifier).select(w.id));
+                    ref.read(pendingSessionFolderProvider.notifier).select(null);
+                    ref.read(chatProvider.notifier).startNewChat();
                     onClose();
                     onNewChat?.call();
                   },
@@ -956,6 +959,28 @@ class _WorkspaceActionsBody extends ConsumerWidget {
                   onTap: () async {
                     final wsCtrl = ref.read(workspacesProvider.notifier);
                     final sessCtrl = ref.read(sessionsProvider.notifier);
+                    final ok = await showAppDialog<bool>(
+                      context: context,
+                      builder: (d) => AlertDialog(
+                        title: Text('移出「${w.displayTitle}」？'),
+                        content: const Text('仅从工作区列表移出，不会删除手机或服务器上的原文件。'),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(d, false),
+                            child: const Text('取消'),
+                          ),
+                          FilledButton(
+                            style: FilledButton.styleFrom(
+                              backgroundColor: DshColors.of(d).danger,
+                              foregroundColor: DshColors.of(d).onDanger,
+                            ),
+                            onPressed: () => Navigator.pop(d, true),
+                            child: const Text('移出'),
+                          ),
+                        ],
+                      ),
+                    );
+                    if (ok != true) return;
                     onClose();
                     await wsCtrl.remove(w.id);
                     await sessCtrl.removeWorkspaceSessions(w.path);

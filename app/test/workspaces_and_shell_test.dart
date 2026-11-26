@@ -201,7 +201,7 @@ void main() {
     });
 
     test(
-      'workspaceSessionGroupsProvider groups sessions under longest-prefix workspaces and persists collapse state',
+      'drawerScopeProvider and workspaceCountsProvider match longest-prefix workspaces cleanly',
       () async {
         final container = ProviderContainer();
         addTearDown(container.dispose);
@@ -239,29 +239,24 @@ void main() {
           ),
         );
 
-        final groups = container.read(workspaceSessionGroupsProvider);
-        final projGroup = groups.singleWhere((g) => g.key == projWs.id);
-        final storageGroup = groups.singleWhere((g) => g.key == storageWs.id);
-        final extraGroup = groups.singleWhere(
-          (g) => g.key == 'path:/tmp/unregistered-repo',
-        );
-
         // /sdcard/Download/my-app/lib canonicalizes to /storage/emulated/0/... and matches longest prefix `my-app`!
-        expect(projGroup.sessions.map((s) => s.sessionId), ['s_sub']);
-        expect(storageGroup.sessions.map((s) => s.sessionId), ['s_storage']);
-        expect(extraGroup.title, 'unregistered-repo');
-        expect(extraGroup.sessions.map((s) => s.sessionId), ['s_extra']);
+        final counts = container.read(workspaceCountsProvider);
+        expect(counts[projWs.id], 1);
+        expect(counts[storageWs.id], 1);
+        expect(container.read(visibleSessionTotalProvider), 3);
 
-        // Workspace collapse state toggles and persists cleanly.
-        await sessCtrl.toggleWorkspaceCollapsed(projWs.id);
+        // Scoped to my-app -> only s_sub.
+        await wsCtrl.select(projWs.id);
         expect(
-          container.read(sessionsProvider).isWorkspaceCollapsed(projWs.id),
-          isTrue,
+          container.read(drawerScopeProvider).sessions.map((s) => s.sessionId),
+          ['s_sub'],
         );
-        await sessCtrl.toggleWorkspaceCollapsed(projWs.id);
+
+        // Scoped to 全部对话 (null) -> all 3 visible sessions!
+        await wsCtrl.select(null);
         expect(
-          container.read(sessionsProvider).isWorkspaceCollapsed(projWs.id),
-          isFalse,
+          container.read(drawerScopeProvider).sessions.map((s) => s.sessionId),
+          containsAll(['s_sub', 's_storage', 's_extra']),
         );
       },
     );
@@ -348,6 +343,7 @@ void main() {
         expect(find.text('运行中'), findsOneWidget);
         expect(find.text('待确认'), findsOneWidget);
         expect(find.text('未读'), findsOneWidget);
+        expect(find.text('本机'), findsOneWidget);
 
         // Alpha scope shows Pinned -> Folder -> Today, hiding Beta's conversation!
         expect(find.text('置顶'), findsOneWidget);
@@ -429,24 +425,25 @@ void main() {
           ),
         );
 
-        final beforeDelete = container1.read(workspaceSessionGroupsProvider);
+        await container1.read(workspacesProvider.notifier).select(ws1.id);
         expect(
-          beforeDelete.singleWhere((g) => g.key == ws1.id).sessions.map((s) => s.sessionId),
+          container1
+              .read(drawerScopeProvider)
+              .sessions
+              .map((s) => s.sessionId),
           ['s_winter_1'],
         );
-        expect(
-          beforeDelete.where((g) => g.title.contains('%')),
-          isEmpty,
-        );
+        expect(container1.read(workspaceCountsProvider)[ws1.id], 1);
+        expect(container1.read(workspaceCountsProvider)[ws2.id], 1);
 
         // 2. Remove workspace `测试` and its sessions, and delete `s_winter_1`.
         await container1.read(workspacesProvider.notifier).remove(ws2.id);
         await sess1.removeWorkspaceSessions(ws2.path);
         await sess1.deleteSession('s_winter_1');
 
-        final afterDelete = container1.read(workspaceSessionGroupsProvider);
-        expect(afterDelete.any((g) => g.key == ws2.id || g.title == '测试'), isFalse);
-        expect(afterDelete.singleWhere((g) => g.key == ws1.id).sessions, isEmpty);
+        expect(container1.read(workspaceCountsProvider).containsKey(ws2.id), isFalse);
+        expect(container1.read(workspaceCountsProvider)[ws1.id], 0);
+        expect(container1.read(drawerScopeProvider).sessions, isEmpty);
 
         // 3. Simulate full app restart with a fresh ProviderContainer reading SharedPreferences.
         final container2 = ProviderContainer();
