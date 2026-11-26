@@ -22,6 +22,8 @@ class SessionsState {
     this.customTitles = const {},
     this.folders = const [],
     this.sessionFolders = const {},
+    this.sessionWorkspaces = const {},
+    this.collapsedWorkspaceKeys = const [],
     this.activeFolder,
     this.filter = DrawerSessionFilter.all,
   });
@@ -35,6 +37,11 @@ class SessionsState {
   final Map<String, String> customTitles;
   final List<String> folders;
   final Map<String, String> sessionFolders;
+
+  /// Persisted `sessionId -> normalized workspace cwd` mapping so every
+  /// conversation reliably stays grouped under its owning workspace.
+  final Map<String, String> sessionWorkspaces;
+  final List<String> collapsedWorkspaceKeys;
   final String? activeFolder;
   final DrawerSessionFilter filter;
 
@@ -55,9 +62,17 @@ class SessionsState {
     return '新对话';
   }
 
+  String effectiveCwdOf(AcpSessionInfo s) {
+    final live = s.cwd.trim();
+    if (live.isNotEmpty) return normalizeWorkspacePath(live);
+    final saved = sessionWorkspaces[s.sessionId]?.trim() ?? '';
+    return saved.isEmpty ? '' : normalizeWorkspacePath(saved);
+  }
+
   bool isPinned(String id) => pinnedIds.contains(id);
   bool isArchived(String id) => archivedIds.contains(id);
   String? folderOf(String id) => sessionFolders[id];
+  bool isWorkspaceCollapsed(String key) => collapsedWorkspaceKeys.contains(key);
 
   SessionsState copyWith({
     List<AcpSessionInfo>? sessions,
@@ -71,6 +86,8 @@ class SessionsState {
     Map<String, String>? customTitles,
     List<String>? folders,
     Map<String, String>? sessionFolders,
+    Map<String, String>? sessionWorkspaces,
+    List<String>? collapsedWorkspaceKeys,
     String? Function()? activeFolder,
     DrawerSessionFilter? filter,
   }) => SessionsState(
@@ -85,6 +102,9 @@ class SessionsState {
     customTitles: customTitles ?? this.customTitles,
     folders: folders ?? this.folders,
     sessionFolders: sessionFolders ?? this.sessionFolders,
+    sessionWorkspaces: sessionWorkspaces ?? this.sessionWorkspaces,
+    collapsedWorkspaceKeys:
+        collapsedWorkspaceKeys ?? this.collapsedWorkspaceKeys,
     activeFolder: activeFolder == null ? this.activeFolder : activeFolder(),
     filter: filter ?? this.filter,
   );
@@ -100,6 +120,15 @@ class SessionsController extends Notifier<SessionsState> {
     _prefsKey = 'agy.sessions.meta.${host.kind.name}.${host.id}';
     _metaVersion++;
     unawaited(_loadMeta(_prefsKey, _metaVersion));
+
+    ref.listen<String>(
+      workspacesProvider.select((w) => w.workspaces.map((e) => e.path).join('|')),
+      (prev, next) {
+        if (prev == null || prev == next) return;
+        final conn = ref.read(activeConnectionProvider).value;
+        if (conn != null) unawaited(_refreshFor(conn));
+      },
+    );
 
     final conn = ref.watch(activeConnectionProvider.select((a) => a.value));
     if (conn == null) return const SessionsState();
@@ -138,6 +167,15 @@ class SessionsController extends Notifier<SessionsState> {
               if (e.key is String && e.value is String)
                 e.key as String: e.value as String,
         },
+        sessionWorkspaces: {
+          if (map['sessionWorkspaces'] is Map)
+            for (final e in (map['sessionWorkspaces'] as Map).entries)
+              if (e.key is String && e.value is String)
+                e.key as String: e.value as String,
+        },
+        collapsedWorkspaceKeys:
+            (map['collapsedWorkspaces'] as List?)?.whereType<String>().toList() ??
+            const [],
       );
     } catch (_) {}
   }
@@ -155,6 +193,8 @@ class SessionsController extends Notifier<SessionsState> {
           'titles': state.customTitles,
           'folders': state.folders,
           'sessionFolders': state.sessionFolders,
+          'sessionWorkspaces': state.sessionWorkspaces,
+          'collapsedWorkspaces': state.collapsedWorkspaceKeys,
         }),
       );
     } catch (_) {}
@@ -174,12 +214,93 @@ class SessionsController extends Notifier<SessionsState> {
     }
     state = state.copyWith(loading: true, clearError: true);
     try {
-      final page = await conn.client.listSessions();
+      final byId = <String, AcpSessionInfo>{};
+      void ingest(List<AcpSessionInfo> list, {String? fallbackCwd}) {
+        for (final s in list) {
+          final existing = byId[s.sessionId];
+          final resolvedCwd = s.cwd.trim().isNotEmpty
+              ? s.cwd.trim()
+              : (existing?.cwd.trim().isNotEmpty == true
+                    ? existing!.cwd.trim()
+                    : (fallbackCwd ?? state.sessionWorkspaces[s.sessionId] ?? ''));
+          final resolvedTitle = s.title?.trim().isNotEmpty == true
+              ? s.title
+              : existing?.title;
+          final resolvedUpdated = existing?.updatedAt == null
+              ? s.updatedAt
+              : (s.updatedAt == null
+                    ? existing!.updatedAt
+                    : (s.updatedAt!.isAfter(existing!.updatedAt!)
+                          ? s.updatedAt
+                          : existing.updatedAt));
+          byId[s.sessionId] = AcpSessionInfo(
+            sessionId: s.sessionId,
+            cwd: resolvedCwd,
+            title: resolvedTitle,
+            updatedAt: resolvedUpdated,
+          );
+        }
+      }
+
+      // 1. Global session listing.
+      final globalPage = await conn.client.listSessions();
+      if (!ref.mounted) return;
+      ingest(globalPage.sessions);
+
+      // 2. Per-workspace session listing for every registered workspace directory,
+      // ensuring sessions scoped to non-default workspaces are always discovered.
+      final wsPaths = <String>{};
+      for (final ws in ref.read(workspacesProvider).workspaces) {
+        final norm = normalizeWorkspacePath(ws.path);
+        if (norm.isNotEmpty) wsPaths.add(norm);
+      }
+      for (final path in wsPaths) {
+        if (!ref.mounted) return;
+        try {
+          final wsPage = await conn.client.listSessions(cwd: path);
+          ingest(wsPage.sessions, fallbackCwd: path);
+        } catch (_) {
+          // Ignore individual unreachable directories; keep other workspaces intact.
+        }
+      }
+
+      // Preserve the active just-created session if not yet flushed on disk.
+      final active = state.currentSession;
+      if (active != null && !byId.containsKey(active.sessionId)) {
+        byId[active.sessionId] = active;
+      }
+
+      final merged = byId.values.toList()
+        ..sort((a, b) {
+          final ta = a.updatedAt;
+          final tb = b.updatedAt;
+          if (ta == null && tb == null) return 0;
+          if (ta == null) return 1;
+          if (tb == null) return -1;
+          return tb.compareTo(ta);
+        });
+
+      final nextWorkspaces = Map<String, String>.from(state.sessionWorkspaces);
+      var wsChanged = false;
+      for (final s in merged) {
+        if (s.cwd.trim().isNotEmpty) {
+          final norm = normalizeWorkspacePath(s.cwd);
+          if (nextWorkspaces[s.sessionId] != norm) {
+            nextWorkspaces[s.sessionId] = norm;
+            wsChanged = true;
+          }
+        }
+      }
+
       if (!ref.mounted) return;
       state = state.copyWith(
-        sessions: page.sessions,
+        sessions: merged,
+        sessionWorkspaces: nextWorkspaces,
         loading: false,
       );
+      if (wsChanged) {
+        unawaited(_saveMeta());
+      }
     } catch (e) {
       if (!ref.mounted) return;
       state = state.copyWith(loading: false, error: e.toString());
@@ -202,6 +323,17 @@ class SessionsController extends Notifier<SessionsState> {
       activeFolder: () => folder,
       filter: DrawerSessionFilter.all,
     );
+  }
+
+  Future<void> toggleWorkspaceCollapsed(String key) async {
+    final collapsed = state.isWorkspaceCollapsed(key);
+    final next = [
+      if (!collapsed) key,
+      for (final k in state.collapsedWorkspaceKeys)
+        if (k != key) k,
+    ];
+    state = state.copyWith(collapsedWorkspaceKeys: next);
+    await _saveMeta();
   }
 
   Future<void> createFolder(String name) async {
@@ -265,14 +397,40 @@ class SessionsController extends Notifier<SessionsState> {
   }
 
   void registerCreatedSession(AcpSessionInfo info) {
+    final normCwd = info.cwd.trim().isEmpty
+        ? ''
+        : normalizeWorkspacePath(info.cwd);
     final next = [
       info,
       ...state.sessions.where((s) => s.sessionId != info.sessionId),
     ];
+    final nextWorkspaces = Map<String, String>.from(state.sessionWorkspaces);
+    if (normCwd.isNotEmpty) {
+      nextWorkspaces[info.sessionId] = normCwd;
+    }
+
+    // Auto-expand the workspace receiving this brand-new conversation.
+    var nextCollapsed = state.collapsedWorkspaceKeys;
+    if (normCwd.isNotEmpty && nextCollapsed.isNotEmpty) {
+      final matched = matchWorkspaceForCwd(
+        normCwd,
+        ref.read(workspacesProvider).workspaces,
+      );
+      final targetKey = matched?.id ?? 'path:$normCwd';
+      if (nextCollapsed.contains(targetKey)) {
+        nextCollapsed = nextCollapsed.where((k) => k != targetKey).toList();
+      }
+    }
+
     state = state.copyWith(
       sessions: next,
       currentSessionId: info.sessionId,
+      sessionWorkspaces: nextWorkspaces,
+      collapsedWorkspaceKeys: nextCollapsed,
     );
+    if (normCwd.isNotEmpty) {
+      unawaited(_saveMeta());
+    }
   }
 
   void updateSessionTitle(String sessionId, String title) {
@@ -338,6 +496,8 @@ class SessionsController extends Notifier<SessionsState> {
       ..remove(sessionId);
     final nextFolders = Map<String, String>.from(state.sessionFolders)
       ..remove(sessionId);
+    final nextWorkspaces = Map<String, String>.from(state.sessionWorkspaces)
+      ..remove(sessionId);
     state = state.copyWith(
       sessions: next,
       currentSessionId: nextCurrent,
@@ -346,6 +506,7 @@ class SessionsController extends Notifier<SessionsState> {
       archivedIds: state.archivedIds.where((id) => id != sessionId).toList(),
       customTitles: nextTitles,
       sessionFolders: nextFolders,
+      sessionWorkspaces: nextWorkspaces,
     );
     await _saveMeta();
   }
@@ -354,6 +515,150 @@ class SessionsController extends Notifier<SessionsState> {
 final sessionsProvider = NotifierProvider<SessionsController, SessionsState>(
   SessionsController.new,
 );
+
+/// One workspace node in the drawer tree with its conversations listed beneath it.
+class WorkspaceSessionGroup {
+  const WorkspaceSessionGroup({
+    required this.key,
+    required this.title,
+    required this.path,
+    required this.sessions,
+    this.workspace,
+    this.isDefault = false,
+    this.isSelected = false,
+  });
+
+  final String key;
+  final String title;
+  final String path;
+  final List<AcpSessionInfo> sessions;
+  final WorkspaceItem? workspace;
+  final bool isDefault;
+  final bool isSelected;
+}
+
+/// Groups conversations underneath their owning workspaces for the drawer tree.
+final workspaceSessionGroupsProvider = Provider<List<WorkspaceSessionGroup>>((
+  ref,
+) {
+  final sessionsState = ref.watch(sessionsProvider);
+  final wsState = ref.watch(workspacesProvider);
+  final archivedSet = sessionsState.archivedIds.toSet();
+  final pinnedSet = sessionsState.pinnedIds.toSet();
+  final pinnedOrder = {
+    for (var i = 0; i < sessionsState.pinnedIds.length; i++)
+      sessionsState.pinnedIds[i]: i,
+  };
+  final filteredView =
+      sessionsState.filter != DrawerSessionFilter.all ||
+      sessionsState.activeFolder != null;
+
+  final buckets = <String, List<AcpSessionInfo>>{};
+  final unregisteredPaths = <String, String>{};
+  final defaultWs =
+      wsState.workspaces.where((w) => w.isDefault).firstOrNull ??
+      wsState.workspaces.firstOrNull;
+
+  for (final s in sessionsState.sessions) {
+    if (!_matchesFilter(
+      s,
+      sessionsState.filter,
+      sessionsState.activeFolder,
+      sessionsState.sessionFolders[s.sessionId],
+      archivedSet,
+      pinnedSet,
+    )) {
+      continue;
+    }
+    final cwd = sessionsState.effectiveCwdOf(s);
+    final matched = matchWorkspaceForCwd(cwd, wsState.workspaces);
+    if (matched != null) {
+      buckets.putIfAbsent(matched.id, () => []).add(s);
+    } else if (cwd.isNotEmpty) {
+      final key = 'path:$cwd';
+      unregisteredPaths[key] = cwd;
+      buckets.putIfAbsent(key, () => []).add(s);
+    } else if (defaultWs != null) {
+      buckets.putIfAbsent(defaultWs.id, () => []).add(s);
+    } else {
+      const key = 'default';
+      unregisteredPaths[key] = '';
+      buckets.putIfAbsent(key, () => []).add(s);
+    }
+  }
+
+  List<AcpSessionInfo> sortSessions(List<AcpSessionInfo> list) {
+    final copy = List<AcpSessionInfo>.from(list);
+    copy.sort((a, b) {
+      if (sessionsState.filter != DrawerSessionFilter.archived) {
+        final pa = pinnedOrder[a.sessionId];
+        final pb = pinnedOrder[b.sessionId];
+        if (pa != null && pb != null) return pa.compareTo(pb);
+        if (pa != null) return -1;
+        if (pb != null) return 1;
+      }
+      final ta = a.updatedAt;
+      final tb = b.updatedAt;
+      if (ta == null && tb == null) return 0;
+      if (ta == null) return 1;
+      if (tb == null) return -1;
+      return tb.compareTo(ta);
+    });
+    return copy;
+  }
+
+  // Order registered workspaces: pinned workspaces first, then remaining in user order.
+  final pinnedWsSet = wsState.pinnedIds.toSet();
+  final orderedWorkspaces = [
+    for (final w in wsState.workspaces)
+      if (pinnedWsSet.contains(w.id)) w,
+    for (final w in wsState.workspaces)
+      if (!pinnedWsSet.contains(w.id)) w,
+  ];
+
+  final result = <WorkspaceSessionGroup>[];
+  final currentSid = sessionsState.currentSessionId;
+  for (final ws in orderedWorkspaces) {
+    final items = sortSessions(buckets[ws.id] ?? const []);
+    if (filteredView && items.isEmpty) continue;
+    final containsCurrent =
+        currentSid != null && items.any((s) => s.sessionId == currentSid);
+    result.add(
+      WorkspaceSessionGroup(
+        key: ws.id,
+        title: ws.displayTitle,
+        path: normalizeWorkspacePath(ws.path),
+        sessions: items,
+        workspace: ws,
+        isDefault: ws.isDefault,
+        isSelected: wsState.selectedId == ws.id || containsCurrent,
+      ),
+    );
+  }
+
+  // Append any historical unregistered workspace directories that own matching sessions.
+  for (final entry in unregisteredPaths.entries) {
+    final items = sortSessions(buckets[entry.key] ?? const []);
+    if (items.isEmpty) continue;
+    final path = entry.value;
+    final parts = path.split('/').where((p) => p.isNotEmpty).toList();
+    final title = parts.isEmpty ? (path.isEmpty ? '默认工作区' : path) : parts.last;
+    final containsCurrent =
+        currentSid != null && items.any((s) => s.sessionId == currentSid);
+    result.add(
+      WorkspaceSessionGroup(
+        key: entry.key,
+        title: title,
+        path: path,
+        sessions: items,
+        isDefault: path.isEmpty,
+        isSelected: containsCurrent,
+      ),
+    );
+  }
+
+  return result;
+});
 
 /// Sessions filtered by active workspace, active folder, and archive/pin filter.
 final filteredSessionsProvider = Provider<List<AcpSessionInfo>>((ref) {
@@ -372,28 +677,20 @@ final filteredSessionsProvider = Provider<List<AcpSessionInfo>>((ref) {
         selectedWs,
         archivedSet,
         pinnedSet,
+        state.effectiveCwdOf(s),
       ))
         s,
   ];
 });
 
-bool _matches(
+bool _matchesFilter(
   AcpSessionInfo s,
   DrawerSessionFilter filter,
   String? activeFolder,
   String? sessionFolder,
-  WorkspaceItem? ws,
   Set<String> archived,
   Set<String> pinned,
 ) {
-  if (ws != null && s.cwd.isNotEmpty) {
-    final normCwd = s.cwd.endsWith('/') && s.cwd.length > 1
-        ? s.cwd.substring(0, s.cwd.length - 1)
-        : s.cwd;
-    if (normCwd != ws.path && !normCwd.startsWith('${ws.path}/')) {
-      return false;
-    }
-  }
   if (activeFolder != null && sessionFolder != activeFolder) {
     return false;
   }
@@ -403,4 +700,35 @@ bool _matches(
       pinned.contains(s.sessionId) && !archived.contains(s.sessionId),
     DrawerSessionFilter.archived => archived.contains(s.sessionId),
   };
+}
+
+bool _matches(
+  AcpSessionInfo s,
+  DrawerSessionFilter filter,
+  String? activeFolder,
+  String? sessionFolder,
+  WorkspaceItem? ws,
+  Set<String> archived,
+  Set<String> pinned,
+  String effectiveCwd,
+) {
+  if (ws != null && effectiveCwd.isNotEmpty) {
+    final normWs = normalizeWorkspacePath(ws.path);
+    final inside =
+        effectiveCwd == normWs ||
+        (normWs == '/'
+            ? effectiveCwd.startsWith('/')
+            : effectiveCwd.startsWith('$normWs/'));
+    if (!inside) {
+      return false;
+    }
+  }
+  return _matchesFilter(
+    s,
+    filter,
+    activeFolder,
+    sessionFolder,
+    archived,
+    pinned,
+  );
 }

@@ -286,6 +286,15 @@ class SettingsScreen extends ConsumerWidget {
               onTap: () => _push(context, const NotificationSettingsPage()),
             ),
             SettingsSwitchTile(
+              icon: AppIcons.tip,
+              tint: SettingsHues.general,
+              title: '模型运行时保持屏幕常亮',
+              subtitle: '停留在 App 页面且模型思考/执行期间不自动熄屏，结束后恢复正常',
+              value: settings.keepScreenOnWhileRunning,
+              onChanged: (v) =>
+                  unawaited(notifier.setKeepScreenOnWhileRunning(v)),
+            ),
+            SettingsSwitchTile(
               icon: AppIcons.sidebar,
               tint: SettingsHues.general,
               title: '右侧左滑快捷面板',

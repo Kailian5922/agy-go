@@ -1,11 +1,16 @@
+import 'package:acp_client/acp_client.dart';
 import 'package:agy_go/app.dart';
+import 'package:agy_go/state/sessions_state.dart';
 import 'package:agy_go/state/settings_state.dart';
 import 'package:agy_go/state/workspaces_state.dart';
 import 'package:agy_go/ui/chat/empty_state.dart';
 import 'package:agy_go/ui/features/all_features_page.dart';
 import 'package:agy_go/ui/settings/settings_screen.dart';
+import 'package:agy_go/ui/shell/sessions_drawer.dart';
+import 'package:agy_go/ui/system/keep_alive_screen.dart';
 import 'package:agy_go/ui/theme/theme.dart';
 import 'package:agy_go/ui/workspace/workspaces_ui.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
@@ -198,5 +203,195 @@ void main() {
       await tester.tap(find.text('看看工作区'));
       expect(picked, '看看工作区');
     });
+
+    test(
+      'workspaceSessionGroupsProvider groups sessions under longest-prefix workspaces and persists collapse state',
+      () async {
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+
+        final wsCtrl = container.read(workspacesProvider.notifier);
+        final storageWs = await wsCtrl.add('/storage/emulated/0', title: '手机存储');
+        final projWs = await wsCtrl.add(
+          '/storage/emulated/0/Download/my-app',
+          title: 'my-app',
+        );
+
+        final sessCtrl = container.read(sessionsProvider.notifier);
+        sessCtrl.registerCreatedSession(
+          AcpSessionInfo(
+            sessionId: 's_sub',
+            cwd: '/sdcard/Download/my-app/lib',
+            title: '子目录会话',
+            updatedAt: DateTime(2026, 11, 25, 12, 0),
+          ),
+        );
+        sessCtrl.registerCreatedSession(
+          AcpSessionInfo(
+            sessionId: 's_storage',
+            cwd: '/storage/emulated/0/DCIM',
+            title: '相册整理',
+            updatedAt: DateTime(2026, 11, 25, 11, 0),
+          ),
+        );
+        sessCtrl.registerCreatedSession(
+          AcpSessionInfo(
+            sessionId: 's_extra',
+            cwd: '/tmp/unregistered-repo',
+            title: '临时仓库会话',
+            updatedAt: DateTime(2026, 11, 25, 10, 0),
+          ),
+        );
+
+        final groups = container.read(workspaceSessionGroupsProvider);
+        final projGroup = groups.singleWhere((g) => g.key == projWs.id);
+        final storageGroup = groups.singleWhere((g) => g.key == storageWs.id);
+        final extraGroup = groups.singleWhere(
+          (g) => g.key == 'path:/tmp/unregistered-repo',
+        );
+
+        // /sdcard/Download/my-app/lib canonicalizes to /storage/emulated/0/... and matches longest prefix `my-app`!
+        expect(projGroup.sessions.map((s) => s.sessionId), ['s_sub']);
+        expect(storageGroup.sessions.map((s) => s.sessionId), ['s_storage']);
+        expect(extraGroup.title, 'unregistered-repo');
+        expect(extraGroup.sessions.map((s) => s.sessionId), ['s_extra']);
+
+        // Workspace collapse state toggles and persists cleanly.
+        await sessCtrl.toggleWorkspaceCollapsed(projWs.id);
+        expect(
+          container.read(sessionsProvider).isWorkspaceCollapsed(projWs.id),
+          isTrue,
+        );
+        await sessCtrl.toggleWorkspaceCollapsed(projWs.id);
+        expect(
+          container.read(sessionsProvider).isWorkspaceCollapsed(projWs.id),
+          isFalse,
+        );
+      },
+    );
+
+    testWidgets(
+      'SessionsDrawer displays workspaces with nested conversations underneath and toggles collapse on tap',
+      (tester) async {
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+
+        final wsCtrl = container.read(workspacesProvider.notifier);
+        await wsCtrl.add('/tmp/project-alpha', title: 'Alpha 项目');
+
+        final sessCtrl = container.read(sessionsProvider.notifier);
+        sessCtrl.registerCreatedSession(
+          AcpSessionInfo(
+            sessionId: 's_alpha_1',
+            cwd: '/tmp/project-alpha',
+            title: 'Alpha 的第一个对话',
+            updatedAt: DateTime(2026, 11, 25, 12, 0),
+          ),
+        );
+        sessCtrl.registerCreatedSession(
+          AcpSessionInfo(
+            sessionId: 's_alpha_2',
+            cwd: '/tmp/project-alpha',
+            title: 'Alpha 的第二个对话',
+            updatedAt: DateTime(2026, 11, 25, 11, 0),
+          ),
+        );
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: AgyGoApp(
+              home: Scaffold(
+                body: SizedBox(
+                  width: 320,
+                  child: SessionsDrawer(onClose: () {}, onOpen: (_) {}),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Alpha 项目'), findsWidgets);
+        expect(find.text('Alpha 的第一个对话'), findsOneWidget);
+        expect(find.text('Alpha 的第二个对话'), findsOneWidget);
+
+        // Tap the Alpha workspace header -> collapses its nested conversations!
+        final wsHeader = find.descendant(
+          of: find.byKey(
+            ValueKey(
+              'ws-group-${container.read(workspacesProvider).workspaces.last.id}',
+            ),
+          ),
+          matching: find.text('Alpha 项目'),
+        );
+        await tester.tap(wsHeader);
+        await tester.pumpAndSettle();
+
+        expect(find.text('Alpha 的第一个对话'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'keepScreenOnWhileRunning persists, renders in SettingsScreen & KeepAliveScreen, and dispatches native channel',
+      (tester) async {
+        final keepScreenCalls = <bool>[];
+        const channel = MethodChannel('agy/system');
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, (call) async {
+              if (call.method == 'setKeepScreenOn') {
+                keepScreenCalls.add((call.arguments as Map)['enabled'] == true);
+                return true;
+              }
+              return null;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(channel, null);
+        });
+
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+
+        expect(container.read(settingsProvider).keepScreenOnWhileRunning, isTrue);
+        await container
+            .read(settingsProvider.notifier)
+            .setKeepScreenOnWhileRunning(false);
+        expect(
+          container.read(settingsProvider).keepScreenOnWhileRunning,
+          isFalse,
+        );
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getBool('agy.keepScreenOnWhileRunning'), isFalse);
+
+        // Verify visible in SettingsScreen and KeepAliveScreen.
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const AgyGoApp(home: SettingsScreen()),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.scrollUntilVisible(
+          find.text('模型运行时保持屏幕常亮'),
+          300,
+          scrollable: find.byType(Scrollable).first,
+        );
+        expect(find.text('模型运行时保持屏幕常亮'), findsOneWidget);
+
+        // Idle app sends keepScreenOn=false on boot.
+        expect(keepScreenCalls, contains(false));
+
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const AgyGoApp(home: KeepAliveScreen()),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('模型运行时保持屏幕常亮'), findsOneWidget);
+      },
+    );
   });
 }

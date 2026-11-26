@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'state/chat_state.dart';
 import 'state/live_activity_state.dart';
 import 'state/settings_state.dart';
 import 'ui/common/side_insets.dart';
@@ -31,6 +32,7 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
   bool? _instantPages;
   bool? _fluid;
   bool? _hideStatusBar;
+  bool? _keepScreenOn;
   late ThemeData _light;
   late ThemeData _dark;
   bool _settled = false;
@@ -44,6 +46,13 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
 
   @override
   void dispose() {
+    if (_keepScreenOn == true) {
+      unawaited(
+        _systemChannel
+            .invokeMethod<bool>('setKeepScreenOn', {'enabled': false})
+            .catchError((_) => false),
+      );
+    }
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -72,6 +81,16 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
     unawaited(
       _systemChannel
           .invokeMethod<bool>('setHideStatusBar', {'enabled': hide})
+          .catchError((_) => false),
+    );
+  }
+
+  void _syncKeepScreenOn(bool enabled) {
+    if (_keepScreenOn == enabled) return;
+    _keepScreenOn = enabled;
+    unawaited(
+      _systemChannel
+          .invokeMethod<bool>('setKeepScreenOn', {'enabled': enabled})
           .catchError((_) => false),
     );
   }
@@ -112,6 +131,8 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
   Widget build(BuildContext context) {
     ref.watch(liveActivityBridgeProvider);
     final settings = ref.watch(settingsProvider);
+    final foreground = ref.watch(appForegroundProvider);
+    final chatBusy = ref.watch(chatProvider.select((c) => c.isBusy));
     final reduced = WidgetsBinding
         .instance
         .platformDispatcher
@@ -120,6 +141,9 @@ class _AgyGoAppState extends ConsumerState<AgyGoApp>
     final fluid = settings.fluidMotion && !reduced;
 
     _syncStatusBar(settings.hideStatusBar);
+    _syncKeepScreenOn(
+      settings.keepScreenOnWhileRunning && foreground && chatBusy,
+    );
     _ensureThemes(
       accent: AppAccent.fromId(settings.accent),
       glassBlur: settings.glassBlur,

@@ -177,6 +177,7 @@ class AppSettings {
     this.notifyOnTurnComplete = true,
     this.notifyOnApproval = true,
     this.liveActivityEnabled = true,
+    this.keepScreenOnWhileRunning = true,
     this.wallpaperPath,
     this.wallpaperOpacity = 0.22,
     this.quickPanelSwipe = true,
@@ -206,6 +207,7 @@ class AppSettings {
   final bool notifyOnTurnComplete;
   final bool notifyOnApproval;
   final bool liveActivityEnabled;
+  final bool keepScreenOnWhileRunning;
   final String? wallpaperPath;
   final double wallpaperOpacity;
   final bool quickPanelSwipe;
@@ -247,6 +249,7 @@ class AppSettings {
     bool? notifyOnTurnComplete,
     bool? notifyOnApproval,
     bool? liveActivityEnabled,
+    bool? keepScreenOnWhileRunning,
     String? Function()? wallpaperPath,
     double? wallpaperOpacity,
     bool? quickPanelSwipe,
@@ -276,6 +279,8 @@ class AppSettings {
     notifyOnTurnComplete: notifyOnTurnComplete ?? this.notifyOnTurnComplete,
     notifyOnApproval: notifyOnApproval ?? this.notifyOnApproval,
     liveActivityEnabled: liveActivityEnabled ?? this.liveActivityEnabled,
+    keepScreenOnWhileRunning:
+        keepScreenOnWhileRunning ?? this.keepScreenOnWhileRunning,
     wallpaperPath: wallpaperPath == null ? this.wallpaperPath : wallpaperPath(),
     wallpaperOpacity: wallpaperOpacity ?? this.wallpaperOpacity,
     quickPanelSwipe: quickPanelSwipe ?? this.quickPanelSwipe,
@@ -314,6 +319,7 @@ class SettingsController extends Notifier<AppSettings> {
   static const _kNotifyComplete = 'agy.notifyOnTurnComplete';
   static const _kNotifyApproval = 'agy.notifyOnApproval';
   static const _kLiveActivity = 'agy.liveActivityEnabled';
+  static const _kKeepScreenOn = 'agy.keepScreenOnWhileRunning';
   static const _kWallpaperPath = 'agy.wallpaperPath';
   static const _kWallpaperOpacity = 'agy.wallpaperOpacity';
   static const _kQuickPanelSwipe = 'agy.quickPanelSwipe';
@@ -378,6 +384,7 @@ class SettingsController extends Notifier<AppSettings> {
         notifyOnTurnComplete: prefs.getBool(_kNotifyComplete) ?? true,
         notifyOnApproval: prefs.getBool(_kNotifyApproval) ?? true,
         liveActivityEnabled: prefs.getBool(_kLiveActivity) ?? true,
+        keepScreenOnWhileRunning: prefs.getBool(_kKeepScreenOn) ?? true,
         wallpaperPath: prefs.getString(_kWallpaperPath),
         wallpaperOpacity: (prefs.getDouble(_kWallpaperOpacity) ?? 0.22).clamp(
           0.08,
@@ -508,6 +515,12 @@ class SettingsController extends Notifier<AppSettings> {
     state = state.copyWith(liveActivityEnabled: enabled);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_kLiveActivity, enabled);
+  }
+
+  Future<void> setKeepScreenOnWhileRunning(bool enabled) async {
+    state = state.copyWith(keepScreenOnWhileRunning: enabled);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kKeepScreenOn, enabled);
   }
 
   Future<void> setWallpaperPath(String? path) async {

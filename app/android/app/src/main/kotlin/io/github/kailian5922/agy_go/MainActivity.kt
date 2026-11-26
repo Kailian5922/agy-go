@@ -24,6 +24,7 @@ class MainActivity : FlutterActivity() {
     private var petPlugin: PetPlugin? = null
     private var systemPlugin: SystemPlugin? = null
     private var hideStatusBar: Boolean = true
+    private var keepScreenOn: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -36,6 +37,7 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         applyStatusBarVisibility()
+        applyKeepScreenOn()
         // Re-check MANAGE_EXTERNAL_STORAGE / legacy storage grants & live activity promotion after returning from Settings.
         runtimePlugin?.onResume()
         LiveActivity.refresh(applicationContext)
@@ -68,7 +70,19 @@ class MainActivity : FlutterActivity() {
                     .apply()
                 applyStatusBarVisibility()
             },
+            onSetKeepScreenOn = { enabled ->
+                keepScreenOn = enabled
+                applyKeepScreenOn()
+            },
         )
+    }
+
+    private fun applyKeepScreenOn() {
+        if (keepScreenOn) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     @Suppress("DEPRECATION")

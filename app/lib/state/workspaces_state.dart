@@ -561,3 +561,41 @@ String displayWorkspacePath(
   }
   return path;
 }
+
+/// Canonicalizes workspace/session paths (trims trailing `/` and unifies Android
+/// `/sdcard` with `/storage/emulated/0`) so sessions reliably match their workspace.
+String normalizeWorkspacePath(String raw) {
+  var p = raw.trim();
+  while (p.length > 1 && p.endsWith('/')) {
+    p = p.substring(0, p.length - 1);
+  }
+  if (p == '/sdcard') return '/storage/emulated/0';
+  if (p.startsWith('/sdcard/')) {
+    return '/storage/emulated/0/${p.substring('/sdcard/'.length)}';
+  }
+  return p;
+}
+
+/// Finds the registered [WorkspaceItem] owning [cwd] via longest-prefix match.
+WorkspaceItem? matchWorkspaceForCwd(
+  String cwd,
+  List<WorkspaceItem> workspaces,
+) {
+  final norm = normalizeWorkspacePath(cwd);
+  if (norm.isEmpty) return null;
+  WorkspaceItem? best;
+  var bestLen = -1;
+  for (final ws in workspaces) {
+    final wsNorm = normalizeWorkspacePath(ws.path);
+    if (wsNorm.isEmpty) continue;
+    final exact = norm == wsNorm;
+    final inside = wsNorm == '/'
+        ? norm.startsWith('/')
+        : norm.startsWith('$wsNorm/');
+    if ((exact || inside) && wsNorm.length > bestLen) {
+      best = ws;
+      bestLen = wsNorm.length;
+    }
+  }
+  return best;
+}

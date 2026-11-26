@@ -383,14 +383,13 @@ class ChatController extends Notifier<ChatState> {
     if (state.isBusy) return;
     final activeCwd = state.sessionCwd;
     if (state.sessionId != null && activeCwd != null) {
-      final normActive = activeCwd.endsWith('/') && activeCwd.length > 1
-          ? activeCwd.substring(0, activeCwd.length - 1)
-          : activeCwd;
-      final normNext = next.path.endsWith('/') && next.path.length > 1
-          ? next.path.substring(0, next.path.length - 1)
-          : next.path;
+      final normActive = normalizeWorkspacePath(activeCwd);
+      final normNext = normalizeWorkspacePath(next.path);
       final inside =
-          normActive == normNext || normActive.startsWith('$normNext/');
+          normActive == normNext ||
+          (normNext == '/'
+              ? normActive.startsWith('/')
+              : normActive.startsWith('$normNext/'));
       if (!inside) {
         startNewChat();
       }

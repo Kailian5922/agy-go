@@ -47,6 +47,7 @@ class SystemPlugin(
     private val activityProvider: () -> Activity? = { null },
     messenger: BinaryMessenger,
     private val onSetHideStatusBar: ((Boolean) -> Unit)? = null,
+    private val onSetKeepScreenOn: ((Boolean) -> Unit)? = null,
 ) : MethodChannel.MethodCallHandler {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -65,6 +66,11 @@ class SystemPlugin(
             "setHideStatusBar" -> {
                 val enabled = call.argument<Boolean>("enabled") ?: true
                 mainHandler.post { onSetHideStatusBar?.invoke(enabled) }
+                result.success(true)
+            }
+            "setKeepScreenOn" -> {
+                val enabled = call.argument<Boolean>("enabled") ?: false
+                mainHandler.post { onSetKeepScreenOn?.invoke(enabled) }
                 result.success(true)
             }
             "pickImage" -> launchDocumentPicker("image/*", REQ_PICK_IMAGE, result)

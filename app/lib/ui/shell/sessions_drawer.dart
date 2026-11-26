@@ -16,10 +16,12 @@ import '../../state/connection_state.dart';
 import '../../state/hosts_state.dart';
 import '../../state/runtime_state.dart';
 import '../../state/sessions_state.dart';
+import '../../state/workspaces_state.dart';
 import '../common/app_dialog.dart';
 import '../common/app_sheet.dart';
 import '../common/brief_notice.dart';
 import '../common/empty_view.dart';
+import '../common/expand_reveal.dart';
 import '../common/list_page_row.dart';
 import '../common/pressable.dart';
 import '../common/row_marks.dart';
@@ -214,8 +216,32 @@ class _SessionsDrawerState extends ConsumerState<SessionsDrawer> {
                 onTap: () => unawaited(openSearch()),
               ),
             ),
-            WorkspaceSwitcher(
-              onManage: () => widget.onOpen(DrawerDestination.workspaces),
+            Row(
+              children: [
+                Expanded(
+                  child: WorkspaceSwitcher(
+                    onManage: () => widget.onOpen(DrawerDestination.workspaces),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(right: 10),
+                  child: Tooltip(
+                    message: '添加工作区',
+                    child: InkWell(
+                      onTap: () => unawaited(addWorkspaceFlow(context, ref)),
+                      customBorder: Squircle.border(AppShape.md),
+                      child: SizedBox.square(
+                        dimension: 34,
+                        child: Icon(
+                          AppIcons.newFolder,
+                          size: 18,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
             _FilterChipsRow(
               selecting: _selecting,
@@ -661,15 +687,98 @@ class _SessionList extends ConsumerWidget {
   final ValueChanged<String> onStartMultiSelect;
   final ValueChanged<String> onMoveToFolder;
 
+  Future<void> _startChatInWorkspace(
+    WidgetRef ref,
+    WorkspaceSessionGroup group,
+  ) async {
+    if (group.workspace != null) {
+      await ref.read(workspacesProvider.notifier).select(group.workspace!.id);
+    } else if (group.path.isNotEmpty) {
+      await ref
+          .read(workspacesProvider.notifier)
+          .add(group.path, title: group.title);
+    }
+    ref.read(chatProvider.notifier).startNewChat();
+    onClose();
+  }
+
+  void _openSession(
+    WidgetRef ref,
+    WorkspaceSessionGroup group,
+    AcpSessionInfo s,
+  ) {
+    ref.read(sessionsProvider.notifier).selectSession(s.sessionId);
+    final ws = group.workspace;
+    if (ws != null && ref.read(workspacesProvider).selectedId != ws.id) {
+      unawaited(ref.read(workspacesProvider.notifier).select(ws.id));
+    }
+    onClose();
+  }
+
+  Future<void> _showWorkspaceQuickActions(
+    BuildContext context,
+    WidgetRef ref,
+    WorkspaceSessionGroup group,
+  ) async {
+    final action = await showAppSheet<String>(
+      context,
+      isScrollControlled: true,
+      builder: (sheet) => SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SheetHeader(group.title),
+            SheetGroup(
+              children: [
+                ListPageRow(
+                  icon: AppIcons.newChat,
+                  title: '在此工作区新建对话',
+                  chevron: false,
+                  onTap: () => Navigator.pop(sheet, 'new'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.files,
+                  title: '浏览工作区文件',
+                  chevron: false,
+                  onTap: () => Navigator.pop(sheet, 'files'),
+                ),
+                ListPageRow(
+                  icon: AppIcons.configure,
+                  title: '管理全部工作区',
+                  chevron: false,
+                  onTap: () => Navigator.pop(sheet, 'manage'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+          ],
+        ),
+      ),
+    );
+    if (!context.mounted || action == null) return;
+    switch (action) {
+      case 'new':
+        await _startChatInWorkspace(ref, group);
+      case 'files':
+        if (group.workspace != null) {
+          await ref.read(workspacesProvider.notifier).select(group.workspace!.id);
+        }
+        onOpen(DrawerDestination.files);
+      case 'manage':
+        onOpen(DrawerDestination.workspaces);
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final sessionsState = ref.watch(sessionsProvider);
-    final filtered = ref.watch(filteredSessionsProvider);
+    final groups = ref.watch(workspaceSessionGroupsProvider);
     final conn = ref.watch(activeConnectionProvider);
     final hosts = ref.watch(hostsProvider);
     final runtime = ref.watch(localRuntimeProvider).status;
 
-    if (sessionsState.loading && filtered.isEmpty) {
+    if (sessionsState.loading && sessionsState.sessions.isEmpty) {
       return const Center(
         child: SizedBox.square(
           dimension: 22,
@@ -678,7 +787,7 @@ class _SessionList extends ConsumerWidget {
       );
     }
 
-    if (filtered.isEmpty) {
+    if (sessionsState.sessions.isEmpty) {
       if (hosts.active.isLocal && !runtime.isRunning) {
         final installed = runtime.phase == RuntimePhase.installed;
         return Center(
@@ -710,6 +819,9 @@ class _SessionList extends ConsumerWidget {
           ),
         );
       }
+    }
+
+    if (groups.isEmpty) {
       return Center(
         child: EmptyView(
           compact: true,
@@ -718,6 +830,10 @@ class _SessionList extends ConsumerWidget {
               : AppIcons.chat,
           title: sessionsState.activeFolder != null
               ? '「${sessionsState.activeFolder}」内暂无对话'
+              : sessionsState.filter == DrawerSessionFilter.pinned
+              ? '暂无置顶对话'
+              : sessionsState.filter == DrawerSessionFilter.archived
+              ? '暂无归档对话'
               : '还没有对话',
           message: sessionsState.activeFolder != null
               ? '长按任意对话即可移入此文件夹。'
@@ -725,43 +841,6 @@ class _SessionList extends ConsumerWidget {
         ),
       );
     }
-
-    // Group sessions: Pinned first, then Today / Yesterday / Last 7 days / Earlier.
-    final pinned = <AcpSessionInfo>[];
-    final today = <AcpSessionInfo>[];
-    final yesterday = <AcpSessionInfo>[];
-    final week = <AcpSessionInfo>[];
-    final earlier = <AcpSessionInfo>[];
-    final now = DateTime.now();
-    final todayStart = DateTime(now.year, now.month, now.day);
-    final yesterdayStart = todayStart.subtract(const Duration(days: 1));
-    final weekStart = todayStart.subtract(const Duration(days: 7));
-
-    for (final s in filtered) {
-      if (sessionsState.isPinned(s.sessionId) &&
-          sessionsState.filter != DrawerSessionFilter.archived) {
-        pinned.add(s);
-        continue;
-      }
-      final t = s.updatedAt;
-      if (t == null || !t.isBefore(todayStart)) {
-        today.add(s);
-      } else if (!t.isBefore(yesterdayStart)) {
-        yesterday.add(s);
-      } else if (!t.isBefore(weekStart)) {
-        week.add(s);
-      } else {
-        earlier.add(s);
-      }
-    }
-
-    final groups = <(String, List<AcpSessionInfo>)>[
-      if (pinned.isNotEmpty) ('置顶', pinned),
-      if (today.isNotEmpty) ('今天', today),
-      if (yesterday.isNotEmpty) ('昨天', yesterday),
-      if (week.isNotEmpty) ('近 7 天', week),
-      if (earlier.isNotEmpty) ('更早', earlier),
-    ];
 
     final colors = DshColors.of(context);
     final theme = Theme.of(context);
@@ -772,41 +851,120 @@ class _SessionList extends ConsumerWidget {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(10, 6, 10, 16),
         children: [
-          for (final (label, items) in groups) ...[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 14, 10, 6),
-              child: Text(
-                label,
-                style: theme.textTheme.labelMedium?.copyWith(
-                  color: colors.textTertiary,
-                ),
-              ),
+          for (final group in groups) ...[
+            Builder(
+              key: ValueKey('ws-group-${group.key}'),
+              builder: (ctx) {
+                final open = !sessionsState.isWorkspaceCollapsed(group.key);
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _WorkspaceHeaderRow(
+                      group: group,
+                      open: open,
+                      selecting: selecting,
+                      onToggle: () => unawaited(
+                        ref
+                            .read(sessionsProvider.notifier)
+                            .toggleWorkspaceCollapsed(group.key),
+                      ),
+                      onNewChat: () =>
+                          unawaited(_startChatInWorkspace(ref, group)),
+                      onLongPress: () => unawaited(
+                        _showWorkspaceQuickActions(context, ref, group),
+                      ),
+                    ),
+                    ExpandReveal(
+                      open: open,
+                      child: Container(
+                        margin: const EdgeInsets.only(left: 19, bottom: 6),
+                        padding: const EdgeInsets.only(left: 8),
+                        decoration: BoxDecoration(
+                          border: Border(
+                            left: BorderSide(
+                              color: DshSurfaces.of(context).card.hairline,
+                            ),
+                          ),
+                        ),
+                        child: group.sessions.isEmpty
+                            ? Material(
+                                type: MaterialType.transparency,
+                                child: InkWell(
+                                  onTap: () => unawaited(
+                                    _startChatInWorkspace(ref, group),
+                                  ),
+                                  customBorder: Squircle.border(AppShape.md),
+                                  child: SizedBox(
+                                    height: 36,
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                      ),
+                                      child: Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: Text(
+                                          '暂无对话 · 点此新建',
+                                          style: theme.textTheme.bodySmall
+                                              ?.copyWith(
+                                                color: colors.textTertiary,
+                                              ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              )
+                            : Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  for (final s in group.sessions)
+                                    _SessionRow(
+                                      title: sessionsState.displayTitle(s),
+                                      folderTag:
+                                          sessionsState.activeFolder == null
+                                          ? sessionsState.folderOf(s.sessionId)
+                                          : null,
+                                      selected:
+                                          s.sessionId ==
+                                          sessionsState.currentSessionId,
+                                      selecting: selecting,
+                                      checked: selectedIds.contains(
+                                        s.sessionId,
+                                      ),
+                                      pinned: sessionsState.isPinned(
+                                        s.sessionId,
+                                      ),
+                                      busy:
+                                          chatBusy &&
+                                          s.sessionId ==
+                                              sessionsState.currentSessionId,
+                                      onTap: () {
+                                        if (selecting) {
+                                          onToggleSelect(s.sessionId);
+                                        } else {
+                                          _openSession(ref, group, s);
+                                        }
+                                      },
+                                      onLongPress: () => selecting
+                                          ? onToggleSelect(s.sessionId)
+                                          : unawaited(
+                                              _showSessionActions(
+                                                context,
+                                                ref,
+                                                s,
+                                              ),
+                                            ),
+                                    ),
+                                ],
+                              ),
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
-            for (final s in items)
-              _SessionRow(
-                title: sessionsState.displayTitle(s),
-                folderTag: sessionsState.activeFolder == null
-                    ? sessionsState.folderOf(s.sessionId)
-                    : null,
-                selected: s.sessionId == sessionsState.currentSessionId,
-                selecting: selecting,
-                checked: selectedIds.contains(s.sessionId),
-                pinned: sessionsState.isPinned(s.sessionId),
-                busy: chatBusy && s.sessionId == sessionsState.currentSessionId,
-                onTap: () {
-                  if (selecting) {
-                    onToggleSelect(s.sessionId);
-                  } else {
-                    ref
-                        .read(sessionsProvider.notifier)
-                        .selectSession(s.sessionId);
-                    onClose();
-                  }
-                },
-                onLongPress: () => selecting
-                    ? onToggleSelect(s.sessionId)
-                    : unawaited(_showSessionActions(context, ref, s)),
-              ),
           ],
         ],
       ),
@@ -943,6 +1101,121 @@ class _SessionList extends ConsumerWidget {
           await ctrl.deleteSession(s.sessionId);
         }
     }
+  }
+}
+
+class _WorkspaceHeaderRow extends StatelessWidget {
+  const _WorkspaceHeaderRow({
+    required this.group,
+    required this.open,
+    required this.selecting,
+    required this.onToggle,
+    required this.onNewChat,
+    required this.onLongPress,
+  });
+
+  final WorkspaceSessionGroup group;
+  final bool open;
+  final bool selecting;
+  final VoidCallback onToggle;
+  final VoidCallback onNewChat;
+  final VoidCallback onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final colors = DshColors.of(context);
+    final shape = Squircle.border(AppShape.md);
+    final iconColor = group.isSelected
+        ? scheme.primary
+        : scheme.onSurfaceVariant;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Material(
+        type: MaterialType.transparency,
+        shape: shape,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onToggle,
+          onLongPress: () {
+            unawaited(HapticFeedback.mediumImpact());
+            onLongPress();
+          },
+          customBorder: shape,
+          child: SizedBox(
+            height: 42,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 6, 0),
+              child: Row(
+                children: [
+                  Icon(
+                    group.isDefault
+                        ? AppIcons.defaultFolder
+                        : (open ? AppIcons.folderOpen : AppIcons.workspace),
+                    size: 18,
+                    color: iconColor,
+                  ),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Text(
+                      group.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                        color: group.isSelected
+                            ? scheme.primary
+                            : scheme.onSurface,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '${group.sessions.length}',
+                    style: AppType.tabular(
+                      theme.textTheme.bodySmall!.copyWith(
+                        color: colors.textTertiary,
+                      ),
+                    ),
+                  ),
+                  if (!selecting) ...[
+                    const SizedBox(width: 2),
+                    Tooltip(
+                      message: '在「${group.title}」新建对话',
+                      child: InkWell(
+                        onTap: onNewChat,
+                        customBorder: const CircleBorder(),
+                        child: SizedBox.square(
+                          dimension: 30,
+                          child: Icon(
+                            AppIcons.newChat,
+                            size: 16,
+                            color: colors.textTertiary,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                  AnimatedRotation(
+                    turns: open ? 0 : -0.25,
+                    duration: AppMotion.of(context, AppMotion.quick),
+                    curve: AppMotion.std,
+                    child: Icon(
+                      AppIcons.expand,
+                      size: 16,
+                      color: colors.textTertiary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

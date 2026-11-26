@@ -1,8 +1,11 @@
 // Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
 
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../../state/settings_state.dart';
 import '../../state/system_state.dart';
 import '../common/overview_card.dart';
 import '../common/settings_widgets.dart';
@@ -17,6 +20,9 @@ class KeepAliveScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final sys = ref.watch(systemToolsProvider);
+    final keepScreenOn = ref.watch(
+      settingsProvider.select((s) => s.keepScreenOnWhileRunning),
+    );
     final dev = sys.device;
     final dsh = DshColors.of(context);
 
@@ -53,9 +59,21 @@ class KeepAliveScreen extends ConsumerWidget {
           ),
         ),
         SettingsSection(
-          title: '后台保活',
+          title: '前台常亮与后台保活',
           footer: Text(_vendorHint(dev.manufacturer)),
           children: [
+            SettingsSwitchTile(
+              icon: AppIcons.tip,
+              tint: 3,
+              title: '模型运行时保持屏幕常亮',
+              subtitle: '停留在 App 页面且模型思考/执行期间不自动熄屏，结束后自动恢复',
+              value: keepScreenOn,
+              onChanged: (v) => unawaited(
+                ref
+                    .read(settingsProvider.notifier)
+                    .setKeepScreenOnWhileRunning(v),
+              ),
+            ),
             SettingsTile(
               icon: AppIcons.highPower,
               tint: 4,

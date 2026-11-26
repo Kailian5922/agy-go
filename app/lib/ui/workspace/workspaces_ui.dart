@@ -635,7 +635,7 @@ class WorkspaceSwitcher extends ConsumerWidget {
     final selected = ref.watch(selectedWorkspaceProvider);
     final theme = Theme.of(context);
     final tertiary = DshColors.of(context).textTertiary;
-    final label = selected == null ? '全部对话' : selected.displayTitle;
+    final label = selected == null ? '全部工作区' : selected.displayTitle;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 0, 10, 0),
@@ -652,7 +652,7 @@ class WorkspaceSwitcher extends ConsumerWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    selected == null ? AppIcons.conversations : AppIcons.workspace,
+                    selected == null ? AppIcons.workspaceGroup : AppIcons.workspace,
                     size: 18,
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
@@ -743,8 +743,8 @@ class _WorkspaceSheet extends ConsumerWidget {
                 margin: margin,
                 children: [
                   ListPageRow(
-                    icon: AppIcons.conversations,
-                    title: '全部对话',
+                    icon: AppIcons.workspaceGroup,
+                    title: '全部工作区',
                     trailing: RowCheck(visible: wsState.selectedId == null),
                     onTap: () => pick(null),
                   ),
