@@ -243,6 +243,8 @@ class ChatController extends Notifier<ChatState> {
   String? _ownedSessionId;
   int _loadGeneration = 0;
   int _turnGen = 0;
+  Completer<void>? _inFlightPromptDone;
+  String? _inFlightPromptSessionId;
 
   Future<String?>? _draftFuture;
   String? _draftFutureCwd;
@@ -330,6 +332,8 @@ class ChatController extends Notifier<ChatState> {
     _stderrSub = null;
     _activeConn = conn;
     _ownedSessionId = null;
+    _inFlightPromptDone = null;
+    _inFlightPromptSessionId = null;
     _draftFuture = null;
     _draftFutureCwd = null;
     _cachedModes = null;
@@ -1141,8 +1145,13 @@ class ChatController extends Notifier<ChatState> {
         if (text.isNotEmpty) AcpTextBlock(text),
       ];
 
-      final result = await conn.client.prompt(sid, blocks);
-      if (!ref.mounted || _ownedSessionId != sid || _turnGen != myGen) return;
+      final result = await _sendPromptWithCancelSettle(conn, sid, blocks, myGen);
+      if (result == null ||
+          !ref.mounted ||
+          _ownedSessionId != sid ||
+          _turnGen != myGen) {
+        return;
+      }
       state = state.copyWith(
         transcript: state.transcript.finishTurn(
           result.stopReason,
@@ -1205,6 +1214,130 @@ class ChatController extends Notifier<ChatState> {
     }
   }
 
+  static bool _isPromptCancellingError(AcpRpcException e) {
+    final lower = e.message.toLowerCase();
+    return lower.contains('being cancelled') ||
+        lower.contains('being canceled') ||
+        lower.contains('wait for it to finish');
+  }
+
+  /// Sends `session/prompt` and handles `agy acp`'s session-cancellation window:
+  /// when a previous turn on [sid] was just cancelled (e.g. via 「立即发送」 or Stop -> quick resend),
+  /// waits for the previous prompt RPC to settle and retries ONLY on `agy acp`'s
+  /// explicit `the running prompt is being cancelled` rejection.
+  Future<AcpPromptResult?> _sendPromptWithCancelSettle(
+    HostConnection conn,
+    String sid,
+    List<AcpContentBlock> blocks,
+    int myGen,
+  ) async {
+    Completer<void>? priorDone =
+        (_inFlightPromptSessionId == sid &&
+            _inFlightPromptDone != null &&
+            !_inFlightPromptDone!.isCompleted)
+        ? _inFlightPromptDone
+        : null;
+
+    if (priorDone != null) {
+      await priorDone.future.timeout(
+        const Duration(milliseconds: 400),
+        onTimeout: () {},
+      );
+      if (!ref.mounted || _ownedSessionId != sid || _turnGen != myGen) {
+        return null;
+      }
+    }
+
+    const cancelWaitMs = <int>[250, 500, 800, 1200, 1500, 2000, 2500, 3000];
+    var loggedCancelWait = false;
+
+    for (var attempt = 0; attempt <= cancelWaitMs.length; attempt++) {
+      if (!ref.mounted || _ownedSessionId != sid || _turnGen != myGen) {
+        return null;
+      }
+
+      final myDone = Completer<void>();
+      _inFlightPromptDone = myDone;
+      _inFlightPromptSessionId = sid;
+
+      try {
+        final res = await conn.client.prompt(sid, blocks);
+        if (!myDone.isCompleted) myDone.complete();
+        if (identical(_inFlightPromptDone, myDone)) {
+          _inFlightPromptDone = null;
+          _inFlightPromptSessionId = null;
+        }
+        return res;
+      } on AcpRpcException catch (e) {
+        if (!myDone.isCompleted) myDone.complete();
+        if (_isPromptCancellingError(e) && attempt < cancelWaitMs.length) {
+          // Restore priorDone so subsequent loops still wake up the instant it settles.
+          if (priorDone != null && !priorDone.isCompleted) {
+            _inFlightPromptDone = priorDone;
+            _inFlightPromptSessionId = sid;
+          } else if (identical(_inFlightPromptDone, myDone)) {
+            _inFlightPromptDone = null;
+            _inFlightPromptSessionId = null;
+          }
+
+          if (!ref.mounted || _ownedSessionId != sid || _turnGen != myGen) {
+            return null;
+          }
+          if (!loggedCancelWait) {
+            loggedCancelWait = true;
+            state = state.copyWith(
+              lastActivityAt: () => DateTime.now(),
+              turnEvents: _appendTurnEvent(
+                state.turnEvents,
+                TurnActivityLogEntry(
+                  timestamp: DateTime.now(),
+                  label: '正在等待上一轮中止完成，随后自动发送…',
+                ),
+              ),
+            );
+          }
+
+          final delay = Duration(milliseconds: cancelWaitMs[attempt]);
+          if (priorDone != null && !priorDone.isCompleted) {
+            await Future.any<void>([
+              priorDone.future,
+              Future<void>.delayed(delay),
+            ]);
+            if (priorDone.isCompleted) {
+              // Brief yield so agy acp releases its per-session cancel guard.
+              await Future<void>.delayed(const Duration(milliseconds: 50));
+            }
+          } else {
+            await Future<void>.delayed(delay);
+          }
+          continue;
+        }
+
+        if (identical(_inFlightPromptDone, myDone)) {
+          _inFlightPromptDone = null;
+          _inFlightPromptSessionId = null;
+        }
+        if (_isPromptCancellingError(e)) {
+          throw AcpRpcException(
+            code: e.code,
+            message: '上一轮任务仍在中止中（引擎暂未释放当前会话），请稍候几秒再试，或在「本机引擎」重启引擎。',
+            data: e.data,
+            method: e.method,
+          );
+        }
+        rethrow;
+      } catch (_) {
+        if (!myDone.isCompleted) myDone.complete();
+        if (identical(_inFlightPromptDone, myDone)) {
+          _inFlightPromptDone = null;
+          _inFlightPromptSessionId = null;
+        }
+        rethrow;
+      }
+    }
+    return null;
+  }
+
   /// Interrupts any active/stuck turn and sends queued message at [index] immediately.
   Future<void> sendQueuedNow(int index) async {
     if (index < 0 || index >= state.queuedMessages.length) return;
@@ -1230,7 +1363,7 @@ class ChatController extends Notifier<ChatState> {
   }
 
   /// Immediately unlocks the UI, finishes any streaming cursor/pending tool calls,
-  /// and sends ACP `session/cancel` non-blockingly so a hung network turn never traps the user.
+  /// and flushes the ACP `session/cancel` notification so follow-up prompts stay ordered.
   Future<void> cancel() async {
     _turnGen++;
     for (final p in state.pendingPermissions) {
@@ -1248,7 +1381,10 @@ class ChatController extends Notifier<ChatState> {
     final conn = _activeConn ?? ref.read(activeConnectionProvider).value;
     final sid = state.sessionId;
     if (conn == null || sid == null) return;
-    unawaited(conn.client.cancel(sid).catchError((_) {}));
+    await conn.client
+        .cancel(sid)
+        .timeout(const Duration(seconds: 2), onTimeout: () {})
+        .catchError((_) {});
   }
 
   Future<bool> logoutAgent() async {

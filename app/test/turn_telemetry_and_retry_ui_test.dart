@@ -293,6 +293,107 @@ void main() {
       await sendFuture;
       expect(container.read(chatProvider).isBusy, isFalse);
     });
+
+    test('sendQueuedNow waits through agy acp "running prompt is being cancelled" window and delivers without duplicating user bubble', () async {
+      final (clientTransport, agentTransport) = MemoryAcpTransport.pair();
+      final client = AcpClient(clientTransport);
+      final agent = AcpJsonRpcPeer(agentTransport);
+      addTearDown(() async {
+        await client.close();
+        await agent.close();
+      });
+
+      var cancelling = false;
+      Completer<Map<String, Object?>>? runningPrompt;
+      var rejectedCount = 0;
+
+      agent.onRequest('initialize', (_) async => {
+        'protocolVersion': 1,
+        'agentInfo': {'name': 'antigravity-cli', 'version': '1.6.0'},
+        'agentCapabilities': {'loadSession': true},
+      });
+      agent.onRequest('session/list', (_) async => {'sessions': const <Object?>[]});
+      agent.onRequest('session/new', (_) async => {'sessionId': 'sess-cancel-race'});
+      agent.onNotification('session/cancel', (_) {
+        // Simulate real agy acp taking 650ms (past the 400ms pre-wait) to finish cancelling!
+        cancelling = true;
+        Future<void>.delayed(const Duration(milliseconds: 650), () {
+          cancelling = false;
+          if (runningPrompt != null && !runningPrompt!.isCompleted) {
+            runningPrompt!.complete({'stopReason': 'cancelled'});
+          }
+        });
+      });
+
+      agent.onRequest('session/prompt', (params) async {
+        final sid = params['sessionId']! as String;
+        final text = ((params['prompt'] as List).first as Map)['text'] as String;
+        if (cancelling) {
+          rejectedCount++;
+          throw AcpRpcException(
+            code: -32603,
+            message:
+                "Can't add this prompt to session $sid: the running prompt is being cancelled; wait for it to finish, then send this prompt again",
+          );
+        }
+        if (text == '长思考任务') {
+          runningPrompt = Completer<Map<String, Object?>>();
+          return runningPrompt!.future;
+        }
+        await agent.sendNotification('session/update', {
+          'sessionId': sid,
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'content': {'type': 'text', 'text': '已收到立即发送：$text'},
+          },
+        });
+        return {'stopReason': 'end_turn'};
+      });
+
+      final init = await client.initialize();
+      final conn = HostConnection(
+        host: const HostRef.local(),
+        label: '本机引擎',
+        client: client,
+        initResult: init,
+        defaultCwd: '/tmp/ws',
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          activeConnectionProvider.overrideWith(() => _StubConnection(conn)),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.read(chatProvider);
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      final turn1 = container.read(chatProvider.notifier).send('长思考任务');
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+
+      // Queue follow-up then tap 「立即发送」.
+      await container.read(chatProvider.notifier).send('怎么样了这么久了');
+      expect(container.read(chatProvider).queuedMessages, ['怎么样了这么久了']);
+
+      await container.read(chatProvider.notifier).sendQueuedNow(0);
+      await turn1;
+
+      final after = container.read(chatProvider);
+      expect(rejectedCount, greaterThanOrEqualTo(1));
+      expect(after.error, isNull);
+      expect(after.isBusy, isFalse);
+      // User bubble for 「怎么样了这么久了」 must appear EXACTLY once!
+      final userBubbles = after.transcript.items
+          .whereType<UserTranscriptItem>()
+          .where((u) => u.text == '怎么样了这么久了')
+          .toList();
+      expect(userBubbles.length, 1);
+      expect(
+        (after.transcript.items.last as AssistantTranscriptItem).text,
+        '已收到立即发送：怎么样了这么久了',
+      );
+    });
   });
 
   group('Retry banner, stall pill, diagnostics sheet & live thinking tail UI', () {
