@@ -18,6 +18,7 @@ import '../common/list_page_row.dart';
 import '../common/settings_widgets.dart';
 import '../shell/page_frame.dart';
 import '../theme/theme.dart';
+import 'tool_format.dart';
 
 /// Concise preview header strip for message action sheets (mirroring DSH Go's MenuTextPreview).
 class MenuTextPreview extends StatelessWidget {
@@ -223,7 +224,10 @@ class DiffEntry {
 }
 
 /// Collects all [DiffEntry] records produced by tool calls in [transcript].
-List<DiffEntry> collectTranscriptDiffs(ChatTranscript transcript) {
+List<DiffEntry> collectTranscriptDiffs(
+  ChatTranscript transcript, {
+  String? workspaceCwd,
+}) {
   final out = <DiffEntry>[];
   for (final item in transcript.items) {
     if (item is! AssistantTranscriptItem) continue;
@@ -236,10 +240,14 @@ List<DiffEntry> collectTranscriptDiffs(ChatTranscript transcript) {
         )) {
           out.add(
             DiffEntry(
-              path: path,
+              path: displayToolPath(path, workspaceCwd: workspaceCwd),
               oldText: oldText,
               newText: newText,
-              toolTitle: tc.title.isNotEmpty ? tc.title : tc.name,
+              toolTitle: formatToolSummary(
+                tc,
+                workspaceCwd: workspaceCwd,
+                compact: false,
+              ),
             ),
           );
         }
@@ -257,7 +265,10 @@ class DiffViewerPage extends StatefulWidget {
     this.title = '变更 Diff',
   });
 
-  factory DiffViewerPage.fromToolCall(AcpToolCall tc) {
+  factory DiffViewerPage.fromToolCall(
+    AcpToolCall tc, {
+    String? workspaceCwd,
+  }) {
     final entries = <DiffEntry>[
       for (final block in tc.content)
         if (block case AcpDiffToolContent(
@@ -266,21 +277,33 @@ class DiffViewerPage extends StatefulWidget {
           :final newText,
         ))
           DiffEntry(
-            path: path,
+            path: displayToolPath(path, workspaceCwd: workspaceCwd),
             oldText: oldText,
             newText: newText,
-            toolTitle: tc.title,
+            toolTitle: formatToolSummary(
+              tc,
+              workspaceCwd: workspaceCwd,
+              compact: false,
+            ),
           ),
     ];
+    final cleanTitle = formatToolSummary(
+      tc,
+      workspaceCwd: workspaceCwd,
+      compact: false,
+    );
     return DiffViewerPage(
       entries: entries,
-      title: tc.title.isNotEmpty ? tc.title : '文件变更',
+      title: cleanTitle.isNotEmpty ? cleanTitle : '文件变更',
     );
   }
 
-  factory DiffViewerPage.fromTranscript(ChatTranscript transcript) {
+  factory DiffViewerPage.fromTranscript(
+    ChatTranscript transcript, {
+    String? workspaceCwd,
+  }) {
     return DiffViewerPage(
-      entries: collectTranscriptDiffs(transcript),
+      entries: collectTranscriptDiffs(transcript, workspaceCwd: workspaceCwd),
       title: '本对话变更 Diff',
     );
   }

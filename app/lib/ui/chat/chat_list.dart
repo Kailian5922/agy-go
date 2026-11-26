@@ -381,6 +381,9 @@ class _AssistantTurnViewState extends ConsumerState<_AssistantTurnView> {
       settingsProvider.select((s) => s.foldCompletedTurns),
     );
     final isSpeaking = ref.watch(voiceProvider.select((v) => v.isSpeaking));
+    final workspaceCwd =
+        ref.watch(chatProvider.select((c) => c.sessionCwd)) ??
+        ref.watch(effectiveWorkingDirProvider);
 
     final foldedByDefault =
         foldCompleted && !item.isStreaming && item.text.isNotEmpty;
@@ -442,7 +445,8 @@ class _AssistantTurnViewState extends ConsumerState<_AssistantTurnView> {
                     onToggle: () =>
                         setState(() => _thoughtOpen = !_thoughtOpen),
                   ),
-                for (final tc in item.toolCalls) ToolCallCard(toolCall: tc),
+                for (final tc in item.toolCalls)
+                  ToolCallCard(toolCall: tc, workspaceCwd: workspaceCwd),
                 const SizedBox(height: 6),
               ],
             ),

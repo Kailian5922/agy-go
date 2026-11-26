@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../theme/theme.dart';
+import 'tool_format.dart';
 
 /// Approval card mirroring DSH Go's ApprovalCard:
 /// 1px warning hairline, shield header, monospace command/path well,
@@ -44,11 +45,10 @@ class PermissionCard extends StatelessWidget {
 
     final allowOpt = req.options.where((o) => o.kind.isAllow).firstOrNull;
     final rejectOpt = req.options.where((o) => !o.kind.isAllow).firstOrNull;
-    final codeSummary = tc.title.isNotEmpty
-        ? tc.title
-        : (tc.locations.isNotEmpty
-              ? tc.locations.map((l) => l.path).join('\n')
-              : (tc.name ?? '执行工具调用'));
+    final formatted = formatToolSummary(tc, compact: false);
+    final codeSummary = formatted.isNotEmpty
+        ? formatted
+        : (tc.name ?? '执行工具调用');
 
     return GlassSurface(
       tier: GlassTier.card,
@@ -105,7 +105,7 @@ class PermissionCard extends StatelessWidget {
             if (tc.locations.isNotEmpty) ...[
               const SizedBox(height: 6),
               Text(
-                tc.locations.map((l) => l.path).join(', '),
+                tc.locations.map((l) => displayToolPath(l.path)).join(', '),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: AppType.monoLabel(color: dsh.textTertiary),

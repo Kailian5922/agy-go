@@ -75,9 +75,10 @@ String _inferModelGroup(AcpConfigOptionValue choice) {
 /// Top-right chrome-glass pill in [ChatHeader] mirroring DSH Go's ModelChip:
 /// shows `✦ <Model Name> · <思考等级> ⌄` both BEFORE and DURING conversations.
 class ModelModeChip extends ConsumerWidget {
-  const ModelModeChip({super.key, this.grouped = true});
+  const ModelModeChip({super.key, this.grouped = true, this.compact = false});
 
   final bool grouped;
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -163,7 +164,9 @@ class ModelModeChip extends ConsumerWidget {
                 const SizedBox(width: 5),
                 Flexible(
                   child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 184),
+                    constraints: BoxConstraints(
+                      maxWidth: compact ? 132 : 184,
+                    ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [

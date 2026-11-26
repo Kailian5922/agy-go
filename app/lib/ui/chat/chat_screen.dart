@@ -106,6 +106,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           sessionId: s.sessionId,
           title: s.transcript.title,
           isBusy: s.isBusy,
+          hasPlan: s.transcript.plan.isNotEmpty,
           permissions: s.pendingPermissions,
           error: s.error,
           authRequired: s.authRequired,
@@ -118,7 +119,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final hasSession = chat.sessionId != null;
     final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
     final bottomPad = MediaQuery.paddingOf(context).bottom;
-    final dockReserve = keyboardInset + bottomPad + 84;
+    final extraDock = (chat.isBusy || chat.hasPlan) ? 176 : 124;
+    final dockReserve = keyboardInset + bottomPad + extraDock;
 
     final HeaderStatus headerStatus;
     if (chat.permissions.isNotEmpty || phoneApprovals.isNotEmpty) {
@@ -179,7 +181,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     ),
                   )
                 : () => showHostSwitcherSheet(context, ref),
-            trailing: const ModelModeChip(),
+            trailing: ModelModeChip(compact: hasSession),
             onNewChat: hasSession
                 ? () => ref.read(chatProvider.notifier).startNewChat()
                 : null,

@@ -13,6 +13,7 @@ import '../common/pressable.dart';
 import '../common/smooth_size.dart';
 import '../common/status_dot.dart';
 import '../theme/theme.dart';
+import 'tool_format.dart';
 
 /// Floating chrome-glass live activity & plan progress bar above [ComposerBar].
 ///
@@ -62,6 +63,7 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
           isBusy: c.isBusy,
           startedAt: c.turnStartedAt,
           chars: c.turnChars,
+          sessionCwd: c.sessionCwd,
           plan: c.transcript.plan,
           lastItem: c.transcript.items.isNotEmpty
               ? c.transcript.items.last
@@ -101,8 +103,9 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
     String primaryText;
     if (activeTools.isNotEmpty) {
       final tc = activeTools.last;
-      primaryText = tc.title.isNotEmpty
-          ? tc.title
+      final formatted = formatToolSummary(tc, workspaceCwd: chat.sessionCwd);
+      primaryText = formatted.isNotEmpty
+          ? formatted
           : (tc.name ?? '正在执行 ${tc.kind.name}');
     } else if (currentPlan != null && currentPlan.content.isNotEmpty) {
       primaryText = currentPlan.content;
@@ -320,11 +323,15 @@ class _PlanActivitySheetBody extends ConsumerWidget {
                           : tc.status == AcpToolStatus.failed
                           ? dsh.danger
                           : dsh.success,
-                      title: tc.title.isNotEmpty
-                          ? tc.title
-                          : (tc.name ?? tc.kind.name),
+                      title: formatToolSummary(
+                        tc,
+                        workspaceCwd: chat.sessionCwd,
+                      ),
                       subtitle: tc.locations.isNotEmpty
-                          ? tc.locations.first.path
+                          ? displayToolPath(
+                              tc.locations.first.path,
+                              workspaceCwd: chat.sessionCwd,
+                            )
                           : tc.kind.name,
                       meta: tc.status.name,
                       chevron: false,

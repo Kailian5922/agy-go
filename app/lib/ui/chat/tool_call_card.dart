@@ -10,13 +10,21 @@ import '../common/brief_notice.dart';
 import '../common/expand_reveal.dart';
 import '../theme/theme.dart';
 import 'diff_and_output_page.dart';
+import 'tool_format.dart';
 
 /// 32dp single-line tool call row mirroring DSH Go's ToolRow, expanding
 /// smoothly into a JetBrains Mono code/diff well.
 class ToolCallCard extends StatefulWidget {
-  const ToolCallCard({super.key, required this.toolCall});
+  const ToolCallCard({
+    super.key,
+    required this.toolCall,
+    this.workspaceCwd,
+  });
 
   final AcpToolCall toolCall;
+
+  /// Active session / workspace working directory used to shorten file paths.
+  final String? workspaceCwd;
 
   @override
   State<ToolCallCard> createState() => _ToolCallCardState();
@@ -84,23 +92,25 @@ class _ToolCallCardState extends State<ToolCallCard> {
     final dsh = DshColors.of(context);
     final scheme = theme.colorScheme;
     final dark = theme.brightness == Brightness.dark;
+    final cwd = widget.workspaceCwd;
 
     final hasDetails = tc.content.isNotEmpty || tc.locations.isNotEmpty;
-    final summary = tc.title.isNotEmpty
-        ? tc.title
-        : (tc.locations.isNotEmpty
-              ? tc.locations.first.path
-              : (tc.name ?? tc.kind.name));
+    final summary = formatToolSummary(tc, workspaceCwd: cwd);
     final tintIdx = _tint(tc.kind);
     final badgeBg = dsh.identity[tintIdx % dsh.identity.length];
     final badgeFg = dsh.onIdentity[tintIdx % dsh.onIdentity.length];
     final counts = _diffCounts(tc);
+    final failed = tc.status == AcpToolStatus.failed;
+    final summaryColor = failed ? dsh.danger : dsh.textTertiary;
 
-    final statusWidget = switch (tc.status) {
+    // Mirror DSH Go's ToolRow: completed normal rows stay visually quiet on the
+    // right edge (giving maximum room to file paths), while running / failed /
+    // diff-bearing rows display concise trailing indicators.
+    final Widget? statusWidget = switch (tc.status) {
       AcpToolStatus.inProgress => SizedBox.square(
-        dimension: 14,
+        dimension: 13,
         child: CircularProgressIndicator(
-          strokeWidth: 1.8,
+          strokeWidth: 1.7,
           color: scheme.primary,
         ),
       ),
@@ -120,11 +130,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
             ),
         ],
       ),
-      AcpToolStatus.completed => Icon(
-        AppIcons.done,
-        size: 14,
-        color: dsh.success,
-      ),
+      AcpToolStatus.completed => null,
       AcpToolStatus.failed => Icon(
         AppIcons.failed,
         size: 14,
@@ -137,6 +143,14 @@ class _ToolCallCardState extends State<ToolCallCard> {
       ),
       _ => Icon(AppIcons.waiting, size: 14, color: dsh.warning),
     };
+
+    final isMonoSummary =
+        tc.kind == AcpToolKind.execute ||
+        tc.kind == AcpToolKind.read ||
+        tc.kind == AcpToolKind.edit ||
+        tc.kind == AcpToolKind.delete ||
+        tc.kind == AcpToolKind.move ||
+        tc.kind == AcpToolKind.search;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -186,23 +200,24 @@ class _ToolCallCardState extends State<ToolCallCard> {
                       child: Text(
                         summary,
                         maxLines: 1,
+                        softWrap: false,
                         overflow: TextOverflow.ellipsis,
-                        style: tc.kind == AcpToolKind.execute ||
-                                tc.kind == AcpToolKind.read ||
-                                tc.kind == AcpToolKind.edit
-                            ? AppType.monoLabel(color: dsh.textTertiary)
+                        style: isMonoSummary
+                            ? AppType.monoLabel(color: summaryColor)
                                   .copyWith(fontSize: 12.5)
                             : theme.textTheme.bodySmall?.copyWith(
-                                color: dsh.textTertiary,
+                                color: summaryColor,
                               ),
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    statusWidget,
-                    if (hasDetails) ...[
+                    if (statusWidget != null) ...[
+                      const SizedBox(width: 8),
+                      statusWidget,
+                    ],
+                    if (hasDetails && _expanded) ...[
                       const SizedBox(width: 4),
                       AnimatedRotation(
-                        turns: _expanded ? 0.5 : 0,
+                        turns: 0.5,
                         duration: AppMotion.of(context, AppMotion.quick),
                         child: Icon(
                           AppIcons.expand,
@@ -232,35 +247,47 @@ class _ToolCallCardState extends State<ToolCallCard> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     for (final loc in tc.locations)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                loc.line != null
-                                    ? '${loc.path}:${loc.line}'
-                                    : loc.path,
-                                style: AppType.monoLabel(
-                                  color: scheme.onSurfaceVariant,
+                      Builder(
+                        builder: (_) {
+                          final shownLoc = displayToolPath(
+                            loc.path,
+                            workspaceCwd: cwd,
+                          );
+                          final copyPath = normalizeToolPath(
+                            loc.path,
+                            baseCwd: cwd,
+                          );
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 4),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    loc.line != null
+                                        ? '$shownLoc:${loc.line}'
+                                        : shownLoc,
+                                    style: AppType.monoLabel(
+                                      color: scheme.onSurfaceVariant,
+                                    ),
+                                  ),
                                 ),
-                              ),
+                                GestureDetector(
+                                  onTap: () {
+                                    Clipboard.setData(
+                                      ClipboardData(text: copyPath),
+                                    );
+                                    showBriefNotice(context, '已复制路径');
+                                  },
+                                  child: Icon(
+                                    AppIcons.copy,
+                                    size: 14,
+                                    color: dsh.textTertiary,
+                                  ),
+                                ),
+                              ],
                             ),
-                            GestureDetector(
-                              onTap: () {
-                                Clipboard.setData(
-                                  ClipboardData(text: loc.path),
-                                );
-                                showBriefNotice(context, '已复制路径');
-                              },
-                              child: Icon(
-                                AppIcons.copy,
-                                size: 14,
-                                color: dsh.textTertiary,
-                              ),
-                            ),
-                          ],
-                        ),
+                          );
+                        },
                       ),
                     for (final block in tc.content)
                       switch (block) {
@@ -270,7 +297,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
                           :final newText,
                         ) =>
                           _DiffWell(
-                            path: path,
+                            path: displayToolPath(path, workspaceCwd: cwd),
                             oldText: oldText,
                             newText: newText,
                           ),
@@ -310,8 +337,10 @@ class _ToolCallCardState extends State<ToolCallCard> {
                               label: const Text('全屏 Diff'),
                               onPressed: () => Navigator.of(context).push(
                                 MaterialPageRoute<void>(
-                                  builder: (_) =>
-                                      DiffViewerPage.fromToolCall(tc),
+                                  builder: (_) => DiffViewerPage.fromToolCall(
+                                    tc,
+                                    workspaceCwd: cwd,
+                                  ),
                                 ),
                               ),
                             ),
@@ -336,11 +365,16 @@ class _ToolCallCardState extends State<ToolCallCard> {
                                 Navigator.of(context).push(
                                   MaterialPageRoute<void>(
                                     builder: (_) => OutputViewerPage(
-                                      title: tc.title.isNotEmpty
-                                          ? tc.title
-                                          : (tc.name ?? '工具输出'),
+                                      title: formatToolSummary(
+                                        tc,
+                                        workspaceCwd: cwd,
+                                        compact: false,
+                                      ),
                                       subtitle: tc.locations.isNotEmpty
-                                          ? tc.locations.first.path
+                                          ? displayToolPath(
+                                              tc.locations.first.path,
+                                              workspaceCwd: cwd,
+                                            )
                                           : tc.kind.name,
                                       output: fullText,
                                     ),

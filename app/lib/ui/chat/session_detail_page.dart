@@ -22,6 +22,7 @@ import '../theme/theme.dart';
 import '../workspace/workspace_screen.dart';
 import 'diff_and_output_page.dart';
 import 'permission_controls.dart';
+import 'tool_format.dart';
 
 /// Conversation details, live plan checklist, tool trajectory & diffs page.
 class SessionDetailPage extends ConsumerStatefulWidget {
@@ -48,7 +49,10 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
         if (item is AssistantTranscriptItem) ...item.toolCalls,
     ];
     final plan = chat.transcript.plan;
-    final diffs = collectTranscriptDiffs(chat.transcript);
+    final diffs = collectTranscriptDiffs(
+      chat.transcript,
+      workspaceCwd: chat.sessionCwd,
+    );
     final usage = chat.transcript.usage;
     final activeMode = chat.sessionAgentMode ?? settings.agentMode;
     final activePerm = chat.sessionToolPermission ?? settings.toolPermission;
@@ -219,11 +223,19 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
                 for (final tc in toolCalls.reversed)
                   ListPageRow(
                     icon: _toolIcon(tc.kind),
-                    title: tc.title.isNotEmpty
-                        ? tc.title
-                        : (tc.name ?? tc.kind.name),
+                    title: formatToolSummary(
+                      tc,
+                      workspaceCwd: chat.sessionCwd,
+                    ),
                     subtitle: tc.locations.isNotEmpty
-                        ? tc.locations.map((l) => l.path).join(', ')
+                        ? tc.locations
+                              .map(
+                                (l) => displayToolPath(
+                                  l.path,
+                                  workspaceCwd: chat.sessionCwd,
+                                ),
+                              )
+                              .join(', ')
                         : tc.kind.name,
                     meta: tc.status.name,
                     chevron: false,
@@ -258,8 +270,10 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
                   title: '全屏查看全部变更 Diff',
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
-                      builder: (_) =>
-                          DiffViewerPage.fromTranscript(chat.transcript),
+                      builder: (_) => DiffViewerPage.fromTranscript(
+                        chat.transcript,
+                        workspaceCwd: chat.sessionCwd,
+                      ),
                     ),
                   ),
                 ),
