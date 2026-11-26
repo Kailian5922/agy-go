@@ -342,7 +342,7 @@ class _UserBubble extends ConsumerWidget {
                       if (split.body.isNotEmpty) const SizedBox(height: 6),
                     ],
                     if (split.body.isNotEmpty)
-                      SelectableText(split.body, style: bodyStyle),
+                      Text(split.body, style: bodyStyle),
                   ],
                 ),
               ),

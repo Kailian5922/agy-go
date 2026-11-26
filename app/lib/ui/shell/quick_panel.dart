@@ -164,7 +164,7 @@ class QuickPanel extends ConsumerWidget {
               child: ListView(
                 padding: const EdgeInsets.symmetric(horizontal: 10),
                 children: [
-                  if (hasSession) ...[
+                  if (hasSession)
                     _CustomQuickRow(
                       icon: AppIcons.diff,
                       label: '本对话变更 Diff',
@@ -175,13 +175,12 @@ class QuickPanel extends ConsumerWidget {
                         ),
                       ),
                     ),
-                    _CustomQuickRow(
-                      icon: AppIcons.diagnostics,
-                      label: '上下文与用量',
-                      onTap: () =>
-                          unawaited(showContextUsageSheet(context, ref)),
-                    ),
-                  ],
+                  _CustomQuickRow(
+                    icon: AppIcons.diagnostics,
+                    label: '订阅额度与上下文',
+                    onTap: () =>
+                        unawaited(showContextUsageSheet(context, ref)),
+                  ),
                   _CustomQuickRow(
                     icon: AppIcons.plugin,
                     label: 'MCP 服务管理',

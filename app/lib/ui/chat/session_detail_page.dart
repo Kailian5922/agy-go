@@ -142,8 +142,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
               ),
               ListPageRow(
                 icon: AppIcons.diagnostics,
-                title: '上下文用量与一键压缩',
-                subtitle: '查看窗口占比并执行 /compact',
+                title: '订阅额度与上下文用量',
+                subtitle: '查看 5 小时 / 周额度、窗口占比并执行 /compact',
                 onTap: () => unawaited(showContextUsageSheet(context, ref)),
               ),
               ListPageRow(

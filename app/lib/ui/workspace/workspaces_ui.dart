@@ -938,26 +938,25 @@ class _WorkspaceActionsBody extends ConsumerWidget {
                 ),
               ],
             ),
-            if (!w.isDefault)
-              SheetGroup(
-                margin: margin,
-                children: [
-                  ListPageRow(
-                    icon: AppIcons.remove,
-                    title: '移出工作区列表',
-                    subtitle: '不会删除手机或服务器上的原文件',
-                    danger: true,
-                    chevron: false,
-                    onTap: () async {
-                      final wsCtrl = ref.read(workspacesProvider.notifier);
-                      final sessCtrl = ref.read(sessionsProvider.notifier);
-                      onClose();
-                      await wsCtrl.remove(w.id);
-                      await sessCtrl.removeWorkspaceSessions(w.path);
-                    },
-                  ),
-                ],
-              ),
+            SheetGroup(
+              margin: margin,
+              children: [
+                ListPageRow(
+                  icon: AppIcons.remove,
+                  title: '移出工作区列表',
+                  subtitle: '不会删除手机或服务器上的原文件',
+                  danger: true,
+                  chevron: false,
+                  onTap: () async {
+                    final wsCtrl = ref.read(workspacesProvider.notifier);
+                    final sessCtrl = ref.read(sessionsProvider.notifier);
+                    onClose();
+                    await wsCtrl.remove(w.id);
+                    await sessCtrl.removeWorkspaceSessions(w.path);
+                  },
+                ),
+              ],
+            ),
             const SizedBox(height: 4),
           ],
         ),

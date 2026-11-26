@@ -294,3 +294,74 @@ final workspaceProvider =
     NotifierProvider<WorkspaceController, WorkspaceState>(
       WorkspaceController.new,
     );
+
+/// One candidate returned by `@` file-mention autocomplete.
+class MentionCandidate {
+  const MentionCandidate({
+    required this.relativePath,
+    required this.isDirectory,
+  });
+
+  final String relativePath;
+  final bool isDirectory;
+}
+
+const _mentionSkipDirs = <String>{
+  '.git',
+  '.dart_tool',
+  'node_modules',
+  'build',
+  '.gradle',
+  '__pycache__',
+  '.idea',
+  '.vscode',
+};
+
+/// Bounded breadth-first scan of [rootPath] so `@` finds both top-level and nested
+/// workspace files quickly without stalling on huge trees or restricted Android folders.
+Future<List<MentionCandidate>> scanWorkspaceMentionCandidates(
+  String rootPath, {
+  int maxDepth = 3,
+  int maxEntries = 200,
+}) async {
+  final cleanRoot = rootPath.endsWith('/') && rootPath.length > 1
+      ? rootPath.substring(0, rootPath.length - 1)
+      : rootPath;
+  if (cleanRoot.isEmpty) return const [];
+  final rootDir = Directory(cleanRoot);
+  if (!await rootDir.exists()) return const [];
+
+  final results = <MentionCandidate>[];
+  final queue = <(Directory, String, int)>[(rootDir, '', 0)];
+
+  while (queue.isNotEmpty && results.length < maxEntries) {
+    final (dir, prefix, depth) = queue.removeAt(0);
+    final children = <FileSystemEntity>[];
+    try {
+      await for (final entity in dir.list(followLinks: false)) {
+        children.add(entity);
+      }
+    } catch (_) {
+      continue;
+    }
+
+    children.sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
+    for (final entity in children) {
+      if (results.length >= maxEntries) break;
+      final name = entity.path.split('/').last;
+      if (name.isEmpty) continue;
+      final isDir = entity is Directory;
+      if (isDir && _mentionSkipDirs.contains(name)) continue;
+      if (name.startsWith('.') && name != '.env' && name != '.gitignore') continue;
+
+      final rel = prefix.isEmpty ? name : '$prefix/$name';
+      results.add(MentionCandidate(relativePath: rel, isDirectory: isDir));
+      if (isDir && depth + 1 < maxDepth) {
+        queue.add((entity, rel, depth + 1));
+      }
+    }
+  }
+
+  return results;
+}
+

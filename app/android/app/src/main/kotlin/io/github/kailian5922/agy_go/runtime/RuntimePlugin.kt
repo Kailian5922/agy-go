@@ -67,7 +67,12 @@ class RuntimePlugin(
             "start" -> {
                 val phoneStorage = call.argument<Boolean>("phoneStorage")
                 val binds = call.argument<List<String>>("extraBinds")
-                controller.start(phoneStorage = phoneStorage, extraBinds = binds)
+                val workingDir = call.argument<String>("workingDir")
+                controller.start(
+                    phoneStorage = phoneStorage,
+                    extraBinds = binds,
+                    workingDir = workingDir,
+                )
                 result.success(null)
             }
             "stop" -> {
@@ -90,7 +95,7 @@ class RuntimePlugin(
                 val agentMode = call.argument<String>("agentMode") ?: ""
                 val toolPermission = call.argument<String>("toolPermission") ?: "request-review"
                 val artifactReviewPolicy = call.argument<String>("artifactReviewPolicy") ?: "asks-for-review"
-                val allowNonWorkspaceAccess = call.argument<Boolean>("allowNonWorkspaceAccess") ?: true
+                val allowNonWorkspaceAccess = call.argument<Boolean>("allowNonWorkspaceAccess") ?: false
                 val queuedMessages = call.argument<String>("queuedMessages") ?: "queue"
                 controller.setExecutionPolicy(
                     agentMode = agentMode,

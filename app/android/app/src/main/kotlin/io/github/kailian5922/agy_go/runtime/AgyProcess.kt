@@ -33,6 +33,7 @@ class AgyProcess(
     private val phoneStorageMounted: Boolean,
     private val extraWorkspaceBinds: List<String>,
     private val phoneControlEnabled: Boolean,
+    private val initialWorkingDir: String? = null,
     private val listener: Listener,
 ) {
     interface Listener {
@@ -73,9 +74,16 @@ class AgyProcess(
         serverSocket = server
         listenPort = server.localPort
 
+        val requestedDir = initialWorkingDir?.trim()?.takeIf { it.startsWith("/") }?.let(::File)
+        val startDir = if (requestedDir != null && requestedDir.isDirectory) {
+            requestedDir
+        } else {
+            installer.workspaceDir
+        }
+
         val cmd = buildCommand()
         val pb = ProcessBuilder(cmd).apply {
-            directory(installer.workspaceDir)
+            directory(startDir)
             val env = environment()
             env["HOME"] = installer.homeDir.absolutePath
             env["USER"] = "agy"
@@ -101,7 +109,7 @@ class AgyProcess(
         }
 
         listener.onLog(
-            "[runtime] launching ($executionMode, storage=${if (phoneStorageMounted) "mounted" else "isolated"}, policy=${executionPolicy.toolPermission}): ${cmd.joinToString(" ")}",
+            "[runtime] launching ($executionMode, cwd=${startDir.absolutePath}, storage=${if (phoneStorageMounted) "mounted" else "isolated"}, policy=${executionPolicy.toolPermission}): ${cmd.joinToString(" ")}",
             "system",
         )
         val proc = pb.start()
@@ -183,25 +191,12 @@ class AgyProcess(
     }
 
     private fun buildAcpArgs(): List<String> {
+        // Never pass global `--add-dir` here: each ACP conversation specifies its own `cwd`
+        // (and optional per-session additionalDirectories via `/add-dir`), keeping workspaces isolated.
         val args = ArrayList<String>()
         args.add("acp")
         if (executionPolicy.skipPermissions) {
             args.add("--dangerously-skip-permissions")
-        }
-        val addDirs = LinkedHashSet<String>()
-        if (phoneStorageMounted) {
-            val storageDir = if (executionMode == "proot") PhoneStorage.GUEST_PATH else PhoneStorage.hostRoot()
-            addDirs += storageDir
-        }
-        for (raw in extraWorkspaceBinds) {
-            val clean = raw.trim()
-            if (clean.startsWith("/") && File(clean).isDirectory) {
-                addDirs += clean
-            }
-        }
-        for (dir in addDirs.take(5)) {
-            args.add("--add-dir")
-            args.add(dir)
         }
         return args
     }

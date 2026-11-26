@@ -25,7 +25,7 @@ object AgyAuthHelper {
         val agentMode: String = "", // "" (default) | "accept-edits" | "auto" | "plan"
         val toolPermission: String = "request-review", // "strict" | "request-review" | "proceed-in-sandbox" | "always-proceed"
         val artifactReviewPolicy: String = "asks-for-review", // "asks-for-review" | "always-proceed"
-        val allowNonWorkspaceAccess: Boolean = true,
+        val allowNonWorkspaceAccess: Boolean = false,
         val queuedMessages: String = "queue", // "queue" | "send-immediately"
     ) {
         val skipPermissions: Boolean get() = toolPermission == "always-proceed"

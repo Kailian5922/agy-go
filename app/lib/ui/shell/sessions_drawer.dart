@@ -775,15 +775,14 @@ class _SessionList extends ConsumerWidget {
                   chevron: false,
                   onTap: () => Navigator.pop(sheet, 'manage'),
                 ),
-                if (!group.isDefault)
-                  ListPageRow(
-                    icon: AppIcons.remove,
-                    title: '移出工作区',
-                    subtitle: '移出列表并清理该工作区会话，不删除手机原文件',
-                    danger: true,
-                    chevron: false,
-                    onTap: () => Navigator.pop(sheet, 'remove'),
-                  ),
+                ListPageRow(
+                  icon: AppIcons.remove,
+                  title: '移出工作区',
+                  subtitle: '移出列表并清理该工作区会话，不删除手机原文件',
+                  danger: true,
+                  chevron: false,
+                  onTap: () => Navigator.pop(sheet, 'remove'),
+                ),
               ],
             ),
             const SizedBox(height: 12),

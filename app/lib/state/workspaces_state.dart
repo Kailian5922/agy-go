@@ -85,6 +85,7 @@ class WorkspacesState {
     this.groups = const {},
     this.recentPaths = const [],
     this.removedPaths = const [],
+    this.defaultRemoved = false,
   });
 
   final bool loaded;
@@ -97,6 +98,10 @@ class WorkspacesState {
   /// Normalized paths explicitly removed by the user so they are neither
   /// auto-readded as presets nor resurrected from legacy `agy acp` sessions.
   final List<String> removedPaths;
+
+  /// True once the user explicitly removed the built-in default workspace so it
+  /// is not re-inserted on subsequent restarts.
+  final bool defaultRemoved;
 
   bool isPathRemoved(String rawPath) {
     final norm = normalizeWorkspacePath(rawPath);
@@ -166,6 +171,7 @@ class WorkspacesState {
     Map<String, String>? groups,
     List<String>? recentPaths,
     List<String>? removedPaths,
+    bool? defaultRemoved,
   }) => WorkspacesState(
     loaded: loaded ?? this.loaded,
     workspaces: workspaces ?? this.workspaces,
@@ -174,6 +180,7 @@ class WorkspacesState {
     groups: groups ?? this.groups,
     recentPaths: recentPaths ?? this.recentPaths,
     removedPaths: removedPaths ?? this.removedPaths,
+    defaultRemoved: defaultRemoved ?? this.defaultRemoved,
   );
 }
 
@@ -258,6 +265,7 @@ class WorkspacesController extends Notifier<WorkspacesState> {
       var groups = <String, String>{};
       var recent = <String>[];
       var removedPaths = <String>[];
+      var defaultRemoved = false;
 
       if (raw != null && raw.isNotEmpty) {
         final map = jsonDecode(raw) as Map<String, Object?>;
@@ -298,14 +306,15 @@ class WorkspacesController extends Notifier<WorkspacesState> {
               .toSet()
               .toList();
         }
+        defaultRemoved = map['defaultRemoved'] == true;
       }
 
-      // Always keep the default workspace entry synchronized with the active runtime path.
+      // Keep the default workspace entry synchronized unless the user explicitly removed it.
       final normDefault = normalizeWorkspacePath(defaultPath);
       final defaultIdx = workspaces.indexWhere((w) => w.id == 'default');
       if (defaultIdx >= 0) {
         workspaces[defaultIdx] = workspaces[defaultIdx].copyWith(path: normDefault);
-      } else {
+      } else if (!defaultRemoved && !removedPaths.contains(normDefault)) {
         workspaces.insert(
           0,
           WorkspaceItem(
@@ -335,7 +344,7 @@ class WorkspacesController extends Notifier<WorkspacesState> {
       }
 
       if (selectedId != null && !workspaces.any((w) => w.id == selectedId)) {
-        selectedId = null;
+        selectedId = workspaces.firstOrNull?.id;
       }
 
       if (!ref.mounted || _storageKey != key || _gen != gen) return;
@@ -347,6 +356,7 @@ class WorkspacesController extends Notifier<WorkspacesState> {
         groups: groups,
         recentPaths: recent,
         removedPaths: removedPaths,
+        defaultRemoved: defaultRemoved,
       );
       _cache[key] = loadedState;
       state = loadedState;
@@ -375,6 +385,7 @@ class WorkspacesController extends Notifier<WorkspacesState> {
           'groups': next.groups,
           'recentPaths': next.recentPaths,
           'removedPaths': next.removedPaths,
+          'defaultRemoved': next.defaultRemoved,
         }),
       );
     } catch (_) {}
@@ -463,8 +474,9 @@ class WorkspacesController extends Notifier<WorkspacesState> {
   }
 
   Future<void> remove(String workspaceId) async {
-    if (workspaceId == 'default') return;
     final target = state.byId(workspaceId);
+    final isRemovingDefault =
+        workspaceId == 'default' || target?.isDefault == true;
     final targetPath = target != null ? normalizeWorkspacePath(target.path) : '';
     final nextList = state.workspaces.where((w) => w.id != workspaceId).toList();
     final nextGroups = Map<String, String>.from(state.groups)..remove(workspaceId);
@@ -474,14 +486,17 @@ class WorkspacesController extends Notifier<WorkspacesState> {
       if (targetPath.isNotEmpty && !state.removedPaths.contains(targetPath))
         targetPath,
     ];
+    final nextSelected = state.selectedId == workspaceId
+        ? nextList.firstOrNull?.id
+        : state.selectedId;
     await _save(
       state.copyWith(
         workspaces: nextList,
-        selectedId: () =>
-            state.selectedId == workspaceId ? null : state.selectedId,
+        selectedId: () => nextSelected,
         pinnedIds: nextPins,
         groups: nextGroups,
         removedPaths: nextRemoved,
+        defaultRemoved: state.defaultRemoved || isRemovingDefault,
       ),
     );
   }
@@ -579,8 +594,12 @@ final selectedWorkspaceProvider = Provider<WorkspaceItem?>(
 /// The real filesystem path passed to `agy acp` as `cwd` for new sessions and
 /// opened by default in the Workspace Files browser.
 final effectiveWorkingDirProvider = Provider<String>((ref) {
-  final selected = ref.watch(selectedWorkspaceProvider);
+  final ws = ref.watch(workspacesProvider);
+  final selected = ws.selected;
   if (selected != null && selected.path.isNotEmpty) return selected.path;
+  if (ws.workspaces.isNotEmpty && ws.workspaces.first.path.isNotEmpty) {
+    return ws.workspaces.first.path;
+  }
   final conn = ref.watch(activeConnectionProvider).value;
   if (conn != null && conn.defaultCwd.isNotEmpty) return conn.defaultCwd;
   final runtime = ref.watch(localRuntimeProvider).status;

@@ -67,10 +67,20 @@ class ComposerBar extends ConsumerStatefulWidget {
 }
 
 class _ComposerBarState extends ConsumerState<ComposerBar> {
+  static final _mentionTriggerRegex = RegExp(
+    r'(?:^|[^A-Za-z0-9._+-])[@＠]([^\s@＠]*)$',
+  );
+  static final _mentionReplaceRegex = RegExp(r'[@＠][^\s@＠]*$');
+
   TextEditingController? _ownedController;
   final _focusNode = FocusNode();
   bool _hasText = false;
+  bool _slashActive = false;
   String? _mentionQuery;
+  String? _mentionRoot;
+  List<MentionCandidate> _mentionCandidates = const [];
+  bool _mentionLoading = false;
+  int _mentionScanSeq = 0;
 
   TextEditingController get _ctrl =>
       widget.controller ?? (_ownedController ??= TextEditingController());
@@ -105,23 +115,64 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
     String? mention;
 
     final trimmedLeft = text.trimLeft();
-    if (!trimmedLeft.startsWith('/')) {
+    final slashActive =
+        trimmedLeft.startsWith('/') || trimmedLeft.startsWith('／');
+    if (!slashActive) {
       final sel = _ctrl.selection.baseOffset;
       final prefix = sel >= 0 && sel <= text.length
           ? text.substring(0, sel)
           : text;
-      final m = RegExp(r'(?:^|\s)@([^\s@]*)$').firstMatch(prefix);
+      final m = _mentionTriggerRegex.firstMatch(prefix);
       if (m != null) {
         mention = m.group(1)!.toLowerCase();
       }
     }
 
-    if (has != _hasText || mention != _mentionQuery || trimmedLeft.startsWith('/')) {
+    final mentionJustOpened = _mentionQuery == null && mention != null;
+    if (has != _hasText ||
+        mention != _mentionQuery ||
+        slashActive ||
+        _slashActive) {
       setState(() {
         _hasText = has;
         _mentionQuery = mention;
+        _slashActive = slashActive;
       });
     }
+    if (mention != null && (mentionJustOpened || _mentionRoot == null)) {
+      _scheduleMentionScan();
+    }
+  }
+
+  void _scheduleMentionScan() {
+    if (!mounted) return;
+    if (ref.read(workspaceProvider).isRemote) return;
+    final chatCwd = ref.read(chatProvider).sessionCwd;
+    final targetRoot = (chatCwd != null && chatCwd.isNotEmpty)
+        ? chatCwd
+        : ref.read(effectiveWorkingDirProvider);
+    if (targetRoot.isEmpty) return;
+
+    final seq = ++_mentionScanSeq;
+    final switchingRoot = _mentionRoot != targetRoot;
+    _mentionRoot = targetRoot;
+    if (switchingRoot) {
+      _mentionCandidates = const [];
+    }
+    if (!_mentionLoading) {
+      setState(() => _mentionLoading = true);
+    }
+    unawaited(
+      scanWorkspaceMentionCandidates(targetRoot)
+          .catchError((_) => const <MentionCandidate>[])
+          .then((items) {
+            if (!mounted || _mentionScanSeq != seq) return;
+            setState(() {
+              _mentionCandidates = items;
+              _mentionLoading = false;
+            });
+          }),
+    );
   }
 
   void _submit() {
@@ -129,7 +180,7 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
     final text = _ctrl.text.trim();
     if (text.isEmpty && !hasAttachments) return;
 
-    // Intercept `/` slash commands before sending to the engine.
+    // Intercept `/` (and full-width `／`) slash commands before sending to the engine.
     final commands = ref.read(slashCommandsProvider);
     final parsed = parseSlashInput(text);
     if (parsed != null) {
@@ -159,7 +210,8 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
     if (!widget.enabled) return;
     HapticFeedback.lightImpact();
     _ctrl.clear();
-    unawaited(widget.onSend(text));
+    final outgoing = text.startsWith('／') ? '/${text.substring(1)}' : text;
+    unawaited(widget.onSend(outgoing));
   }
 
   Future<void> _togglePlanMode() async {
@@ -308,16 +360,19 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
     _focusNode.requestFocus();
   }
 
-  void _pickMention(String relativePath) {
+  void _pickMention(MentionCandidate item) {
     final text = _ctrl.text;
     final sel = _ctrl.selection.baseOffset;
     final end = sel >= 0 && sel <= text.length ? sel : text.length;
     final before = text.substring(0, end);
     final after = text.substring(end);
-    final replaced = before.replaceFirst(
-      RegExp(r'(@[^\s@]*)$'),
-      '@$relativePath ',
-    );
+    final refPath = item.isDirectory
+        ? '${item.relativePath}/'
+        : item.relativePath;
+    final formatted = refPath.contains(RegExp(r'\s'))
+        ? '@"$refPath" '
+        : '@$refPath ';
+    final replaced = before.replaceFirst(_mentionReplaceRegex, formatted);
     _ctrl.value = TextEditingValue(
       text: '$replaced$after',
       selection: TextSelection.collapsed(offset: replaced.length),
@@ -456,19 +511,49 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
       },
     );
 
-    final workspaceFiles = _mentionQuery == null
-        ? const <String>[]
-        : ref
-              .watch(workspaceProvider)
-              .entries
-              .where(
-                (e) =>
-                    _mentionQuery!.isEmpty ||
-                    e.name.toLowerCase().contains(_mentionQuery!),
-              )
-              .take(8)
-              .map((e) => e.name)
-              .toList();
+    final List<MentionCandidate> mentionMatches;
+    final bool mentionLoading;
+    if (_mentionQuery == null) {
+      mentionMatches = const [];
+      mentionLoading = false;
+    } else {
+      final wsState = ref.watch(workspaceProvider);
+      final q = _mentionQuery!;
+      final List<MentionCandidate> pool;
+      if (wsState.isRemote) {
+        pool = [
+          for (final e in wsState.entries)
+            MentionCandidate(relativePath: e.name, isDirectory: e.isDirectory),
+        ];
+        mentionLoading = wsState.loading && pool.isEmpty;
+      } else {
+        final chatCwd = ref.watch(chatProvider.select((c) => c.sessionCwd));
+        final activeRoot = (chatCwd != null && chatCwd.isNotEmpty)
+            ? chatCwd
+            : ref.watch(effectiveWorkingDirProvider);
+        if (_mentionRoot != activeRoot && !_mentionLoading) {
+          Future.microtask(_scheduleMentionScan);
+        }
+        pool = _mentionCandidates;
+        mentionLoading = _mentionLoading && pool.isEmpty;
+      }
+      if (q.isEmpty) {
+        mentionMatches = pool.take(12).toList();
+      } else {
+        final prefixHits = <MentionCandidate>[];
+        final containsHits = <MentionCandidate>[];
+        for (final item in pool) {
+          final relLower = item.relativePath.toLowerCase();
+          final baseLower = relLower.split('/').last;
+          if (baseLower.startsWith(q) || relLower.startsWith(q)) {
+            prefixHits.add(item);
+          } else if (relLower.contains(q)) {
+            containsHits.add(item);
+          }
+        }
+        mentionMatches = [...prefixHits, ...containsHits].take(12).toList();
+      }
+    }
 
     const keySize = 36.0;
     const keyGap = 6.0;
@@ -619,7 +704,17 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                 Padding(
                   padding: const EdgeInsets.only(bottom: 6),
                   child: _FloatingPopover(
-                    child: workspaceFiles.isEmpty
+                    child: mentionLoading
+                        ? Padding(
+                            padding: const EdgeInsets.all(14),
+                            child: Text(
+                              '正在扫描当前工作区文件…',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: dsh.textTertiary,
+                              ),
+                            ),
+                          )
+                        : mentionMatches.isEmpty
                         ? Padding(
                             padding: const EdgeInsets.all(14),
                             child: Text(
@@ -630,17 +725,22 @@ class _ComposerBarState extends ConsumerState<ComposerBar> {
                             ),
                           )
                         : ConstrainedBox(
-                            constraints: const BoxConstraints(maxHeight: 220),
+                            constraints: const BoxConstraints(maxHeight: 240),
                             child: ListView.builder(
                               shrinkWrap: true,
                               padding: const EdgeInsets.symmetric(vertical: 6),
-                              itemCount: workspaceFiles.length,
+                              itemCount: mentionMatches.length,
                               itemBuilder: (ctx, i) {
-                                final name = workspaceFiles[i];
+                                final item = mentionMatches[i];
                                 return ListPageRow(
-                                  icon: AppIcons.file,
-                                  title: name,
-                                  onTap: () => _pickMention(name),
+                                  icon: item.isDirectory
+                                      ? AppIcons.folder
+                                      : AppIcons.file,
+                                  title: item.isDirectory
+                                      ? '${item.relativePath}/'
+                                      : item.relativePath,
+                                  chevron: false,
+                                  onTap: () => _pickMention(item),
                                 );
                               },
                             ),

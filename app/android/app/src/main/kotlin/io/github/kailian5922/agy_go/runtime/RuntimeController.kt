@@ -41,13 +41,14 @@ class RuntimeController private constructor(private val context: Context) {
         agentMode = prefs.getString(K_AGENT_MODE, "") ?: "",
         toolPermission = prefs.getString(K_TOOL_PERMISSION, "request-review") ?: "request-review",
         artifactReviewPolicy = prefs.getString(K_ARTIFACT_REVIEW, "asks-for-review") ?: "asks-for-review",
-        allowNonWorkspaceAccess = prefs.getBoolean(K_ALLOW_NON_WS, true),
+        allowNonWorkspaceAccess = prefs.getBoolean(K_ALLOW_NON_WS, false),
         queuedMessages = prefs.getString(K_QUEUED_MESSAGES, "queue") ?: "queue",
     )
     @Volatile private var preferProot: Boolean = prefs.getBoolean(K_PREFER_PROOT, false)
     @Volatile private var phoneStorageEnabled: Boolean = prefs.getBoolean(K_PHONE_STORAGE, false)
     @Volatile private var phoneControlEnabled: Boolean = false
     @Volatile private var extraWorkspaceBinds: List<String> = emptyList()
+    @Volatile private var preferredWorkingDir: String? = null
     @Volatile private var process: AgyProcess? = null
 
     // Interactive OAuth login helper process (`agy acp --login`), if active.
@@ -245,7 +246,11 @@ class RuntimeController private constructor(private val context: Context) {
         }
     }
 
-    fun start(phoneStorage: Boolean? = null, extraBinds: List<String>? = null) {
+    fun start(
+        phoneStorage: Boolean? = null,
+        extraBinds: List<String>? = null,
+        workingDir: String? = null,
+    ) {
         worker.execute {
             val useProot: Boolean
             val currentAuth: AgyAuthHelper.AuthConfig
@@ -253,6 +258,7 @@ class RuntimeController private constructor(private val context: Context) {
             val mountStorage: Boolean
             val binds: List<String>
             val phoneCtrl: Boolean
+            val startDir: String?
             synchronized(lock) {
                 if (phoneStorage != null) {
                     phoneStorageEnabled = phoneStorage
@@ -260,6 +266,9 @@ class RuntimeController private constructor(private val context: Context) {
                 }
                 if (extraBinds != null) {
                     extraWorkspaceBinds = extraBinds.filter { it.startsWith("/") }.distinct()
+                }
+                if (!workingDir.isNullOrBlank()) {
+                    preferredWorkingDir = workingDir.trim()
                 }
                 if (phase == "running" && process?.isAlive() == true) {
                     emitStatus()
@@ -283,6 +292,7 @@ class RuntimeController private constructor(private val context: Context) {
                 mountStorage = phoneStorageEnabled && PhoneStorage.isGranted(context)
                 binds = extraWorkspaceBinds
                 phoneCtrl = phoneControlEnabled
+                startDir = preferredWorkingDir
             }
             if (phoneStorageEnabled && !mountStorage) {
                 appendLog("[runtime] phone storage requested but permission not granted", "system")
@@ -299,6 +309,7 @@ class RuntimeController private constructor(private val context: Context) {
                     phoneStorageMounted = mountStorage,
                     extraWorkspaceBinds = binds,
                     phoneControlEnabled = phoneCtrl,
+                    initialWorkingDir = startDir,
                     listener = object : AgyProcess.Listener {
                         override fun onLog(line: String, stream: String) {
                             appendLog(line, stream)

@@ -43,10 +43,15 @@ class RuntimeChannel {
     return RuntimeUpdateCheck.fromMap(raw ?? const {});
   }
 
-  Future<void> start({bool? phoneStorage, List<String>? extraBinds}) async {
+  Future<void> start({
+    bool? phoneStorage,
+    List<String>? extraBinds,
+    String? workingDir,
+  }) async {
     await _methods.invokeMethod<void>('start', {
       'phoneStorage': ?phoneStorage,
       'extraBinds': ?extraBinds,
+      'workingDir': ?workingDir,
     });
   }
 

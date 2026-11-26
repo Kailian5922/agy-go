@@ -45,6 +45,7 @@ class AgyInstaller(private val context: Context) {
     val runtimeRoot: File get() = File(context.filesDir, "runtime")
     val binDir: File get() = File(runtimeRoot, "bin")
     val agyBinary: File get() = File(binDir, "agy")
+    val bashShim: File get() = File(binDir, "bash")
     val versionFile: File get() = File(runtimeRoot, "version.json")
     val homeDir: File get() = File(context.filesDir, "home")
     val workspaceDir: File get() = File(homeDir, "workspace")
@@ -144,16 +145,18 @@ class AgyInstaller(private val context: Context) {
             binDir.mkdirs()
             val stagedTarget = File(binDir, "agy.new")
             extractedFile.copyTo(stagedTarget, overwrite = true)
+            stagedTarget.setExecutable(true, false)
             try {
                 Os.chmod(stagedTarget.absolutePath, 0b111_101_101) // 0755
-            } catch (_: Throwable) {
-                stagedTarget.setExecutable(true, false)
-            }
+            } catch (_: Throwable) {}
             if (!stagedTarget.renameTo(agyBinary)) {
                 stagedTarget.copyTo(agyBinary, overwrite = true)
                 stagedTarget.delete()
-                agyBinary.setExecutable(true, false)
             }
+            agyBinary.setExecutable(true, false)
+            try {
+                Os.chmod(agyBinary.absolutePath, 0b111_101_101) // 0755
+            } catch (_: Throwable) {}
 
             val meta = JSONObject().apply {
                 put("version", manifest.version)
@@ -167,6 +170,8 @@ class AgyInstaller(private val context: Context) {
                 metaTmp.copyTo(versionFile, overwrite = true)
                 metaTmp.delete()
             }
+
+            ensureShellShims()
 
             listener.onProgress("done", 1.0, "Installed agy ${manifest.version}")
             listener.onLog("[installer] ready at ${agyBinary.absolutePath}")
@@ -182,7 +187,15 @@ class AgyInstaller(private val context: Context) {
         homeDir.mkdirs()
         workspaceDir.mkdirs()
         File(context.cacheDir, "tmp").mkdirs()
+        ensureShellShims()
     }
+
+    /**
+     * Installs an executable `bash` compatibility shim inside [binDir] (which is prepended to
+     * `PATH` for `agy`) because Android ships `/system/bin/sh` (`mksh`) without `bash` while
+     * `agy`'s built-in `run_command` tool looks up `bash` on `$PATH`.
+     */
+    fun ensureShellShims(): File = writeBashShim(binDir)
 
     fun resetRuntime(keepHome: Boolean = true) {
         runtimeRoot.deleteRecursively()
@@ -275,5 +288,104 @@ class AgyInstaller(private val context: Context) {
     companion object {
         const val MANIFEST_BASE_URL =
             "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app"
+
+        val BASH_SHIM_SCRIPT: String =
+            """
+            |#!/system/bin/sh
+            |# AGY Go Android bash shim: delegates bash invocations to Android /system/bin/sh (mksh).
+            |SHELL_BIN="${"$"}{AGY_SH_BIN:-/system/bin/sh}"
+            |n=${"$"}#
+            |i=0
+            |skip_next=0
+            |keep_next=0
+            |end_opts=0
+            |while [ "${"$"}i" -lt "${"$"}n" ]; do
+            |  arg=${"$"}1
+            |  shift
+            |  i=${"$"}((i + 1))
+            |  if [ "${"$"}skip_next" -eq 1 ]; then
+            |    skip_next=0
+            |    continue
+            |  fi
+            |  if [ "${"$"}keep_next" -eq 1 ]; then
+            |    keep_next=0
+            |    set -- "${"$"}@" "${"$"}arg"
+            |    continue
+            |  fi
+            |  if [ "${"$"}end_opts" -eq 1 ]; then
+            |    set -- "${"$"}@" "${"$"}arg"
+            |    continue
+            |  fi
+            |  case "${"$"}arg" in
+            |    --version)
+            |      printf '%s\n' "GNU bash, version 5.2.0(1)-release (aarch64-linux-android; agy-go sh shim)"
+            |      exit 0
+            |      ;;
+            |    --norc|--noprofile|--login|--posix|--noediting|--restricted|--verbose|--dump-strings|--dump-po-strings|-l)
+            |      ;;
+            |    --rcfile|--init-file|-O|+O)
+            |      skip_next=1
+            |      ;;
+            |    --rcfile=*|--init-file=*|--O=*|+O=*)
+            |      ;;
+            |    -o|+o)
+            |      set -- "${"$"}@" "${"$"}arg"
+            |      keep_next=1
+            |      ;;
+            |    -lc|-cl)
+            |      set -- "${"$"}@" "-c"
+            |      end_opts=1
+            |      ;;
+            |    -elc|-ecl|-lec|-lce|-cel|-cle)
+            |      set -- "${"$"}@" "-ec"
+            |      end_opts=1
+            |      ;;
+            |    -c)
+            |      set -- "${"$"}@" "-c"
+            |      end_opts=1
+            |      ;;
+            |    --)
+            |      set -- "${"$"}@" "--"
+            |      end_opts=1
+            |      ;;
+            |    -*)
+            |      set -- "${"$"}@" "${"$"}arg"
+            |      ;;
+            |    *)
+            |      set -- "${"$"}@" "${"$"}arg"
+            |      end_opts=1
+            |      ;;
+            |  esac
+            |done
+            |exec "${"$"}SHELL_BIN" "${"$"}@"
+            |
+            """.trimMargin().replace("\r\n", "\n")
+
+        fun writeBashShim(binDir: File): File {
+            binDir.mkdirs()
+            val target = File(binDir, "bash")
+            val alreadyReady = target.isFile && target.canExecute() && try {
+                target.readText(Charsets.UTF_8) == BASH_SHIM_SCRIPT
+            } catch (_: Exception) {
+                false
+            }
+            if (alreadyReady) return target
+
+            val tmp = File(binDir, "bash.tmp")
+            tmp.writeText(BASH_SHIM_SCRIPT, Charsets.UTF_8)
+            tmp.setExecutable(true, false)
+            try {
+                Os.chmod(tmp.absolutePath, 0b111_101_101) // 0755
+            } catch (_: Throwable) {}
+            if (!tmp.renameTo(target)) {
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
+            target.setExecutable(true, false)
+            try {
+                Os.chmod(target.absolutePath, 0b111_101_101) // 0755
+            } catch (_: Throwable) {}
+            return target
+        }
     }
 }

@@ -24,14 +24,11 @@ object GuestWorkspaceSetup {
         } else {
             "Android 原生 Bionic 运行环境（免 Root、免 PRoot）"
         }
-        val workspacePath = if (useProot) "/root/workspace" else workspaceDir.absolutePath
         val storageRoot = if (useProot) PhoneStorage.GUEST_PATH else PhoneStorage.hostRoot()
-        val shortcutPath = if (useProot) "/root/${PhoneStorage.SHORTCUT_NAME}" else File(homeDir, PhoneStorage.SHORTCUT_NAME).absolutePath
 
         val storageBlock = if (phoneStorageMounted) {
             """
-            |- 用户已授权挂载手机共享存储：内部存储位于 `$storageRoot`（快捷方式 `$shortcutPath`；相册在 `$storageRoot/DCIM`，下载在 `$storageRoot/Download`，文档在 `$storageRoot/Documents`）。
-            |- 修改或删除手机里的已有用户文件前请先说明并等待确认；为用户新生成的文件优先输出到 `$storageRoot/Download/AGY-Go/`。
+            |- 手机共享存储访问权限已开启（根目录 `$storageRoot`）：仅当用户将其子目录设为当前会话工作区或明确点名路径时才读写，修改/删除已有用户文件前请先说明并等待确认。
             """.trimMargin()
         } else {
             """
@@ -43,7 +40,7 @@ object GuestWorkspaceSetup {
             ""
         } else {
             """
-            |- 本机原生 Bionic 环境的 Shell 为 `/system/bin/sh`（Android toybox，支持 `ls`/`cat`/`cp`/`mv`/`rm`/`mkdir`/`find`/`grep`/`sed`/`head`/`tail`/`wc`/`tar`/`gzip`/`chmod`/`stat`/`sha256sum` 等基础命令），不含 `bash`/`git`/`python3`/`node`/`jq`/`rg`/`curl`。文件读写与检索优先使用内置文件/搜索工具，Shell 命令请用标准 POSIX sh 写法。
+            |- 本机原生 Bionic 环境的终端命令通过 `PATH` 中的 `bash` 兼容垫片转交给 `/system/bin/sh`（Android mksh + toybox，支持 `ls`/`cat`/`cp`/`mv`/`rm`/`mkdir`/`find`/`grep`/`sed`/`head`/`tail`/`wc`/`tar`/`gzip`/`chmod`/`stat`/`sha256sum` 等标准 POSIX 命令），未预装 `git`/`python3`/`node`/`jq`/`rg`/`curl`；请使用标准 POSIX sh 语法。
             """.trimMargin()
         }
 
@@ -62,7 +59,7 @@ object GuestWorkspaceSetup {
             |# 运行环境（AGY Go Android）
             |
             |- 当前运行在 $envDesc 中，由 AGY Go 通过官方 `agy acp` 协议驱动。
-            |- 默认工作区目录：`$workspacePath`（每个会话可能通过 ACP `cwd` 切换到用户选择的任意工作区目录）。
+            |- 工作区隔离规则：只将当前 ACP 会话指定的 `cwd`（以及本会话显式附加的目录）视为唯一工作区，不要主动读取或列出应用私有目录（如 `files/home/workspace`）或其他无关目录。
             |$storageBlock${if (toolEnvBlock.isNotEmpty()) "\n$toolEnvBlock" else ""}
             |- 手机屏幕较窄：回复尽量清晰精炼，代码块避免过宽行；使用与用户相同的语言回复。$phoneControlBlock
             |

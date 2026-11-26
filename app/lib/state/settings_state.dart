@@ -172,7 +172,7 @@ class AppSettings {
     this.agentMode = AgyAgentMode.standard,
     this.toolPermission = AgyToolPermission.requestReview,
     this.artifactReviewPolicy = AgyArtifactReviewPolicy.asksForReview,
-    this.allowNonWorkspaceAccess = true,
+    this.allowNonWorkspaceAccess = false,
     this.queuedBehavior = AgyQueuedMessageBehavior.queue,
     this.notifyOnTurnComplete = true,
     this.notifyOnApproval = true,
@@ -377,7 +377,7 @@ class SettingsController extends Notifier<AppSettings> {
         artifactReviewPolicy: AgyArtifactReviewPolicy.parse(
           prefs.getString(_kArtifactReview),
         ),
-        allowNonWorkspaceAccess: prefs.getBool(_kAllowNonWs) ?? true,
+        allowNonWorkspaceAccess: prefs.getBool(_kAllowNonWs) ?? false,
         queuedBehavior: AgyQueuedMessageBehavior.parse(
           prefs.getString(_kQueuedBehavior),
         ),

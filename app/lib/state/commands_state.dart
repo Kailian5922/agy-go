@@ -337,7 +337,7 @@ class SlashInput {
 
 SlashInput? parseSlashInput(String text) {
   final trimmed = text.trimLeft();
-  if (!trimmed.startsWith('/')) return null;
+  if (!trimmed.startsWith('/') && !trimmed.startsWith('／')) return null;
   final match = RegExp(r'\s').firstMatch(trimmed);
   if (match == null) return SlashInput(trimmed.substring(1), null);
   return SlashInput(trimmed.substring(1, match.start), trimmed.substring(match.start));

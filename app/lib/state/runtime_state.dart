@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../runtime/runtime_channel.dart';
 import '../runtime/runtime_models.dart';
@@ -207,9 +209,11 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
     await ref.read(runtimeChannelProvider).install();
   }
 
-  Future<void> start({List<String>? extraBinds}) async {
+  Future<void> start({List<String>? extraBinds, String? workingDir}) async {
     final settings = ref.read(settingsProvider);
     final channel = ref.read(runtimeChannelProvider);
+    final resolvedDir =
+        workingDir ?? await _resolvePersistedLocalWorkingDir();
     await channel.setAuthConfig(
       mode: settings.authMode.wireValue,
       apiKey: settings.apiKey,
@@ -218,7 +222,33 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
     await channel.start(
       phoneStorage: settings.phoneStorage,
       extraBinds: extraBinds,
+      workingDir: resolvedDir,
     );
+  }
+
+  Future<String?> _resolvePersistedLocalWorkingDir() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('agy.workspaces.local.local');
+      if (raw == null || raw.isEmpty) return null;
+      final map = jsonDecode(raw);
+      if (map is! Map) return null;
+      final selectedId = map['selectedId'] as String?;
+      final list = map['workspaces'];
+      if (list is! List) return null;
+      String? firstPath;
+      for (final item in list.whereType<Map>()) {
+        final path = (item['path'] as String?)?.trim() ?? '';
+        if (path.isEmpty) continue;
+        firstPath ??= path;
+        if (selectedId != null && item['id'] == selectedId) {
+          return path;
+        }
+      }
+      return firstPath;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> stop() async {

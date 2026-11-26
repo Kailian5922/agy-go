@@ -4,9 +4,11 @@ import android.content.ContextWrapper
 import io.github.kailian5922.agy_go.phone.PhoneMcpServer
 import io.github.kailian5922.agy_go.phone.SafetyGate
 import io.github.kailian5922.agy_go.runtime.AgyAuthHelper
+import io.github.kailian5922.agy_go.runtime.AgyInstaller
 import io.github.kailian5922.agy_go.runtime.GuestWorkspaceSetup
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.BufferedInputStream
@@ -153,10 +155,68 @@ class CliToolsAndMcpTest {
             val agentsMd = File(tmpHome, "AGENTS.md").readText()
             assertEquals(geminiMd, agentsMd)
             assertTrue(geminiMd.contains("/system/bin/sh"))
+            assertTrue(geminiMd.contains("bash"))
             assertTrue(geminiMd.contains("toybox"))
+            assertTrue(geminiMd.contains("工作区隔离规则"))
+            assertFalse(geminiMd.contains("默认工作区目录"))
             assertTrue(geminiMd.contains("手机操控（MCP `phone`）"))
         } finally {
             tmpHome.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun bashShimTranslatesFlagsPreservesQuotingAndPropagatesExitCode() {
+        val tmpBin = Files.createTempDirectory("agy-bin-test").toFile()
+        try {
+            val shim = AgyInstaller.writeBashShim(tmpBin)
+            assertTrue(shim.isFile)
+            assertTrue(shim.canExecute())
+            val scriptText = shim.readText(Charsets.UTF_8)
+            assertTrue(scriptText.startsWith("#!/system/bin/sh\n"))
+            assertFalse(scriptText.contains("\r"))
+
+            fun runShim(vararg args: String): Pair<Int, String> {
+                val cmd = buildList {
+                    add("/bin/sh")
+                    add(shim.absolutePath)
+                    addAll(args)
+                }
+                val proc = ProcessBuilder(cmd).apply {
+                    redirectErrorStream(true)
+                    environment()["AGY_SH_BIN"] = "/bin/sh"
+                }.start()
+                val out = proc.inputStream.bufferedReader().use { it.readText() }
+                val code = proc.waitFor()
+                return code to out
+            }
+
+            // 1. --version succeeds
+            val (vCode, vOut) = runShim("--version")
+            assertEquals(0, vCode)
+            assertTrue(vOut.contains("GNU bash"))
+
+            // 2. bash-only flags (--norc --noprofile -lc) + spacing/quotes preserved
+            val (qCode, qOut) = runShim("--norc", "--noprofile", "-lc", "printf '%s|%s' 'hello   world' 'ok'")
+            assertEquals(0, qCode)
+            assertEquals("hello   world|ok", qOut)
+
+            // 3. Exit code propagation
+            val (eCode, eOut) = runShim("-c", "printf 'boom' && exit 7")
+            assertEquals(7, eCode)
+            assertEquals("boom", eOut)
+
+            // 4. --version AFTER -c is passed through to the command rather than intercepted
+            val (pCode, pOut) = runShim("-c", "printf '%s' \"\$0\"", "--version")
+            assertEquals(0, pCode)
+            assertEquals("--version", pOut)
+
+            // 5. --rcfile <path> and -O <opt> skipped cleanly without consuming -c
+            val (rCode, rOut) = runShim("--rcfile", "/nonexistent", "-O", "extglob", "-l", "-c", "printf 'clean'")
+            assertEquals(0, rCode)
+            assertEquals("clean", rOut)
+        } finally {
+            tmpBin.deleteRecursively()
         }
     }
 
@@ -168,13 +228,17 @@ class CliToolsAndMcpTest {
             file.parentFile?.mkdirs()
             file.writeText("""{"mcpServers":{"custom":{"command":"/system/bin/sh"}}}""")
 
+            val defaultPolicy = AgyAuthHelper.ExecutionPolicy(toolPermission = "proceed-in-sandbox")
+            assertFalse(defaultPolicy.allowNonWorkspaceAccess)
+
             AgyAuthHelper.applySettings(
                 tmpHome,
                 AgyAuthHelper.AuthConfig(mode = AgyAuthHelper.MODE_OAUTH),
-                AgyAuthHelper.ExecutionPolicy(toolPermission = "proceed-in-sandbox"),
+                defaultPolicy,
             )
             val saved = JSONObject(file.readText())
             assertEquals("proceed-in-sandbox", saved.getString("toolPermission"))
+            assertFalse(saved.getBoolean("allowNonWorkspaceAccess"))
             assertTrue(saved.getJSONObject("mcpServers").has("custom"))
 
             val redacted = AgyAuthHelper.redactLine(
