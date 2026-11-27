@@ -8,6 +8,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../state/chat_state.dart';
 import '../../state/hosts_state.dart';
+import '../../state/phone_state.dart';
 import '../../state/runtime_state.dart';
 import '../../state/sessions_state.dart';
 import '../../state/settings_state.dart';
@@ -20,6 +21,7 @@ import '../shell/page_frame.dart';
 import '../terminal/terminal_screen.dart';
 import '../theme/theme.dart';
 import '../workspace/workspace_screen.dart';
+import 'activity_strip.dart';
 import 'diff_and_output_page.dart';
 import 'permission_controls.dart';
 import 'tool_format.dart';
@@ -38,6 +40,9 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
   @override
   Widget build(BuildContext context) {
     final chat = ref.watch(chatProvider);
+    final phoneApprovals = ref.watch(
+      phoneControlProvider.select((p) => p.pendingApprovals),
+    );
     final sessions = ref.watch(sessionsProvider);
     final hosts = ref.watch(hostsProvider);
     final settings = ref.watch(settingsProvider);
@@ -58,6 +63,42 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
     final activePerm = chat.sessionToolPermission ?? settings.toolPermission;
     final scheme = Theme.of(context).colorScheme;
     final dsh = DshColors.of(context);
+    final hasPendingApproval =
+        chat.pendingPermissions.isNotEmpty || phoneApprovals.isNotEmpty;
+    final activeTools = toolCalls.where((t) => t.status.isActive).toList();
+    String? liveStatusText;
+    if (chat.isBusy || hasPendingApproval) {
+      final lastItem = chat.transcript.items.isNotEmpty
+          ? chat.transcript.items.last
+          : null;
+      final lastAssistant =
+          lastItem is AssistantTranscriptItem ? lastItem : null;
+      final pendingApprovalLabel = chat.pendingPermissions.isNotEmpty
+          ? formatNativeToolLiveStatus(
+              chat.pendingPermissions.first.request.toolCall,
+              workspaceCwd: chat.sessionCwd,
+            )
+          : (phoneApprovals.isNotEmpty ? phoneApprovals.first.summary : null);
+      liveStatusText = resolveNativeHeaderStatus(
+        phase: chat.livePhase,
+        activeToolStatus: activeTools.isNotEmpty
+            ? formatNativeToolLiveStatus(
+                activeTools.last,
+                workspaceCwd: chat.sessionCwd,
+              )
+            : null,
+        nativeStatusLabel: chat.liveStatusLabel,
+        activePlanLabel: plan.where((p) => p.isInProgress).firstOrNull?.content,
+        liveThoughtHeadline: chat.livePhase == TurnLivePhase.thinking
+            ? latestAssistantThoughtHeadline(lastAssistant)
+            : null,
+        activeRetry: chat.activeRetry,
+        isStopping: chat.isStopping,
+        hasPendingApproval: hasPendingApproval,
+        pendingApprovalLabel: pendingApprovalLabel,
+        activeToolCount: activeTools.length,
+      );
+    }
 
     return AppPage.list(
       title: '对话详情',
@@ -81,6 +122,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
             title: '基本信息',
             children: [
               InfoRow(label: '标题', value: title),
+              InfoRow(label: '当前状态', value: liveStatusText ?? '空闲'),
               InfoRow(
                 label: '会话 ID',
                 value: chat.sessionId ?? '未创建',
@@ -157,6 +199,16 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
           ListPageCard(
             title: '对当前对话操作',
             children: [
+              if (chat.isBusy || hasPendingApproval)
+                ListPageRow(
+                  icon: hasPendingApproval
+                      ? AppIcons.approval
+                      : AppIcons.running,
+                  iconColor: hasPendingApproval ? dsh.warning : scheme.primary,
+                  title: '实时运行状态与日志',
+                  subtitle: liveStatusText ?? '查看当前轮次进度、速度与引擎输出',
+                  onTap: () => unawaited(showPlanAndActivitySheet(context, ref)),
+                ),
               ListPageRow(
                 icon: AppIcons.permissions,
                 title: '审批与执行模式',
@@ -209,22 +261,26 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
           else
             ListPageCard(
               title:
-                  '已完成 ${plan.where((p) => p.status.toLowerCase() == 'completed').length} / ${plan.length}',
+                  '已完成 ${plan.where((p) => p.isCompleted).length} / ${plan.length}',
               children: [
                 for (final entry in plan)
                   ListPageRow(
-                    icon: switch (entry.status.toLowerCase()) {
-                      'completed' => AppIcons.success,
-                      'in_progress' => AppIcons.inProgress,
-                      'failed' => AppIcons.stepFailed,
-                      _ => AppIcons.pending,
-                    },
-                    iconColor: switch (entry.status.toLowerCase()) {
-                      'completed' => dsh.success,
-                      'in_progress' => scheme.primary,
-                      'failed' => dsh.danger,
-                      _ => dsh.textTertiary,
-                    },
+                    icon: entry.isCompleted
+                        ? AppIcons.success
+                        : entry.isInProgress
+                        ? AppIcons.inProgress
+                        : entry.isFailed
+                        ? AppIcons.stepFailed
+                        : entry.isSkipped
+                        ? AppIcons.stepSkipped
+                        : AppIcons.pending,
+                    iconColor: entry.isCompleted
+                        ? dsh.success
+                        : entry.isInProgress
+                        ? scheme.primary
+                        : entry.isFailed
+                        ? dsh.danger
+                        : dsh.textTertiary,
                     title: entry.content,
                     titleMaxLines: 3,
                     meta: entry.priority,
@@ -246,7 +302,8 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
                 for (final tc in toolCalls.reversed)
                   ListPageRow(
                     icon: _toolIcon(tc.kind),
-                    title: formatToolSummary(
+                    iconColor: _toolStatusColor(tc.status, scheme, dsh),
+                    title: formatNativeToolLiveStatus(
                       tc,
                       workspaceCwd: chat.sessionCwd,
                     ),
@@ -259,8 +316,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
                                 ),
                               )
                               .join(', ')
-                        : tc.kind.name,
-                    meta: tc.status.name,
+                        : formatToolSummary(
+                            tc,
+                            workspaceCwd: chat.sessionCwd,
+                          ),
+                    meta: _toolStatusLabel(tc.status),
                     chevron: false,
                   ),
               ],
@@ -314,5 +374,26 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage> {
     AcpToolKind.search => AppIcons.search,
     AcpToolKind.fetch => AppIcons.web,
     _ => AppIcons.tool,
+  };
+
+  Color _toolStatusColor(
+    AcpToolStatus status,
+    ColorScheme scheme,
+    DshColors dsh,
+  ) => switch (status) {
+    AcpToolStatus.inProgress => scheme.primary,
+    AcpToolStatus.paused || AcpToolStatus.pending => dsh.warning,
+    AcpToolStatus.failed => dsh.danger,
+    AcpToolStatus.cancelled => dsh.textTertiary,
+    AcpToolStatus.completed => dsh.success,
+  };
+
+  String _toolStatusLabel(AcpToolStatus status) => switch (status) {
+    AcpToolStatus.inProgress => '运行中',
+    AcpToolStatus.paused => '待确认',
+    AcpToolStatus.pending => '等待中',
+    AcpToolStatus.failed => '失败',
+    AcpToolStatus.cancelled => '已取消',
+    AcpToolStatus.completed => '已完成',
   };
 }

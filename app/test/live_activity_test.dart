@@ -200,6 +200,86 @@ void main() {
       );
       expect(doneFg, isNull);
     });
+
+    test('surfaces parked background approval, single background running tool, and stopping state', () {
+      final started = DateTime(2026, 11, 27, 8, 0, 0);
+
+      // Parked background session blocked on permission approval outranks foreground busy turn.
+      final bgApproval = deriveLiveActivity(
+        chat: ChatState(
+          sessionId: 'fg-1',
+          isSending: true,
+          backgroundRunningIds: const {'bg-1'},
+          backgroundSummaries: {
+            'bg-1': BackgroundSessionSummary(
+              sessionId: 'bg-1',
+              title: '重构任务',
+              isBusy: true,
+              hasPendingPermission: true,
+              pendingPermissionLabel: '运行 git push',
+              turnStartedAt: started,
+            ),
+          },
+        ),
+        phone: idlePhone,
+        sessionTitle: '前台对话',
+        settings: settings,
+        foreground: false,
+      );
+      expect(bgApproval, isNotNull);
+      expect(bgApproval!.kind, LiveActivityKind.waiting);
+      expect(bgApproval.chip, '待确认');
+      expect(bgApproval.title, '重构任务');
+      expect(bgApproval.text, '等待确认 · 运行 git push');
+      expect(bgApproval.sessionId, 'bg-1');
+      expect(bgApproval.sinceMs, started.millisecondsSinceEpoch);
+
+      // Single running background session surfaces real title, concurrent tools, and chronometer.
+      final bgRunning = deriveLiveActivity(
+        chat: ChatState(
+          sessionId: 'fg-idle',
+          backgroundRunningIds: const {'bg-2'},
+          backgroundSummaries: {
+            'bg-2': BackgroundSessionSummary(
+              sessionId: 'bg-2',
+              title: '单测修复',
+              isBusy: true,
+              livePhase: TurnLivePhase.working,
+              activeToolLabel: 'Editing chat_state.dart',
+              activeToolCount: 2,
+              turnStartedAt: started,
+            ),
+          },
+        ),
+        phone: idlePhone,
+        sessionTitle: '空闲对话',
+        settings: settings,
+        foreground: false,
+      );
+      expect(bgRunning, isNotNull);
+      expect(bgRunning!.kind, LiveActivityKind.running);
+      expect(bgRunning.chip, '后台运行');
+      expect(bgRunning.title, '单测修复');
+      expect(bgRunning.text, 'Editing chat_state.dart (+1)');
+      expect(bgRunning.sessionId, 'bg-2');
+      expect(bgRunning.sinceMs, started.millisecondsSinceEpoch);
+
+      // Foreground stopping turn shows honest 停止中 chip.
+      final stopping = deriveLiveActivity(
+        chat: ChatState(
+          sessionId: 'fg-stop',
+          isSending: true,
+          isStopping: true,
+          turnStartedAt: started,
+        ),
+        phone: idlePhone,
+        sessionTitle: '测试对话',
+        settings: settings,
+        foreground: false,
+      );
+      expect(stopping?.chip, '停止中');
+      expect(stopping?.text, '正在中止当前轮次…');
+    });
   });
 
   testWidgets(

@@ -76,7 +76,22 @@ class ActiveConnectionController extends AsyncNotifier<HostConnection?> {
         initResult: init,
         defaultCwd: workspacePath ?? '/data/local/tmp',
       );
-      ref.onDispose(() => unawaited(conn.close()));
+      var disposed = false;
+      ref.onDispose(() {
+        disposed = true;
+        unawaited(conn.close());
+      });
+      unawaited(
+        client.done.then((_) {
+          if (disposed || !ref.mounted) return;
+          if (identical(state.value, conn)) {
+            state = AsyncError(
+              const AcpTransportException('与本机引擎的连接已断开'),
+              StackTrace.current,
+            );
+          }
+        }),
+      );
       return conn;
     } catch (e) {
       await client.close();
@@ -107,7 +122,22 @@ class ActiveConnectionController extends AsyncNotifier<HostConnection?> {
         defaultCwd: ssh.resolvedWorkingDirectory,
         sshConnection: ssh,
       );
-      ref.onDispose(() => unawaited(conn.close()));
+      var disposed = false;
+      ref.onDispose(() {
+        disposed = true;
+        unawaited(conn.close());
+      });
+      unawaited(
+        client.done.then((_) {
+          if (disposed || !ref.mounted) return;
+          if (identical(state.value, conn)) {
+            state = AsyncError(
+              AcpTransportException('与 ${config.name} 的 SSH 连接已断开'),
+              StackTrace.current,
+            );
+          }
+        }),
+      );
       return conn;
     } catch (e) {
       await client.close();

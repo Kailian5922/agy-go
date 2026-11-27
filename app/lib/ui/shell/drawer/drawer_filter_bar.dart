@@ -5,6 +5,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../../../state/chat_state.dart';
 import '../../../state/drawer_view_state.dart';
 import '../../common/capsule_chip.dart';
 import '../../theme/theme.dart';
@@ -26,6 +27,21 @@ class DrawerFilterBar extends ConsumerWidget {
       return const SizedBox(width: double.infinity);
     }
     final listed = {for (final s in scope.sessions) s.sessionId};
+    final runningState = ref.watch(
+      chatProvider.select(
+        (c) => (
+          sessionId: c.sessionId,
+          isBusy: c.isBusy,
+          bgRunningIds: c.backgroundRunningIds,
+        ),
+      ),
+    );
+    final runningIds = <String>{
+      ...runningState.bgRunningIds,
+      if (runningState.isBusy && runningState.sessionId != null)
+        runningState.sessionId!,
+    };
+    final running = runningIds.where(listed.contains).length;
     final pending = ref
         .watch(pendingSessionIdsProvider)
         .keys
@@ -36,6 +52,7 @@ class DrawerFilterBar extends ConsumerWidget {
         .where(listed.contains)
         .length;
     String label(DrawerFilter f) => switch (f) {
+      DrawerFilter.running when running > 0 => '${f.label} $running',
       DrawerFilter.pending when pending > 0 => '${f.label} $pending',
       DrawerFilter.unread when unread > 0 => '${f.label} $unread',
       _ => f.label,

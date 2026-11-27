@@ -212,7 +212,7 @@ object LiveActivity {
             .setCategory(if (c.busy) Notification.CATEGORY_PROGRESS else Notification.CATEGORY_STATUS)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion(ctx, c, color))
-            .setContentIntent(openIntent(ctx))
+            .setContentIntent(openIntent(ctx, c.sessionId))
             .setTimeoutAfter(timeout)
             .addExtras(Bundle().apply { putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true) })
 
@@ -261,9 +261,12 @@ object LiveActivity {
         return builder.build()
     }
 
-    private fun openIntent(ctx: Context): PendingIntent {
+    private fun openIntent(ctx: Context, sessionId: String? = null): PendingIntent {
         val intent = Intent(ctx, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            if (!sessionId.isNullOrBlank()) {
+                putExtra("sessionId", sessionId)
+            }
         }
         return PendingIntent.getActivity(
             ctx,

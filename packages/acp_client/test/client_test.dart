@@ -667,5 +667,165 @@ void main() {
       expect(nested.sizeTokens, 128000);
       expect(nested.cachedReadTokens, 4000);
     });
+
+    test('update_steps populates transcript.plan with normalized statuses and args fallback', () {
+      var t = const ChatTranscript().appendUserPrompt('plan and execute');
+      final created = AcpSessionUpdate.fromJson({
+        'sessionUpdate': 'tool_call',
+        'toolCallId': 'tc_steps_1',
+        'name': 'update_steps',
+        'title': 'Run update_steps',
+        'status': 'in_progress',
+        'args': {
+          'steps': [
+            {'title': 'Inspect protocol', 'status': 'done'},
+            {'title': 'Sync live UI', 'status': 'in_progress'},
+            {'title': 'Write tests', 'status': 'pending'},
+          ],
+        },
+      });
+      t = t.applyUpdate(created);
+      expect(t.plan.length, 3);
+      expect(t.plan[0].content, 'Inspect protocol');
+      expect(t.plan[0].status, 'completed');
+      expect(t.plan[0].isCompleted, isTrue);
+      expect(t.plan[1].content, 'Sync live UI');
+      expect(t.plan[1].isInProgress, isTrue);
+      expect(t.plan[2].status, 'pending');
+
+      // Patched update_steps replaces plan with latest statuses including failed/skipped.
+      t = t.applyUpdate(
+        const ToolCallPatchedUpdate(
+          toolCallId: 'tc_steps_1',
+          patch: {
+            'status': 'completed',
+            'args': {
+              'steps': [
+                {'title': 'Inspect protocol', 'status': 'done'},
+                {'title': 'Sync live UI', 'status': 'done'},
+                {'title': 'Write tests', 'status': 'failed'},
+              ],
+            },
+          },
+        ),
+      );
+      expect(t.plan[1].isCompleted, isTrue);
+      expect(t.plan[2].isFailed, isTrue);
+    });
+
+    test('re-emitted tool_call merges without wiping diffs, cross-turn patches preserve isStreaming, and markStreaming:false keeps replay idle', () {
+      // 1. History replay with markStreaming: false must never mark transcript streaming.
+      var replay = const ChatTranscript();
+      replay = replay.applyUpdate(
+        const UserMessageChunkUpdate(AcpTextBlock('old prompt')),
+        markStreaming: false,
+      );
+      replay = replay.applyUpdate(
+        const AgentThoughtChunkUpdate(AcpTextBlock('old thought')),
+        markStreaming: false,
+      );
+      replay = replay.applyUpdate(
+        const ToolCallCreatedUpdate(
+          AcpToolCall(
+            toolCallId: 'tc_old_1',
+            title: 'Read README.md',
+            kind: AcpToolKind.read,
+            status: AcpToolStatus.completed,
+          ),
+        ),
+        markStreaming: false,
+      );
+      replay = replay.applyUpdate(
+        const AgentMessageChunkUpdate(AcpTextBlock('old answer')),
+        markStreaming: false,
+      );
+      expect(replay.isStreaming, isFalse);
+
+      // 2. Re-emitted tool_call merges in-place without wiping accumulated diffs/locations.
+      var t = const ChatTranscript().appendUserPrompt('edit file');
+      t = t.applyUpdate(
+        const ToolCallCreatedUpdate(
+          AcpToolCall(
+            toolCallId: 'tc_edit_merge',
+            title: 'Edit app.dart',
+            kind: AcpToolKind.edit,
+            status: AcpToolStatus.inProgress,
+            locations: [AcpToolLocation(path: 'lib/app.dart', line: 10)],
+            content: [
+              AcpDiffToolContent(
+                path: 'lib/app.dart',
+                oldText: 'old()',
+                newText: 'new()',
+              ),
+            ],
+          ),
+        ),
+      );
+      t = t.applyUpdate(
+        const ToolCallCreatedUpdate(
+          AcpToolCall(
+            toolCallId: 'tc_edit_merge',
+            title: 'Edit app.dart',
+            kind: AcpToolKind.edit,
+            status: AcpToolStatus.completed,
+            rawOutput: 'ok',
+          ),
+        ),
+      );
+      final mergedTc =
+          (t.items.last as AssistantTranscriptItem).toolCallById('tc_edit_merge')!;
+      expect(mergedTc.status, AcpToolStatus.completed);
+      expect(mergedTc.locations.length, 1);
+      expect(mergedTc.effectiveDiffs.length, 1);
+      expect(mergedTc.rawOutput, 'ok');
+
+      // 3. setToolCallStatus pauses & resumes a tool call cleanly for permission prompts.
+      t = t.setToolCallStatus('tc_edit_merge', AcpToolStatus.paused);
+      expect(
+        (t.items.last as AssistantTranscriptItem)
+            .toolCallById('tc_edit_merge')
+            ?.status,
+        AcpToolStatus.paused,
+      );
+
+      // 4. Cross-turn late tool_call_update patches the original turn in-place without flipping isStreaming.
+      t = t.finishTurn(AcpStopReason.endTurn);
+      t = t.appendUserPrompt('second turn');
+      t = t.applyUpdate(const AgentMessageChunkUpdate(AcpTextBlock('done 2')));
+      t = t.finishTurn(AcpStopReason.endTurn);
+      expect(t.isStreaming, isFalse);
+
+      t = t.applyUpdate(
+        const ToolCallPatchedUpdate(
+          toolCallId: 'tc_edit_merge',
+          patch: {'status': 'completed', 'rawOutput': 'late output'},
+        ),
+      );
+      expect(t.isStreaming, isFalse);
+      final turn1Assistant = t.items[1] as AssistantTranscriptItem;
+      final turn2Assistant = t.items[3] as AssistantTranscriptItem;
+      expect(turn1Assistant.isStreaming, isFalse);
+      expect(turn2Assistant.isStreaming, isFalse);
+      expect(
+        turn1Assistant.toolCallById('tc_edit_merge')?.rawOutput,
+        'late output',
+      );
+      expect(turn2Assistant.toolCallById('tc_edit_merge'), isNull);
+
+      // 5. EmbeddedResourceContentBlock (`type: 'resource'`) parses cleanly without Map.toString().
+      final textRes = AcpContentBlock.fromJson({
+        'type': 'resource',
+        'resource': {'uri': 'file:///a.txt', 'text': 'hello resource'},
+      });
+      expect(textRes, isA<AcpTextBlock>());
+      expect((textRes as AcpTextBlock).text, 'hello resource');
+
+      final linkRes = AcpContentBlock.fromJson({
+        'type': 'resource',
+        'resource': {'uri': 'file:///repo/spec.pdf', 'mimeType': 'application/pdf'},
+      });
+      expect(linkRes, isA<AcpResourceLinkBlock>());
+      expect((linkRes as AcpResourceLinkBlock).name, 'spec.pdf');
+    });
   });
 }

@@ -4,7 +4,9 @@ import 'package:acp_client/acp_client.dart';
 import 'package:agy_go/app.dart';
 import 'package:agy_go/state/chat_state.dart';
 import 'package:agy_go/state/connection_state.dart';
+import 'package:agy_go/state/drawer_view_state.dart';
 import 'package:agy_go/state/live_activity_state.dart';
+import 'package:agy_go/state/pet_state.dart';
 import 'package:agy_go/state/phone_state.dart';
 import 'package:agy_go/state/sessions_state.dart';
 import 'package:agy_go/state/settings_state.dart';
@@ -1364,6 +1366,413 @@ void main() {
         st.effectiveCwdOf(st.sessions.firstWhere((s) => s.sessionId == 's-page2')),
         '/tmp/ws-alpha',
       );
+    });
+  });
+
+  group('Model-to-UI state sync regression suite', () {
+    test('deriveTurnHealth & resolveNativeHeaderStatus honor approval precedence, stopping, concurrent tools, speed decay, and long prose headlines', () {
+      final t0 = DateTime(2026, 11, 27, 9, 0, 0);
+
+      // 1. Pending approval NEVER triggers a false stall warning even after 120s!
+      final approvalHealth = deriveTurnHealth(
+        startedAt: t0,
+        lastActivityAt: t0,
+        phase: TurnLivePhase.waiting,
+        activeRetry: null,
+        thoughtChars: 0,
+        answerChars: 0,
+        hasActiveTool: false,
+        activeToolLabel: null,
+        activePlanLabel: null,
+        now: t0.add(const Duration(seconds: 120)),
+        hasPendingApproval: true,
+        pendingApprovalLabel: '运行 rm -rf tmp',
+      );
+      expect(approvalHealth.tone, TurnHealthTone.waitingApproval);
+      expect(approvalHealth.showAlertBanner, isFalse);
+      expect(approvalHealth.pillText, '等你确认 · 运行 rm -rf tmp');
+
+      // 2. Stopping outranks everything cleanly.
+      final stopHealth = deriveTurnHealth(
+        startedAt: t0,
+        lastActivityAt: t0,
+        phase: TurnLivePhase.thinking,
+        activeRetry: null,
+        thoughtChars: 200,
+        answerChars: 0,
+        hasActiveTool: true,
+        activeToolLabel: 'Viewing app.dart',
+        activePlanLabel: null,
+        now: t0.add(const Duration(seconds: 5)),
+        isStopping: true,
+      );
+      expect(stopHealth.pillText, '正在停止…');
+      expect(
+        resolveNativeHeaderStatus(
+          phase: TurnLivePhase.thinking,
+          isStopping: true,
+        ),
+        '正在停止…',
+      );
+
+      // 3. Active background tool does NOT shadow active thinking while chunks are flowing,
+      //    but DOES surface after 15s silence instead of firing a false stall alarm!
+      final thinkingWithBgTool = deriveTurnHealth(
+        startedAt: t0,
+        lastActivityAt: t0.add(const Duration(seconds: 10)),
+        phase: TurnLivePhase.thinking,
+        activeRetry: null,
+        thoughtChars: 300,
+        answerChars: 0,
+        hasActiveTool: true,
+        activeToolLabel: 'Running flutter test',
+        activeToolCount: 2,
+        activePlanLabel: null,
+        liveTokensPerSecond: 46.2,
+        includeSpeedInPill: false,
+        now: t0.add(const Duration(seconds: 12)),
+      );
+      expect(thinkingWithBgTool.pillText, '思考中');
+      expect(thinkingWithBgTool.liveSpeedLabel, '46 tok/s');
+
+      final quietBgTool = deriveTurnHealth(
+        startedAt: t0,
+        lastActivityAt: t0,
+        phase: TurnLivePhase.responding,
+        activeRetry: null,
+        thoughtChars: 300,
+        answerChars: 120,
+        hasActiveTool: true,
+        activeToolLabel: 'Running flutter test',
+        activeToolCount: 3,
+        activePlanLabel: null,
+        now: t0.add(const Duration(seconds: 75)),
+      );
+      expect(quietBgTool.tone, TurnHealthTone.active);
+      expect(quietBgTool.showAlertBanner, isFalse);
+      expect(quietBgTool.pillText, 'Running flutter test (+2)');
+
+      // 4. Long prose without markdown headings extracts the newest sentence cleanly.
+      const longProse =
+          'First I need to examine the entire architecture of the ACP client and see how session updates are delivered across isolates and UI surfaces. '
+          'Now checking ActivityStrip and ChatHeader synchronization.';
+      expect(
+        latestThoughtHeadline(longProse),
+        'Now checking ActivityStrip and ChatHeader synchronization.',
+      );
+
+      // 5. TurnSpeedTracker decays live speed to null after 4.5s silence.
+      final tracker = TurnSpeedTracker();
+      tracker.recordChunk('Streaming chunk one with enough tokens.', t0);
+      tracker.recordChunk(
+        'Streaming chunk two with enough tokens.',
+        t0.add(const Duration(milliseconds: 500)),
+      );
+      expect(
+        tracker.liveTokensPerSecond(t0.add(const Duration(seconds: 2))),
+        isNotNull,
+      );
+      expect(
+        tracker.liveTokensPerSecond(t0.add(const Duration(seconds: 5))),
+        isNull,
+      );
+    });
+
+    testWidgets('ActivityStrip displays 等你确认 and TurnAlertBanner stays hidden during long approval waits', (tester) async {
+      final now = DateTime.now();
+      final pending = PendingPermission(
+        id: 'perm-1',
+        request: const AcpPermissionRequest(
+          sessionId: 's-perm',
+          toolCall: AcpToolCall(
+            toolCallId: 'tc-perm',
+            name: 'run_command',
+            title: 'run_command',
+            kind: AcpToolKind.execute,
+            status: AcpToolStatus.paused,
+            rawInput: {'CommandLine': 'flutter test'},
+          ),
+          options: [
+            AcpPermissionOption(
+              optionId: 'allow',
+              name: 'Allow once',
+              kind: AcpPermissionOptionKind.allowOnce,
+            ),
+          ],
+        ),
+        completer: Completer<AcpPermissionOutcome>(),
+      );
+
+      final seeded = ChatState(
+        sessionId: 's-perm',
+        isSending: true,
+        turnStartedAt: now.subtract(const Duration(minutes: 3)),
+        lastActivityAt: now.subtract(const Duration(seconds: 120)),
+        livePhase: TurnLivePhase.waiting,
+        pendingPermissions: [pending],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            chatProvider.overrideWith(() => _SeededChatController(seeded)),
+          ],
+          child: const AgyGoApp(
+            home: Scaffold(
+              body: Column(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TurnAlertBanner(),
+                  ActivityStrip(inline: true),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.textContaining('等你确认'), findsOneWidget);
+      // Must NOT show false stall alert banner while waiting on user approval!
+      expect(find.text('日志'), findsNothing);
+      expect(find.textContaining('无事件'), findsNothing);
+    });
+
+    testWidgets('ChatList does not spin old completed thought block after a tool completes', (tester) async {
+      final now = DateTime.now();
+      var transcript = const ChatTranscript().appendUserPrompt('检查状态');
+      transcript = transcript.applyUpdate(
+        const AgentThoughtChunkUpdate(AcpTextBlock('已完成的旧思考片段')),
+      );
+      transcript = transcript.applyUpdate(
+        const ToolCallCreatedUpdate(
+          AcpToolCall(
+            toolCallId: 'tc-done-1',
+            title: 'Read README.md',
+            kind: AcpToolKind.read,
+            status: AcpToolStatus.completed,
+          ),
+        ),
+      );
+
+      final seeded = ChatState(
+        sessionId: 's-no-spin',
+        isSending: true,
+        turnStartedAt: now.subtract(const Duration(seconds: 6)),
+        lastActivityAt: now,
+        livePhase: TurnLivePhase.waiting,
+        transcript: transcript,
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            chatProvider.overrideWith(() => _SeededChatController(seeded)),
+          ],
+          child: AgyGoApp(
+            home: Scaffold(
+              body: ChatList(
+                scrollController: ScrollController(),
+                bottomInset: 80,
+                onPickSuggestion: (_) {},
+                onEditDraft: (_) {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // Old thought completed before the tool ran — no spinner should be active on it.
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    });
+
+    test('First turn shows optimistic user bubble immediately during slow session/new without duplicating on completion', () async {
+      final (clientTransport, agentTransport) = MemoryAcpTransport.pair();
+      final client = AcpClient(clientTransport);
+      final agent = AcpJsonRpcPeer(agentTransport);
+      addTearDown(() async {
+        await client.close();
+        await agent.close();
+      });
+
+      final newSessionGate = Completer<void>();
+      var newSeq = 0;
+      agent.onRequest('initialize', (_) async => {
+        'protocolVersion': 1,
+        'agentInfo': {'name': 'antigravity-cli', 'version': '1.6.0'},
+        'agentCapabilities': {'loadSession': true},
+      });
+      agent.onRequest('session/list', (_) async => {'sessions': const <Object?>[]});
+      agent.onRequest('session/new', (_) async {
+        await newSessionGate.future;
+        return {'sessionId': 'sess-slow-${++newSeq}'};
+      });
+      agent.onRequest('session/prompt', (params) async {
+        final sid = params['sessionId']! as String;
+        await agent.sendNotification('session/update', {
+          'sessionId': sid,
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'content': {'type': 'text', 'text': '首轮回复完成'},
+          },
+        });
+        return {'stopReason': 'end_turn'};
+      });
+
+      final init = await client.initialize();
+      final conn = HostConnection(
+        host: const HostRef.local(),
+        label: '本机',
+        client: client,
+        initResult: init,
+        defaultCwd: '/tmp/ws-slow',
+      );
+      final container = ProviderContainer(
+        overrides: [
+          activeConnectionProvider.overrideWith(() => _StubConnection(conn)),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.read(chatProvider);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      final sendFuture = container.read(chatProvider.notifier).send('立即上屏测试');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // Before session/new resolves, user bubble + streaming assistant turn are ALREADY visible!
+      final pending = container.read(chatProvider);
+      expect(pending.isBusy, isTrue);
+      expect(pending.transcript.items.length, 2);
+      expect((pending.transcript.items.first as UserTranscriptItem).text, '立即上屏测试');
+
+      newSessionGate.complete();
+      await sendFuture;
+
+      final done = container.read(chatProvider);
+      expect(done.isBusy, isFalse);
+      expect(done.sessionId, startsWith('sess-slow-'));
+      expect(done.transcript.items.length, 2);
+      expect((done.transcript.items.last as AssistantTranscriptItem).text, '首轮回复完成');
+    });
+
+    test('Parked background session permission pauses tool call and surfaces in pendingSessionIdsProvider & petMoodProvider', () async {
+      final (clientTransport, agentTransport) = MemoryAcpTransport.pair();
+      final client = AcpClient(clientTransport);
+      final agent = AcpJsonRpcPeer(agentTransport);
+      addTearDown(() async {
+        await client.close();
+        await agent.close();
+      });
+
+      final promptGate = Completer<void>();
+      var bgNewSeq = 0;
+      agent.onRequest('initialize', (_) async => {
+        'protocolVersion': 1,
+        'agentInfo': {'name': 'antigravity-cli', 'version': '1.6.0'},
+        'agentCapabilities': {'loadSession': true},
+      });
+      agent.onRequest('session/list', (_) async => {'sessions': const <Object?>[]});
+      agent.onRequest('session/new', (_) async {
+        bgNewSeq++;
+        return {'sessionId': bgNewSeq == 1 ? 'sess-bg-perm' : 'sess-draft-$bgNewSeq'};
+      });
+      agent.onRequest('session/prompt', (_) async {
+        await promptGate.future;
+        return {'stopReason': 'end_turn'};
+      });
+
+      final init = await client.initialize();
+      final conn = HostConnection(
+        host: const HostRef.ssh('remote-perm'),
+        label: 'Remote',
+        client: client,
+        initResult: init,
+        defaultCwd: '/tmp/ws-perm',
+      );
+      final container = ProviderContainer(
+        overrides: [
+          activeConnectionProvider.overrideWith(() => _StubConnection(conn)),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.listen(chatProvider, (_, _) {});
+      await container.read(activeConnectionProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      final turn = container.read(chatProvider.notifier).send('执行需要审批的命令');
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+
+      // Park sess-bg-perm into background by opening a new chat.
+      container.read(chatProvider.notifier).startNewChat();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(container.read(chatProvider).backgroundRunningIds, contains('sess-bg-perm'));
+
+      // Agent emits tool_call then requests permission on the PARKED background session!
+      await agent.sendNotification('session/update', {
+        'sessionId': 'sess-bg-perm',
+        'update': {
+          'sessionUpdate': 'tool_call',
+          'toolCallId': 'tc-bg-p1',
+          'name': 'run_command',
+          'title': 'run_command',
+          'kind': 'execute',
+          'status': 'in_progress',
+          'rawInput': {'CommandLine': 'git push'},
+        },
+      });
+      final permFuture = agent.sendRequest('session/request_permission', {
+        'sessionId': 'sess-bg-perm',
+        'toolCall': {
+          'toolCallId': 'tc-bg-p1',
+          'name': 'run_command',
+          'title': 'run_command',
+          'kind': 'execute',
+          'status': 'pending',
+          'rawInput': {'CommandLine': 'git push'},
+        },
+        'options': [
+          {'optionId': 'allow_once', 'name': 'Allow once', 'kind': 'allow_once'},
+        ],
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+
+      final bgState = container.read(chatProvider);
+      expect(bgState.backgroundPendingPermissionIds, contains('sess-bg-perm'));
+      expect(bgState.hasAnyPendingPermission, isTrue);
+      expect(container.read(pendingSessionIdsProvider).containsKey('sess-bg-perm'), isTrue);
+      expect(container.read(petMoodProvider), PetMood.waitingApproval);
+
+      // Switch back to sess-bg-perm -> paused tool status and permission card are restored!
+      container.read(sessionsProvider.notifier).selectSession('sess-bg-perm');
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      final restored = container.read(chatProvider);
+      expect(restored.pendingPermissions.length, 1);
+      final restoredAssistant =
+          restored.transcript.items.last as AssistantTranscriptItem;
+      expect(
+        restoredAssistant.toolCallById('tc-bg-p1')?.status,
+        AcpToolStatus.paused,
+      );
+
+      // Approve permission -> tool resumes inProgress and permission resolves!
+      container.read(chatProvider.notifier).respondPermission(
+        restored.pendingPermissions.first,
+        'allow_once',
+      );
+      final permOutcome = await permFuture;
+      expect((permOutcome['outcome'] as Map)['optionId'], 'allow_once');
+      final resumedAssistant =
+          container.read(chatProvider).transcript.items.last as AssistantTranscriptItem;
+      expect(
+        resumedAssistant.toolCallById('tc-bg-p1')?.status,
+        AcpToolStatus.inProgress,
+      );
+
+      promptGate.complete();
+      await turn;
     });
   });
 }

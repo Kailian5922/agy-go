@@ -6,7 +6,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../state/chat_state.dart';
+import '../../state/connection_state.dart';
 import '../../state/hosts_state.dart';
+import '../../state/phone_state.dart';
 import '../../state/runtime_state.dart';
 import '../../state/settings_state.dart';
 import '../../state/workspaces_state.dart';
@@ -56,7 +58,23 @@ class QuickPanel extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final colors = DshColors.of(context);
-    final chat = ref.watch(chatProvider);
+    final chat = ref.watch(
+      chatProvider.select(
+        (c) => (
+          isBusy: c.isBusy,
+          isStopping: c.isStopping,
+          hasAnyPendingPermission: c.hasAnyPendingPermission,
+          bgRunningCount: c.backgroundRunningIds.length,
+          sessionCwd: c.sessionCwd,
+          sessionAgentMode: c.sessionAgentMode,
+          sessionToolPermission: c.sessionToolPermission,
+        ),
+      ),
+    );
+    final conn = ref.watch(activeConnectionProvider);
+    final hasPhoneApproval = ref.watch(
+      phoneControlProvider.select((p) => p.pendingApprovals.isNotEmpty),
+    );
     final settings = ref.watch(settingsProvider);
     final hosts = ref.watch(hostsProvider);
     final runtime = ref.watch(localRuntimeProvider).status;
@@ -64,6 +82,25 @@ class QuickPanel extends ConsumerWidget {
     final hasSession = sessionId != null;
     final activeMode = chat.sessionAgentMode ?? settings.agentMode;
     final activePerm = chat.sessionToolPermission ?? settings.toolPermission;
+    final hasApproval = chat.hasAnyPendingPermission || hasPhoneApproval;
+    final (dotTone, statusText) = switch ((
+      hasApproval,
+      chat.isStopping,
+      chat.isBusy,
+      chat.bgRunningCount > 0,
+      conn.isLoading,
+      conn.hasError,
+      conn.value != null,
+    )) {
+      (true, _, _, _, _, _, _) => (StatusTone.warn, '待确认'),
+      (_, true, _, _, _, _, _) => (StatusTone.busy, '停止中'),
+      (_, _, true, _, _, _, _) => (StatusTone.busy, '运行中'),
+      (_, _, _, true, _, _, _) => (StatusTone.busy, '后台 ${chat.bgRunningCount}'),
+      (_, _, _, _, true, _, _) => (StatusTone.busy, '连接中'),
+      (_, _, _, _, _, true, _) => (StatusTone.error, '已断开'),
+      (_, _, _, _, _, _, true) => (StatusTone.ok, '已连接'),
+      _ => (StatusTone.idle, '未连接'),
+    };
 
     final content = Material(
       type: MaterialType.transparency,
@@ -96,10 +133,7 @@ class QuickPanel extends ConsumerWidget {
                   children: [
                     Row(
                       children: [
-                        StatusDot(
-                          tone: chat.isBusy ? StatusTone.busy : StatusTone.ok,
-                          size: 7,
-                        ),
+                        StatusDot(tone: dotTone, size: 7),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
@@ -107,6 +141,14 @@ class QuickPanel extends ConsumerWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.titleSmall,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          statusText,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: StatusDot.colorFor(context, dotTone),
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ],
@@ -168,12 +210,17 @@ class QuickPanel extends ConsumerWidget {
                     _CustomQuickRow(
                       icon: AppIcons.diff,
                       label: '本对话变更 Diff',
-                      onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) =>
-                              DiffViewerPage.fromTranscript(chat.transcript),
-                        ),
-                      ),
+                      onTap: () {
+                        final currentChat = ref.read(chatProvider);
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => DiffViewerPage.fromTranscript(
+                              currentChat.transcript,
+                              workspaceCwd: currentChat.sessionCwd,
+                            ),
+                          ),
+                        );
+                      },
                     ),
                   _CustomQuickRow(
                     icon: AppIcons.diagnostics,

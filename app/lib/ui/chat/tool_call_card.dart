@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 // Adapted from DSH Go (AGPL-3.0) — see THIRD_PARTY_NOTICES.md.
 
+import 'dart:convert';
+
 import 'package:acp_client/acp_client.dart';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
@@ -110,6 +112,79 @@ class _ToolCallCardState extends State<ToolCallCard> {
     return null;
   }
 
+  String _contentBlockToPlainText(AcpToolCall tc, AcpContentBlock block) =>
+      switch (block) {
+        AcpTextBlock(:final text) => _formatBlockOutput(tc, text),
+        AcpImageBlock(:final mimeType, :final uri) =>
+          (uri != null && uri.isNotEmpty)
+              ? '[图片 ($mimeType): $uri]'
+              : '[图片: $mimeType]',
+        AcpResourceLinkBlock(:final uri, :final name, :final title) =>
+          '[资源: ${(title != null && title.isNotEmpty) ? title : name}] $uri',
+      };
+
+  Widget _buildContentBlockWidget(
+    AcpToolCall tc,
+    AcpContentBlock block,
+    DshColors dsh,
+    ColorScheme scheme,
+  ) {
+    switch (block) {
+      case AcpTextBlock(:final text):
+        return SelectableText(
+          _formatBlockOutput(tc, text),
+          style: AppType.monoSmall(color: dsh.codeWellFg),
+        );
+      case AcpImageBlock(:final data, :final mimeType):
+        if (data.isNotEmpty) {
+          try {
+            final bytes = base64Decode(data);
+            if (bytes.isNotEmpty) {
+              return ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 220),
+                  child: Image.memory(
+                    bytes,
+                    fit: BoxFit.contain,
+                    errorBuilder: (ctx, err, st) => Text(
+                      '[图片: $mimeType]',
+                      style: AppType.monoLabel(color: dsh.textTertiary),
+                    ),
+                  ),
+                ),
+              );
+            }
+          } catch (_) {
+            // Malformed base64 payload: fall through to clean placeholder.
+          }
+        }
+        return Text(
+          '[图片: $mimeType]',
+          style: AppType.monoLabel(color: dsh.textTertiary),
+        );
+      case AcpResourceLinkBlock(:final uri, :final name, :final title):
+        final heading = (title != null && title.isNotEmpty) ? title : name;
+        final text = heading == uri ? uri : '$heading\n$uri';
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Icon(AppIcons.link, size: 13, color: scheme.primary),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: SelectableText(
+                text,
+                style: AppType.monoSmall(color: scheme.onSurfaceVariant),
+              ),
+            ),
+          ],
+        );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final tc = widget.toolCall;
@@ -125,10 +200,17 @@ class _ToolCallCardState extends State<ToolCallCard> {
         if (b is! AcpDiffToolContent) b,
     ];
     final fallbackOutput = nonDiffBlocks.isEmpty ? _rawOutputText(tc) : null;
+    final inputDetails = formatToolInputDetails(tc, workspaceCwd: cwd);
     final hasDetails =
         diffs.isNotEmpty ||
         nonDiffBlocks.isNotEmpty ||
         tc.locations.isNotEmpty ||
+        fallbackOutput != null ||
+        inputDetails != null;
+    final hasTextOutput =
+        nonDiffBlocks.any(
+          (b) => b is AcpBlockToolContent && b.block is! AcpImageBlock,
+        ) ||
         fallbackOutput != null;
     final nativeLabel = extractNativeToolLabel(tc, workspaceCwd: cwd);
     final summary = formatToolSummary(tc, workspaceCwd: cwd);
@@ -170,6 +252,37 @@ class _ToolCallCardState extends State<ToolCallCard> {
             child: CircularProgressIndicator(
               strokeWidth: 1.7,
               color: scheme.primary,
+            ),
+          ),
+        ],
+      ),
+      AcpToolStatus.paused => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (counts != null) ...[
+            buildDiffCountsBadge(counts),
+            const SizedBox(width: 6),
+          ],
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: ShapeDecoration(
+              color: dsh.warning.withValues(alpha: 0.14),
+              shape: const StadiumBorder(),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(AppIcons.approval, size: 11, color: dsh.warning),
+                const SizedBox(width: 3),
+                Text(
+                  '待确认',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: dsh.warning,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 10.5,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -423,6 +536,23 @@ class _ToolCallCardState extends State<ToolCallCard> {
                           );
                         },
                       ),
+                    if (inputDetails != null)
+                      Padding(
+                        padding: EdgeInsets.only(
+                          bottom:
+                              (diffs.isNotEmpty ||
+                                  nonDiffBlocks.isNotEmpty ||
+                                  fallbackOutput != null)
+                              ? 6
+                              : 0,
+                        ),
+                        child: SelectableText(
+                          inputDetails,
+                          style: AppType.monoSmall(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
                     for (final diff in diffs)
                       _DiffWell(
                         path: displayToolPath(
@@ -436,11 +566,11 @@ class _ToolCallCardState extends State<ToolCallCard> {
                       switch (block) {
                         AcpBlockToolContent(:final block) => Padding(
                           padding: const EdgeInsets.only(top: 4),
-                          child: SelectableText(
-                            block is AcpTextBlock
-                                ? _formatBlockOutput(tc, block.text)
-                                : block.toString(),
-                            style: AppType.monoSmall(color: dsh.codeWellFg),
+                          child: _buildContentBlockWidget(
+                            tc,
+                            block,
+                            dsh,
+                            scheme,
                           ),
                         ),
                         AcpTerminalToolContent(:final terminalId) => Padding(
@@ -460,9 +590,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
                           style: AppType.monoSmall(color: dsh.codeWellFg),
                         ),
                       ),
-                    if (counts != null ||
-                        nonDiffBlocks.any((b) => b is AcpBlockToolContent) ||
-                        fallbackOutput != null) ...[
+                    if (counts != null || hasTextOutput) ...[
                       const SizedBox(height: 8),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.end,
@@ -487,8 +615,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
                                 ),
                               ),
                             ),
-                          if (nonDiffBlocks.any((b) => b is AcpBlockToolContent) ||
-                              fallbackOutput != null)
+                          if (hasTextOutput)
                             TextButton.icon(
                               style: TextButton.styleFrom(
                                 visualDensity: VisualDensity.compact,
@@ -504,14 +631,12 @@ class _ToolCallCardState extends State<ToolCallCard> {
                                     ? nonDiffBlocks
                                           .whereType<AcpBlockToolContent>()
                                           .map(
-                                            (b) => b.block is AcpTextBlock
-                                                ? _formatBlockOutput(
-                                                    tc,
-                                                    (b.block as AcpTextBlock)
-                                                        .text,
-                                                  )
-                                                : b.block.toString(),
+                                            (b) => _contentBlockToPlainText(
+                                              tc,
+                                              b.block,
+                                            ),
                                           )
+                                          .where((s) => s.isNotEmpty)
                                           .join('\n\n')
                                     : (fallbackOutput ?? '');
                                 Navigator.of(context).push(

@@ -14,6 +14,7 @@ import '../../runtime/runtime_models.dart';
 import '../../state/chat_state.dart';
 import '../../state/connection_state.dart';
 import '../../state/hosts_state.dart';
+import '../../state/phone_state.dart';
 import '../../state/runtime_state.dart';
 import '../../state/settings_state.dart';
 import '../../state/voice_state.dart';
@@ -50,11 +51,18 @@ class ChatList extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final chat = ref.watch(chatProvider);
-    final items = chat.transcript.items;
+    final listState = ref.watch(
+      chatProvider.select(
+        (c) => (
+          items: c.transcript.items,
+          isLoadingSession: c.isLoadingSession,
+        ),
+      ),
+    );
+    final items = listState.items;
     final topPad = ChatHeader.heightOf(context) + 8;
 
-    if (chat.isLoadingSession) {
+    if (listState.isLoadingSession) {
       return const Center(child: CircularProgressIndicator.adaptive());
     }
 
@@ -64,8 +72,13 @@ class ChatList extends ConsumerWidget {
       final connAsync = ref.watch(activeConnectionProvider);
       final selectedWs = ref.watch(selectedWorkspaceProvider);
       final settings = ref.watch(settingsProvider);
-      final activeMode = chat.sessionAgentMode ?? settings.agentMode;
-      final activePerm = chat.sessionToolPermission ?? settings.toolPermission;
+      final sessionPolicy = ref.watch(
+        chatProvider.select(
+          (c) => (mode: c.sessionAgentMode, perm: c.sessionToolPermission),
+        ),
+      );
+      final activeMode = sessionPolicy.mode ?? settings.agentMode;
+      final activePerm = sessionPolicy.perm ?? settings.toolPermission;
       final isRisky = activePerm.isHighRisk;
       final isPlan = activeMode == AgyAgentMode.plan;
       final modePillLabel = isPlan
@@ -429,10 +442,40 @@ class _AssistantTurnViewState extends ConsumerState<_AssistantTurnView> {
       item.toolCalls,
       workspaceCwd: workspaceCwd,
     );
+    final liveTurn = item.isStreaming
+        ? ref.watch(
+            chatProvider.select(
+              (c) => (
+                phase: c.livePhase,
+                hasRetry: c.activeRetry != null,
+                hasPerm: c.pendingPermissions.isNotEmpty,
+                isStopping: c.isStopping,
+              ),
+            ),
+          )
+        : null;
+    final hasPhoneApproval = item.isStreaming
+        ? ref.watch(
+            phoneControlProvider.select((p) => p.pendingApprovals.isNotEmpty),
+          )
+        : false;
+    final hasPendingApproval = (liveTurn?.hasPerm ?? false) || hasPhoneApproval;
+    final lastEntry = timeline.isNotEmpty ? timeline.last : null;
+    // Only spin the latest thought row when the model is actually in the
+    // `thinking` phase and that thought is the newest timeline entry (or a
+    // legacy item without explicit timeline ordering), never reactivating an
+    // old completed thought block after a tool finishes or during retries/approvals.
+    final thoughtIsTrailingOrLegacy =
+        item.timeline.isEmpty || lastEntry is ThoughtTimelineEntry;
     final hasActiveThoughtRow =
         item.isStreaming &&
         trailingMessage == null &&
         !hasActiveTool &&
+        !hasPendingApproval &&
+        !(liveTurn?.isStopping ?? false) &&
+        !(liveTurn?.hasRetry ?? false) &&
+        liveTurn?.phase == TurnLivePhase.thinking &&
+        thoughtIsTrailingOrLegacy &&
         lastThoughtId != null;
 
     var thoughtOrdinal = 0;
@@ -556,79 +599,97 @@ class _AssistantTurnViewState extends ConsumerState<_AssistantTurnView> {
               ),
             ),
           ),
-          if (item.isStreaming)
+          if (item.isStreaming) ...[
             const Padding(
               padding: EdgeInsets.only(top: 4),
               child: _StreamingRateCursor(),
-            )
-          else
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Row(
-                children: [
-                  _ActionIcon(
-                    icon: AppIcons.copy,
-                    tooltip: '复制',
-                    onTap: () {
-                      Clipboard.setData(ClipboardData(text: item.text));
-                      showBriefNotice(context, '已复制');
-                    },
-                  ),
-                  _ActionIcon(
-                    icon: isSpeaking
-                        ? AppIcons.stopGenerating
-                        : AppIcons.readAloud,
-                    tooltip: isSpeaking ? '停止朗读' : '朗读',
-                    onTap: () {
-                      final v = ref.read(voiceProvider.notifier);
-                      if (isSpeaking) {
-                        v.stopSpeaking();
-                      } else {
-                        v.speak(item.text);
-                      }
-                    },
-                  ),
-                  _ActionIcon(
-                    icon: AppIcons.quote,
-                    tooltip: '引用追问',
-                    onTap: () => widget.onQuote(item.text),
-                  ),
-                  _ActionIcon(
-                    icon: AppIcons.regenerate,
-                    tooltip: '重新生成',
-                    onTap: () => unawaited(
-                      ref.read(chatProvider.notifier).regenerateLast(),
-                    ),
-                  ),
-                  _ActionIcon(
-                    icon: AppIcons.share,
-                    tooltip: '分享与导出',
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const ShareScreen(),
-                      ),
-                    ),
-                  ),
-                  _ActionIcon(
-                    icon: AppIcons.more,
-                    tooltip: '更多操作',
-                    onTap: () => unawaited(_openMoreMenu(context, item.text)),
-                  ),
-                  if (item.metrics != null &&
-                      item.metrics!.tokensPerSecond > 0) ...[
-                    const Spacer(),
-                    _TurnSpeedBadge(metrics: item.metrics!),
-                  ],
-                ],
-              ),
             ),
+            _LiveTurnFooter(
+              item: item,
+              hasActiveTool: hasActiveTool,
+              hasActiveThoughtRow: hasActiveThoughtRow,
+              duringReply: true,
+            ),
+          ] else
+            _buildReplyActions(context, item, isSpeaking: isSpeaking),
         ] else if (item.isStreaming)
           _LiveTurnFooter(
             item: item,
             hasActiveTool: hasActiveTool,
             hasActiveThoughtRow: hasActiveThoughtRow,
-          ),
+          )
+        else if (item.text.isNotEmpty || item.metrics != null)
+          _buildReplyActions(context, item, isSpeaking: isSpeaking),
       ],
+    );
+  }
+
+  Widget _buildReplyActions(
+    BuildContext context,
+    AssistantTranscriptItem item, {
+    required bool isSpeaking,
+  }) {
+    final copyText = item.text.trim();
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        children: [
+          if (copyText.isNotEmpty) ...[
+            _ActionIcon(
+              icon: AppIcons.copy,
+              tooltip: '复制',
+              onTap: () {
+                Clipboard.setData(ClipboardData(text: copyText));
+                showBriefNotice(context, '已复制');
+              },
+            ),
+            _ActionIcon(
+              icon: isSpeaking
+                  ? AppIcons.stopGenerating
+                  : AppIcons.readAloud,
+              tooltip: isSpeaking ? '停止朗读' : '朗读',
+              onTap: () {
+                final v = ref.read(voiceProvider.notifier);
+                if (isSpeaking) {
+                  v.stopSpeaking();
+                } else {
+                  v.speak(copyText);
+                }
+              },
+            ),
+            _ActionIcon(
+              icon: AppIcons.quote,
+              tooltip: '引用追问',
+              onTap: () => widget.onQuote(copyText),
+            ),
+            _ActionIcon(
+              icon: AppIcons.regenerate,
+              tooltip: '重新生成',
+              onTap: () => unawaited(
+                ref.read(chatProvider.notifier).regenerateLast(),
+              ),
+            ),
+            _ActionIcon(
+              icon: AppIcons.share,
+              tooltip: '分享与导出',
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const ShareScreen(),
+                ),
+              ),
+            ),
+            _ActionIcon(
+              icon: AppIcons.more,
+              tooltip: '更多操作',
+              onTap: () => unawaited(_openMoreMenu(context, copyText)),
+            ),
+          ],
+          if (item.metrics != null && item.metrics!.tokensPerSecond > 0) ...[
+            const Spacer(),
+            _TurnSpeedBadge(metrics: item.metrics!),
+          ],
+        ],
+      ),
     );
   }
 
@@ -1170,11 +1231,13 @@ class _LiveTurnFooter extends ConsumerStatefulWidget {
     required this.item,
     required this.hasActiveTool,
     required this.hasActiveThoughtRow,
+    this.duringReply = false,
   });
 
   final AssistantTranscriptItem item;
   final bool hasActiveTool;
   final bool hasActiveThoughtRow;
+  final bool duringReply;
 
   @override
   ConsumerState<_LiveTurnFooter> createState() => _LiveTurnFooterState();
@@ -1200,10 +1263,14 @@ class _LiveTurnFooterState extends ConsumerState<_LiveTurnFooter> {
 
   @override
   Widget build(BuildContext context) {
+    final phoneApprovals = ref.watch(
+      phoneControlProvider.select((p) => p.pendingApprovals),
+    );
     final live = ref.watch(
       chatProvider.select(
         (c) => (
           isBusy: c.isBusy,
+          isStopping: c.isStopping,
           startedAt: c.turnStartedAt,
           lastActivityAt: c.lastActivityAt,
           livePhase: c.livePhase,
@@ -1212,16 +1279,47 @@ class _LiveTurnFooterState extends ConsumerState<_LiveTurnFooter> {
           thoughtChars: c.thoughtChars,
           answerChars: c.answerChars,
           liveTokensPerSecond: c.liveTokensPerSecond,
+          sessionCwd: c.sessionCwd,
+          pendingPerm: c.pendingPermissions.firstOrNull,
           activePlanLabel: c.transcript.plan
-              .where((p) => p.status.toLowerCase() == 'in_progress')
+              .where((p) => p.isInProgress)
               .firstOrNull
               ?.content,
         ),
       ),
     );
     if (!live.isBusy) return const SizedBox.shrink();
-    // When a tool card is visibly running and no retry is active, avoid duplicating it.
-    if (widget.hasActiveTool && live.activeRetry == null) {
+
+    final hasPendingApproval =
+        live.pendingPerm != null || phoneApprovals.isNotEmpty;
+    final pendingApprovalLabel = phoneApprovals.isNotEmpty
+        ? (phoneApprovals.first.summary.trim().isNotEmpty
+              ? phoneApprovals.first.summary.trim()
+              : phoneApprovals.first.tool)
+        : (live.pendingPerm != null
+              ? formatNativeToolLiveStatus(
+                  live.pendingPerm!.request.toolCall,
+                  workspaceCwd: live.sessionCwd,
+                )
+              : null);
+
+    final activeTools = widget.item.toolCalls
+        .where((t) => t.status.isActive)
+        .toList();
+    final activeToolLabel = activeTools.isNotEmpty
+        ? formatNativeToolLiveStatus(
+            activeTools.last,
+            workspaceCwd: live.sessionCwd,
+          )
+        : null;
+
+    // When a tool card is visibly running and no retry/approval/reply-wait is active,
+    // avoid duplicating the active tool card right beneath it.
+    if (!widget.duringReply &&
+        widget.hasActiveTool &&
+        live.activeRetry == null &&
+        !hasPendingApproval &&
+        !live.isStopping) {
       return const SizedBox.shrink();
     }
 
@@ -1236,28 +1334,46 @@ class _LiveTurnFooterState extends ConsumerState<_LiveTurnFooter> {
       activeRetry: live.activeRetry,
       thoughtChars: live.thoughtChars,
       answerChars: live.answerChars,
-      hasActiveTool: widget.hasActiveTool,
-      activeToolLabel: null,
+      hasActiveTool: activeTools.isNotEmpty,
+      activeToolLabel: activeToolLabel,
+      activeToolCount: activeTools.length,
       liveStatusLabel: live.liveStatusLabel,
       liveThoughtHeadline: liveThoughtHeadline,
       activePlanLabel: live.activePlanLabel,
       now: _now,
       liveTokensPerSecond: live.liveTokensPerSecond,
       inline: false,
+      isStopping: live.isStopping,
+      hasPendingApproval: hasPendingApproval,
+      pendingApprovalLabel: pendingApprovalLabel,
     );
 
     final theme = Theme.of(context);
     final dsh = DshColors.of(context);
     final isWarn =
         health.tone == TurnHealthTone.retrying ||
-        health.tone == TurnHealthTone.suspectedStall;
+        health.tone == TurnHealthTone.suspectedStall ||
+        health.tone == TurnHealthTone.waitingApproval;
     final hasSpeed =
         live.liveTokensPerSecond != null && live.liveTokensPerSecond! > 0;
 
+    // During smooth reply streaming, stay hidden unless interrupted by approval,
+    // retry, explicit engine status, background tool wait, or prolonged silence.
+    if (widget.duringReply &&
+        !isWarn &&
+        !live.isStopping &&
+        live.liveStatusLabel == null &&
+        health.tone == TurnHealthTone.active &&
+        !(activeTools.isNotEmpty && health.silentSeconds >= 15)) {
+      return const SizedBox.shrink();
+    }
+
     // Avoid duplicating the active thinking spinner row unless we have live
     // tok/s throughput, an explicit native status message, or a warning.
-    if (widget.hasActiveThoughtRow &&
+    if (!widget.duringReply &&
+        widget.hasActiveThoughtRow &&
         !isWarn &&
+        !live.isStopping &&
         health.tone == TurnHealthTone.active &&
         live.livePhase == TurnLivePhase.thinking &&
         live.liveStatusLabel == null &&
@@ -1284,6 +1400,8 @@ class _LiveTurnFooterState extends ConsumerState<_LiveTurnFooter> {
             Icon(
               health.tone == TurnHealthTone.retrying
                   ? AppIcons.retry
+                  : health.tone == TurnHealthTone.waitingApproval
+                  ? AppIcons.approval
                   : AppIcons.warning,
               size: 14,
               color: dsh.warning,

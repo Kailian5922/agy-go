@@ -18,7 +18,7 @@ enum TurnLivePhase {
   retrying,
 }
 
-/// Live health classification shown to distinguish active thinking from retries or stalls.
+/// Live health classification shown to distinguish active thinking from retries, approvals, or stalls.
 enum TurnHealthTone {
   /// Actively receiving tokens or running a tool.
   active,
@@ -26,10 +26,13 @@ enum TurnHealthTone {
   /// Quiet gap (15–59s) while model thinks server-side or prepares next step.
   waiting,
 
+  /// Blocked waiting for user approval (ACP tool permission or phone control).
+  waitingApproval,
+
   /// Engine reported a transient network / rate-limit retry.
   retrying,
 
-  /// Prolonged silence (>= 60s) with no active tool and no retry log.
+  /// Prolonged silence (>= 60s) with no active tool, approval, or retry log.
   suspectedStall,
 }
 
@@ -91,6 +94,7 @@ class TurnHealth {
     required this.pillText,
     required this.detailHeadline,
     this.bannerText,
+    this.liveSpeedLabel,
   });
 
   final TurnHealthTone tone;
@@ -98,6 +102,10 @@ class TurnHealth {
   final String pillText;
   final String detailHeadline;
   final String? bannerText;
+
+  /// Compact live tokens/second string (e.g. `46 tok/s`) when actively streaming,
+  /// exposed separately so narrow UI pills never clip speed off long thought titles.
+  final String? liveSpeedLabel;
 
   bool get showAlertBanner => bannerText != null && bannerText!.isNotEmpty;
 }
@@ -208,10 +216,10 @@ class TurnSpeedTracker {
     }
   }
 
-  /// Returns live tokens/second while chunks are actively flowing (null if idle/silent >= 8s).
+  /// Returns live tokens/second while chunks are actively flowing (null if idle/silent >= 4.5s).
   double? liveTokensPerSecond(DateTime now) {
     if (_lastChunkAt == null || _totalEstimatedTokens < 1.0) return null;
-    if (now.difference(_lastChunkAt!).inMilliseconds >= 8000) return null;
+    if (now.difference(_lastChunkAt!).inMilliseconds >= 4500) return null;
 
     final cutoff = now.subtract(_window);
     var windowTokens = 0.0;
@@ -311,8 +319,27 @@ String latestThoughtHeadline(String raw) {
     }
   }
 
-  return lines.last.replaceAll('**', '').trim();
+  final last = lines.last.replaceAll('**', '').trim();
+  if (last.length <= 96) return last;
+
+  // Real `agy acp` models often stream 200-300 char prose paragraphs without
+  // Markdown headings. Prefer the latest concise sentence/clause so headers
+  // and pills stay legible instead of truncating mid-sentence.
+  final sentences = last
+      .split(RegExp(r'(?<=[。！？])|(?<=[.!?])\s+'))
+      .map((s) => s.trim())
+      .where((s) => s.isNotEmpty)
+      .toList();
+  if (sentences.length > 1) {
+    final newest = sentences.last;
+    if (newest.length >= 12 && newest.length <= 96) return newest;
+    if (newest.length > 96) return '${newest.substring(0, 92).trimRight()}…';
+  }
+  return '${last.substring(0, 92).trimRight()}…';
 }
+
+String _withConcurrentToolCount(String label, int activeToolCount) =>
+    activeToolCount > 1 ? '$label (+${activeToolCount - 1})' : label;
 
 /// Resolves the concise top-header status directly from native ACP signals
 /// without guessing or fabricating intermediate phases.
@@ -323,15 +350,34 @@ String resolveNativeHeaderStatus({
   String? activePlanLabel,
   String? liveThoughtHeadline,
   TurnRetryInfo? activeRetry,
+  bool isStopping = false,
+  bool hasPendingApproval = false,
+  String? pendingApprovalLabel,
+  int activeToolCount = 0,
 }) {
+  if (isStopping) return '正在停止…';
+  if (hasPendingApproval) {
+    final detail = pendingApprovalLabel?.trim();
+    return (detail != null && detail.isNotEmpty) ? '等你确认 · $detail' : '等你确认';
+  }
   if (activeRetry != null || phase == TurnLivePhase.retrying) {
     return activeRetry?.compactPillLabel() ?? '重试中';
   }
-  final tool = activeToolStatus?.trim();
-  if (tool != null && tool.isNotEmpty) return tool;
 
+  final tool = activeToolStatus?.trim();
+  final hasTool = tool != null && tool.isNotEmpty;
   final native = nativeStatusLabel?.trim();
-  if (native != null && native.isNotEmpty) return native;
+  final hasNative = native != null && native.isNotEmpty;
+
+  // Show active tool unless the model has already moved on to streaming new
+  // thoughts or answer text (e.g. while a background task continues running).
+  if (hasTool &&
+      phase != TurnLivePhase.thinking &&
+      phase != TurnLivePhase.responding) {
+    return _withConcurrentToolCount(tool, activeToolCount);
+  }
+
+  if (hasNative) return native;
 
   if (phase == TurnLivePhase.thinking) {
     final heading = liveThoughtHeadline?.trim();
@@ -340,6 +386,10 @@ String resolveNativeHeaderStatus({
   }
   if (phase == TurnLivePhase.responding) {
     return '回复中';
+  }
+
+  if (hasTool) {
+    return _withConcurrentToolCount(tool, activeToolCount);
   }
 
   final plan = activePlanLabel?.trim();
@@ -365,6 +415,11 @@ TurnHealth deriveTurnHealth({
   String? liveThoughtHeadline,
   double? liveTokensPerSecond,
   bool inline = true,
+  bool isStopping = false,
+  bool hasPendingApproval = false,
+  String? pendingApprovalLabel,
+  int activeToolCount = 0,
+  bool includeSpeedInPill = true,
 }) {
   final anchor = lastActivityAt ?? startedAt ?? now;
   final silentSecs = now.difference(anchor).inSeconds.clamp(0, 86400);
@@ -381,6 +436,54 @@ TurnHealth deriveTurnHealth({
   final hasPlan = cleanPlan != null && cleanPlan.isNotEmpty;
   final cleanThought = liveThoughtHeadline?.trim();
   final hasThoughtHeading = cleanThought != null && cleanThought.isNotEmpty;
+  final cleanApproval = pendingApprovalLabel?.trim();
+  final hasApprovalDetail = cleanApproval != null && cleanApproval.isNotEmpty;
+
+  TurnHealth buildActiveToolHealth() {
+    final baseLabel =
+        (activeToolLabel != null && activeToolLabel.trim().isNotEmpty)
+        ? activeToolLabel.trim()
+        : '工具执行中';
+    final label = _withConcurrentToolCount(baseLabel, activeToolCount);
+    final warnLongTool = silentSecs >= 180;
+    return TurnHealth(
+      tone: warnLongTool
+          ? TurnHealthTone.suspectedStall
+          : TurnHealthTone.active,
+      silentSeconds: silentSecs,
+      pillText: warnLongTool
+          ? '$label · ${formatCompactDuration(silentSecs)}'
+          : label,
+      detailHeadline: warnLongTool
+          ? '$label（已运行 ${formatChineseDuration(silentSecs)} 未返回结果）'
+          : label,
+      bannerText: warnLongTool
+          ? '「$label」已运行 ${formatChineseDuration(silentSecs)} 未返回结果，可查看日志或停止'
+          : null,
+    );
+  }
+
+  // 0. User explicitly initiated cancellation — wait honestly for engine release.
+  if (isStopping) {
+    return TurnHealth(
+      tone: TurnHealthTone.waiting,
+      silentSeconds: silentSecs,
+      pillText: '正在停止…',
+      detailHeadline: '正在中止当前轮次，等待引擎释放会话…',
+    );
+  }
+
+  // 0b. Blocked waiting for user permission / phone-control approval: NEVER stall-alert.
+  if (hasPendingApproval) {
+    return TurnHealth(
+      tone: TurnHealthTone.waitingApproval,
+      silentSeconds: silentSecs,
+      pillText: hasApprovalDetail ? '等你确认 · $cleanApproval' : '等你确认',
+      detailHeadline: hasApprovalDetail
+          ? '等待你的确认：$cleanApproval'
+          : '等待你的确认后继续执行',
+    );
+  }
 
   // 1. Explicit network / rate-limit retry reported by `agy acp`.
   if (activeRetry != null) {
@@ -400,27 +503,12 @@ TurnHealth deriveTurnHealth({
     );
   }
 
-  // 2. Active tool call: show the model/engine's own native action/title verbatim.
-  if (hasActiveTool) {
-    final label = (activeToolLabel != null && activeToolLabel.trim().isNotEmpty)
-        ? activeToolLabel.trim()
-        : '工具执行中';
-    final warnLongTool = silentSecs >= 180;
-    return TurnHealth(
-      tone: warnLongTool
-          ? TurnHealthTone.suspectedStall
-          : TurnHealthTone.active,
-      silentSeconds: silentSecs,
-      pillText: warnLongTool
-          ? '$label · ${formatCompactDuration(silentSecs)}'
-          : label,
-      detailHeadline: warnLongTool
-          ? '$label（已运行 ${formatChineseDuration(silentSecs)} 未返回结果）'
-          : label,
-      bannerText: warnLongTool
-          ? '「$label」已运行 ${formatChineseDuration(silentSecs)} 未返回结果，可查看日志或停止'
-          : null,
-    );
+  // 2. Active tool call: show the model/engine's own native action/title verbatim
+  // unless the model has already moved on to streaming new thoughts or answer text.
+  if (hasActiveTool &&
+      phase != TurnLivePhase.thinking &&
+      phase != TurnLivePhase.responding) {
+    return buildActiveToolHealth();
   }
 
   // 3. Explicit native engine status / compaction / notice emitted by `agy`.
@@ -443,6 +531,9 @@ TurnHealth deriveTurnHealth({
 
   // 4. Actively receiving `agent_thought_chunk`: surface the model's native heading & speed.
   if (phase == TurnLivePhase.thinking) {
+    if (silentSecs >= 15 && hasActiveTool) {
+      return buildActiveToolHealth();
+    }
     final base = hasThoughtHeading ? '思考 · $cleanThought' : '思考中';
     if (silentSecs >= 60) {
       final compact = formatCompactDuration(silentSecs);
@@ -465,7 +556,9 @@ TurnHealth deriveTurnHealth({
         detailHeadline: '$base（上次收到思考片段：$full前）',
       );
     }
-    final pillSuffix = compactSpeed != null ? ' · $compactSpeed' : '';
+    final pillSuffix = (includeSpeedInPill && compactSpeed != null)
+        ? ' · $compactSpeed'
+        : '';
     final detailParts = <String>[
       ?fullSpeed,
       if (thoughtChars > 0) '已 ${formatCharCount(thoughtChars)}',
@@ -477,11 +570,18 @@ TurnHealth deriveTurnHealth({
       detailHeadline: detailParts.isEmpty
           ? base
           : '$base（${detailParts.join(' · ')}）',
+      liveSpeedLabel: compactSpeed,
     );
   }
 
   // 5. Actively receiving `agent_message_chunk`.
   if (phase == TurnLivePhase.responding) {
+    // If the model emitted an intermediate message and is now waiting for a
+    // running background tool/command to finish, reflect that running tool
+    // instead of firing a false stall alarm after 60s.
+    if (silentSecs >= 15 && hasActiveTool) {
+      return buildActiveToolHealth();
+    }
     if (silentSecs >= 60) {
       final compact = formatCompactDuration(silentSecs);
       final full = formatChineseDuration(silentSecs);
@@ -503,7 +603,7 @@ TurnHealth deriveTurnHealth({
         detailHeadline: '回复中（上次收到片段：$full前）',
       );
     }
-    final pillSuffix = compactSpeed != null
+    final pillSuffix = (includeSpeedInPill && compactSpeed != null)
         ? ' · $compactSpeed'
         : (answerChars > 0 ? ' · ${formatCharCount(answerChars)}' : '…');
     final speedPart = fullSpeed != null ? '$fullSpeed · ' : '';
@@ -512,6 +612,7 @@ TurnHealth deriveTurnHealth({
       silentSeconds: silentSecs,
       pillText: '回复中$pillSuffix',
       detailHeadline: '正在接收回复（$speedPart已 ${formatCharCount(answerChars)}）',
+      liveSpeedLabel: compactSpeed,
     );
   }
 
@@ -565,7 +666,9 @@ TurnHealth deriveTurnHealth({
 }
 
 final _ansiEscapeRegex = RegExp(r'\x1B\[[0-9;]*[A-Za-z]');
-final _streamTagRegex = RegExp(r'^\[(?:stderr|stdout|system|installer|auth)\]\s*');
+final _streamTagRegex = RegExp(
+  r'^\[(?:stderr|stdout|system|installer|auth|acp)\]\s*',
+);
 final _attemptPairRegex = RegExp(
   r'(?:attempt|retry|try|第)\s*#?(\d+)\s*(?:/|of|out of)\s*(\d+)',
   caseSensitive: false,

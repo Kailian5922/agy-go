@@ -4,13 +4,16 @@ import android.content.Context
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.BufferedWriter
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.io.RandomAccessFile
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.security.SecureRandom
+import java.util.ArrayDeque
 import kotlin.concurrent.thread
 
 /**
@@ -57,6 +60,7 @@ class AgyProcess(
         private set
 
     private val clientLock = Any()
+    private val pendingFrames = ArrayDeque<String>()
 
     fun start() {
         installer.ensureDirectories()
@@ -70,6 +74,11 @@ class AgyProcess(
             phoneControlEnabled = phoneControlEnabled,
         )
 
+        val acpLogFile = File(installer.homeDir, ACP_LOG_REL_PATH).apply {
+            parentFile?.mkdirs()
+            runCatching { writeText("") }
+        }
+
         val server = ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"))
         serverSocket = server
         listenPort = server.localPort
@@ -81,7 +90,7 @@ class AgyProcess(
             installer.workspaceDir
         }
 
-        val cmd = buildCommand()
+        val cmd = buildCommand(acpLogFile)
         val pb = ProcessBuilder(cmd).apply {
             directory(startDir)
             val env = environment()
@@ -159,6 +168,13 @@ class AgyProcess(
             }
         }
 
+        // Tail `agy acp --log-file`: `agy acp` redirects its internal diagnostic logs
+        // away from stderr so retries (429/503/network reset), compaction, and trajectory
+        // state transitions are only visible via the log file.
+        thread(name = "agy-log-tailer", isDaemon = true) {
+            tailAcpLogFile(acpLogFile, proc)
+        }
+
         // Accept loopback TCP connections from Flutter with token verification.
         thread(name = "agy-bridge-accept", isDaemon = true) {
             while (!stopping && !server.isClosed) {
@@ -193,18 +209,20 @@ class AgyProcess(
         cleanupResources()
     }
 
-    private fun buildAcpArgs(): List<String> {
+    private fun buildAcpArgs(logFilePath: String): List<String> {
         // Never pass global `--add-dir` here: each ACP conversation specifies its own `cwd`
         // (and optional per-session additionalDirectories via `/add-dir`), keeping workspaces isolated.
         val args = ArrayList<String>()
         args.add("acp")
+        args.add("--log-file")
+        args.add(logFilePath)
         if (executionPolicy.skipPermissions) {
             args.add("--dangerously-skip-permissions")
         }
         return args
     }
 
-    private fun buildCommand(): List<String> {
+    private fun buildCommand(acpLogFile: File): List<String> {
         if (useProot && installer.isProotAvailable()) {
             executionMode = "proot"
             val proot = File(context.applicationInfo.nativeLibraryDir, "libproot.so").absolutePath
@@ -231,14 +249,14 @@ class AgyProcess(
                     add("AGY_PHONE_STORAGE=${PhoneStorage.GUEST_PATH}")
                 }
                 add("/root/.local/bin/agy")
-                addAll(buildAcpArgs())
+                addAll(buildAcpArgs("/root/$ACP_LOG_REL_PATH"))
             }
             return cmd
         }
         executionMode = "native_bionic"
         return buildList {
             add(installer.agyBinary.absolutePath)
-            addAll(buildAcpArgs())
+            addAll(buildAcpArgs(acpLogFile.absolutePath))
         }
     }
 
@@ -272,6 +290,14 @@ class AgyProcess(
                     } catch (_: Exception) {}
                     activeClient = socket
                     activeClientWriter = writer
+                    // Flush any stdout frames buffered during a brief loopback reconnect.
+                    while (pendingFrames.isNotEmpty()) {
+                        val queued = pendingFrames.peekFirst() ?: break
+                        writer.write(queued)
+                        writer.newLine()
+                        writer.flush()
+                        pendingFrames.removeFirst()
+                    }
                 }
                 listener.onLog("[bridge] Flutter client attached on 127.0.0.1:$listenPort", "system")
 
@@ -300,9 +326,20 @@ class AgyProcess(
         }
     }
 
+    private fun enqueuePendingFrameLocked(line: String) {
+        if (pendingFrames.size >= MAX_PENDING_FRAMES) {
+            pendingFrames.removeFirst()
+        }
+        pendingFrames.addLast(line)
+    }
+
     private fun forwardToClient(line: String) {
         synchronized(clientLock) {
-            val writer = activeClientWriter ?: return
+            val writer = activeClientWriter
+            if (writer == null) {
+                enqueuePendingFrameLocked(line)
+                return
+            }
             try {
                 writer.write(line)
                 writer.newLine()
@@ -313,8 +350,72 @@ class AgyProcess(
                 } catch (_: Exception) {}
                 activeClient = null
                 activeClientWriter = null
+                enqueuePendingFrameLocked(line)
             }
         }
+    }
+
+    private fun tailAcpLogFile(logFile: File, proc: Process) {
+        var offset = 0L
+        val lineBuf = ByteArrayOutputStream(512)
+        var lineTruncated = false
+        while (!stopping && proc.isAlive) {
+            try {
+                if (logFile.exists()) {
+                    val fileLen = logFile.length()
+                    if (fileLen < offset) {
+                        offset = 0L
+                        lineBuf.reset()
+                        lineTruncated = false
+                    }
+                    if (fileLen > offset) {
+                        RandomAccessFile(logFile, "r").use { raf ->
+                            raf.seek(offset)
+                            var remaining = fileLen - offset
+                            while (remaining > 0L && !stopping) {
+                                val chunkSize = remaining.coerceAtMost(32768L).toInt()
+                                val buf = ByteArray(chunkSize)
+                                val read = raf.read(buf)
+                                if (read <= 0) break
+                                offset += read
+                                remaining -= read
+                                for (i in 0 until read) {
+                                    val b = buf[i]
+                                    if (b == '\n'.code.toByte()) {
+                                        val raw = String(lineBuf.toByteArray(), Charsets.UTF_8)
+                                            .trimEnd('\r')
+                                        lineBuf.reset()
+                                        lineTruncated = false
+                                        handleAcpLogLine(raw)
+                                    } else if (!lineTruncated) {
+                                        if (lineBuf.size() < MAX_LOG_LINE_BYTES) {
+                                            lineBuf.write(b.toInt())
+                                        } else {
+                                            lineTruncated = true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // File may be mid-rotation or temporarily unreadable; retry next tick.
+            }
+            try {
+                Thread.sleep(LOG_TAIL_POLL_MS)
+            } catch (_: InterruptedException) {
+                break
+            }
+        }
+    }
+
+    private fun handleAcpLogLine(rawLine: String) {
+        val trimmed = rawLine.trim()
+        if (trimmed.isEmpty()) return
+        detectOAuthUrl(trimmed)
+        if (!shouldForwardAcpLog(trimmed)) return
+        listener.onLog(AgyAuthHelper.redactLine(trimmed, authConfig.apiKey), "acp")
     }
 
     private fun detectOAuthUrl(line: String) {
@@ -329,6 +430,7 @@ class AgyProcess(
             } catch (_: Exception) {}
             activeClient = null
             activeClientWriter = null
+            pendingFrames.clear()
         }
         try {
             serverSocket?.close()
@@ -351,7 +453,43 @@ class AgyProcess(
     }
 
     companion object {
+        private const val ACP_LOG_REL_PATH = ".cache/agy-acp-live.log"
+        private const val MAX_PENDING_FRAMES = 512
+        private const val MAX_LOG_LINE_BYTES = 16384
+        private const val LOG_TAIL_POLL_MS = 350L
         private val OAUTH_URL_REGEX = Regex("https://accounts\\.google\\.com/[^\\s\"'<>]+")
+
+        internal fun shouldForwardAcpLog(line: String): Boolean {
+            val lower = line.lowercase()
+            return lower.contains("retry") ||
+                lower.contains("backoff") ||
+                lower.contains("reconnect") ||
+                lower.contains("429") ||
+                lower.contains("rate limit") ||
+                lower.contains("rate_limit") ||
+                lower.contains("resource_exhausted") ||
+                lower.contains("quota") ||
+                lower.contains("502") ||
+                lower.contains("503") ||
+                lower.contains("504") ||
+                lower.contains("overloaded") ||
+                lower.contains("unavailable") ||
+                lower.contains("connection reset") ||
+                lower.contains("broken pipe") ||
+                lower.contains("unexpected eof") ||
+                lower.contains("timeout") ||
+                lower.contains("deadline") ||
+                lower.contains("stream error") ||
+                lower.contains("stream interrupted") ||
+                lower.contains("compaction") ||
+                lower.contains("compacting") ||
+                lower.contains("trajectorystateupdate") ||
+                lower.contains("state_waiting_for_tasks") ||
+                lower.contains("state_fully_idle") ||
+                lower.contains("error") ||
+                lower.contains("warn") ||
+                lower.contains("fatal")
+        }
 
         fun mergeNoProxy(existing: String?): String {
             val parts = LinkedHashSet<String>()

@@ -214,18 +214,7 @@ class ChatTranscript {
             final nextTools = [
               for (final tc in item.toolCalls)
                 if (!tc.status.isTerminal)
-                  AcpToolCall(
-                    toolCallId: tc.toolCallId,
-                    title: tc.title,
-                    name: tc.name,
-                    kind: tc.kind,
-                    status: terminalToolStatus,
-                    locations: tc.locations,
-                    content: tc.content,
-                    rawInput: tc.rawInput,
-                    rawOutput: tc.rawOutput,
-                    meta: tc.meta,
-                  )
+                  tc.withStatus(terminalToolStatus)
                 else
                   tc,
             ];
@@ -262,18 +251,7 @@ class ChatTranscript {
               toolCalls: [
                 for (final tc in item.toolCalls)
                   if (!tc.status.isTerminal)
-                    AcpToolCall(
-                      toolCallId: tc.toolCallId,
-                      title: tc.title,
-                      name: tc.name,
-                      kind: tc.kind,
-                      status: AcpToolStatus.completed,
-                      locations: tc.locations,
-                      content: tc.content,
-                      rawInput: tc.rawInput,
-                      rawOutput: tc.rawOutput,
-                      meta: tc.meta,
-                    )
+                    tc.withStatus(AcpToolStatus.completed)
                   else
                     tc,
               ],
@@ -285,8 +263,60 @@ class ChatTranscript {
     return changed ? copyWith(items: nextItems) : this;
   }
 
+  /// Updates the status of an existing tool call (searching newest-to-oldest
+  /// without disturbing `isStreaming`), or optionally inserts [fallbackTool]
+  /// into the latest assistant turn when permission is requested before `tool_call`.
+  ChatTranscript setToolCallStatus(
+    String toolCallId,
+    AcpToolStatus status, {
+    AcpToolCall? fallbackTool,
+    DateTime? now,
+  }) {
+    if (toolCallId.isEmpty) return this;
+    for (var i = items.length - 1; i >= 0; i--) {
+      final item = items[i];
+      if (item is! AssistantTranscriptItem) continue;
+      final idx = item.toolCalls.indexWhere((t) => t.toolCallId == toolCallId);
+      if (idx < 0) continue;
+      final existing = item.toolCalls[idx];
+      final updated = fallbackTool != null
+          ? existing.mergeWith(fallbackTool).withStatus(status)
+          : existing.withStatus(status);
+      final nextTools = List<AcpToolCall>.from(item.toolCalls)
+        ..[idx] = updated;
+      final nextItems = List<TranscriptItem>.from(items)
+        ..[i] = item.copyWith(toolCalls: nextTools);
+      return copyWith(items: nextItems);
+    }
+    if (fallbackTool == null) return this;
+    final ts = now ?? DateTime.now();
+    final inserted = fallbackTool.withStatus(status);
+    return _updateLastAssistant(
+      ts,
+      (a) {
+        final nextTools = [...a.toolCalls, inserted];
+        final nextTimeline = [
+          ...a.timeline,
+          ToolTimelineEntry(
+            id: '${a.id}_tc_${inserted.toolCallId}',
+            toolCallId: inserted.toolCallId,
+          ),
+        ];
+        return a.copyWith(toolCalls: nextTools, timeline: nextTimeline);
+      },
+      markStreaming: isStreaming,
+    );
+  }
+
   /// Applies a single ACP `session/update` notification.
-  ChatTranscript applyUpdate(AcpSessionUpdate update, {DateTime? now}) {
+  ///
+  /// Set [markStreaming] to `false` when replaying historical messages during
+  /// `session/load` so old turns never masquerade as live running streams.
+  ChatTranscript applyUpdate(
+    AcpSessionUpdate update, {
+    DateTime? now,
+    bool markStreaming = true,
+  }) {
     final ts = now ?? DateTime.now();
     switch (update) {
       case UserMessageChunkUpdate(:final content):
@@ -323,118 +353,173 @@ class ChatTranscript {
       case AgentMessageChunkUpdate(:final content):
         final chunkText = _blockText(content);
         if (chunkText.isEmpty) return this;
-        return _updateLastAssistant(ts, (a) {
-          final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
-          if (nextTimeline.isNotEmpty &&
-              nextTimeline.last is MessageTimelineEntry) {
-            final prev = nextTimeline.last as MessageTimelineEntry;
-            nextTimeline[nextTimeline.length - 1] = MessageTimelineEntry(
-              id: prev.id,
-              text: '${prev.text}$chunkText',
+        return _updateLastAssistant(
+          ts,
+          (a) {
+            final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
+            if (nextTimeline.isNotEmpty &&
+                nextTimeline.last is MessageTimelineEntry) {
+              final prev = nextTimeline.last as MessageTimelineEntry;
+              nextTimeline[nextTimeline.length - 1] = MessageTimelineEntry(
+                id: prev.id,
+                text: '${prev.text}$chunkText',
+              );
+            } else {
+              nextTimeline.add(
+                MessageTimelineEntry(
+                  id: '${a.id}_msg_${nextTimeline.length}',
+                  text: chunkText,
+                ),
+              );
+            }
+            final sep =
+                a.text.isNotEmpty &&
+                    a.timeline.isNotEmpty &&
+                    a.timeline.last is! MessageTimelineEntry
+                ? '\n\n'
+                : '';
+            return a.copyWith(
+              text: '${a.text}$sep$chunkText',
+              timeline: nextTimeline,
             );
-          } else {
-            nextTimeline.add(
-              MessageTimelineEntry(
-                id: '${a.id}_msg_${nextTimeline.length}',
-                text: chunkText,
-              ),
-            );
-          }
-          final sep =
-              a.text.isNotEmpty &&
-                  a.timeline.isNotEmpty &&
-                  a.timeline.last is! MessageTimelineEntry
-              ? '\n\n'
-              : '';
-          return a.copyWith(
-            text: '${a.text}$sep$chunkText',
-            timeline: nextTimeline,
-          );
-        });
+          },
+          markStreaming: markStreaming,
+        );
 
       case AgentThoughtChunkUpdate(:final content):
         final chunkText = _blockText(content);
         if (chunkText.isEmpty) return this;
-        return _updateLastAssistant(ts, (a) {
-          final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
-          final startingNewThoughtBlock =
-              nextTimeline.isNotEmpty &&
-              nextTimeline.last is! ThoughtTimelineEntry;
-          if (nextTimeline.isNotEmpty &&
-              nextTimeline.last is ThoughtTimelineEntry) {
-            final prev = nextTimeline.last as ThoughtTimelineEntry;
-            nextTimeline[nextTimeline.length - 1] = ThoughtTimelineEntry(
-              id: prev.id,
-              text: '${prev.text}$chunkText',
+        return _updateLastAssistant(
+          ts,
+          (a) {
+            final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
+            final startingNewThoughtBlock =
+                nextTimeline.isNotEmpty &&
+                nextTimeline.last is! ThoughtTimelineEntry;
+            if (nextTimeline.isNotEmpty &&
+                nextTimeline.last is ThoughtTimelineEntry) {
+              final prev = nextTimeline.last as ThoughtTimelineEntry;
+              nextTimeline[nextTimeline.length - 1] = ThoughtTimelineEntry(
+                id: prev.id,
+                text: '${prev.text}$chunkText',
+              );
+            } else {
+              nextTimeline.add(
+                ThoughtTimelineEntry(
+                  id: '${a.id}_th_${nextTimeline.length}',
+                  text: chunkText,
+                ),
+              );
+            }
+            final sep = a.thought.isNotEmpty && startingNewThoughtBlock
+                ? '\n\n'
+                : '';
+            return a.copyWith(
+              thought: '${a.thought}$sep$chunkText',
+              timeline: nextTimeline,
             );
-          } else {
-            nextTimeline.add(
-              ThoughtTimelineEntry(
-                id: '${a.id}_th_${nextTimeline.length}',
-                text: chunkText,
-              ),
-            );
-          }
-          final sep = a.thought.isNotEmpty && startingNewThoughtBlock
-              ? '\n\n'
-              : '';
-          return a.copyWith(
-            thought: '${a.thought}$sep$chunkText',
-            timeline: nextTimeline,
-          );
-        });
+          },
+          markStreaming: markStreaming,
+        );
 
       case ToolCallCreatedUpdate(:final toolCall):
-        return _updateLastAssistant(ts, (a) {
-          final existingIdx = a.toolCalls.indexWhere(
+        final extractedPlan = toolCall.extractedPlanEntries;
+        // If this toolCallId already belongs to an existing assistant turn,
+        // merge in place without wiping accumulated diffs/content or moving turns.
+        for (var i = items.length - 1; i >= 0; i--) {
+          final item = items[i];
+          if (item is! AssistantTranscriptItem) continue;
+          final existingIdx = item.toolCalls.indexWhere(
             (t) => t.toolCallId == toolCall.toolCallId,
           );
-          final nextTools = List<AcpToolCall>.from(a.toolCalls);
-          if (existingIdx >= 0) {
-            nextTools[existingIdx] = toolCall;
-          } else {
-            nextTools.add(toolCall);
-          }
-          final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
-          final hasEntry = nextTimeline.any(
-            (e) => e is ToolTimelineEntry && e.toolCallId == toolCall.toolCallId,
+          if (existingIdx < 0) continue;
+          final merged = item.toolCalls[existingIdx].mergeWith(toolCall);
+          final nextTools = List<AcpToolCall>.from(item.toolCalls)
+            ..[existingIdx] = merged;
+          final nextItems = List<TranscriptItem>.from(items)
+            ..[i] = item.copyWith(toolCalls: nextTools);
+          return copyWith(
+            items: nextItems,
+            plan: merged.extractedPlanEntries ?? extractedPlan ?? plan,
           );
-          if (!hasEntry) {
-            nextTimeline.add(
-              ToolTimelineEntry(
-                id: '${a.id}_tc_${toolCall.toolCallId}',
-                toolCallId: toolCall.toolCallId,
-              ),
+        }
+        final updated = _updateLastAssistant(
+          ts,
+          (a) {
+            final nextTools = [...a.toolCalls, toolCall];
+            final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
+            final hasEntry = nextTimeline.any(
+              (e) =>
+                  e is ToolTimelineEntry &&
+                  e.toolCallId == toolCall.toolCallId,
             );
-          }
-          return a.copyWith(toolCalls: nextTools, timeline: nextTimeline);
-        });
+            if (!hasEntry) {
+              nextTimeline.add(
+                ToolTimelineEntry(
+                  id: '${a.id}_tc_${toolCall.toolCallId}',
+                  toolCallId: toolCall.toolCallId,
+                ),
+              );
+            }
+            return a.copyWith(toolCalls: nextTools, timeline: nextTimeline);
+          },
+          markStreaming: markStreaming,
+        );
+        return extractedPlan != null
+            ? updated.copyWith(plan: extractedPlan)
+            : updated;
 
       case ToolCallPatchedUpdate(:final toolCallId, :final patch):
-        return _updateLastAssistant(ts, (a) {
-          final existingIdx = a.toolCalls.indexWhere(
+        // Route patches to the exact assistant turn owning [toolCallId] (even if
+        // a background command finishes after a newer turn began) without flipping
+        // `isStreaming` or corrupting `items.last`.
+        for (var i = items.length - 1; i >= 0; i--) {
+          final item = items[i];
+          if (item is! AssistantTranscriptItem) continue;
+          final existingIdx = item.toolCalls.indexWhere(
             (t) => t.toolCallId == toolCallId,
           );
-          final nextTools = List<AcpToolCall>.from(a.toolCalls);
-          if (existingIdx >= 0) {
-            nextTools[existingIdx] = nextTools[existingIdx].mergePatch(patch);
-          } else {
-            nextTools.add(AcpToolCall.fromJson(patch));
-          }
-          final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
-          final hasEntry = nextTimeline.any(
-            (e) => e is ToolTimelineEntry && e.toolCallId == toolCallId,
+          if (existingIdx < 0) continue;
+          final patched = item.toolCalls[existingIdx].mergePatch(patch);
+          final nextTools = List<AcpToolCall>.from(item.toolCalls)
+            ..[existingIdx] = patched;
+          final nextItems = List<TranscriptItem>.from(items)
+            ..[i] = item.copyWith(toolCalls: nextTools);
+          final extractedPlan = patched.extractedPlanEntries;
+          return copyWith(
+            items: nextItems,
+            plan: extractedPlan ?? plan,
           );
-          if (!hasEntry) {
-            nextTimeline.add(
-              ToolTimelineEntry(
-                id: '${a.id}_tc_$toolCallId',
-                toolCallId: toolCallId,
-              ),
+        }
+        final created = AcpToolCall.fromJson(
+          patch.containsKey('toolCallId')
+              ? patch
+              : <String, Object?>{...patch, 'toolCallId': toolCallId},
+        );
+        final updated = _updateLastAssistant(
+          ts,
+          (a) {
+            final nextTools = [...a.toolCalls, created];
+            final nextTimeline = List<AssistantTimelineEntry>.from(a.timeline);
+            final hasEntry = nextTimeline.any(
+              (e) => e is ToolTimelineEntry && e.toolCallId == toolCallId,
             );
-          }
-          return a.copyWith(toolCalls: nextTools, timeline: nextTimeline);
-        });
+            if (!hasEntry) {
+              nextTimeline.add(
+                ToolTimelineEntry(
+                  id: '${a.id}_tc_$toolCallId',
+                  toolCallId: toolCallId,
+                ),
+              );
+            }
+            return a.copyWith(toolCalls: nextTools, timeline: nextTimeline);
+          },
+          markStreaming: markStreaming,
+        );
+        final extractedPlan = created.extractedPlanEntries;
+        return extractedPlan != null
+            ? updated.copyWith(plan: extractedPlan)
+            : updated;
 
       case PlanUpdate(:final entries):
         return copyWith(plan: entries);
@@ -468,14 +553,15 @@ class ChatTranscript {
 
   ChatTranscript _updateLastAssistant(
     DateTime ts,
-    AssistantTranscriptItem Function(AssistantTranscriptItem) transform,
-  ) {
+    AssistantTranscriptItem Function(AssistantTranscriptItem) transform, {
+    bool markStreaming = true,
+  }) {
     final nextItems = List<TranscriptItem>.from(items);
     if (nextItems.isEmpty || nextItems.last is! AssistantTranscriptItem) {
       final created = AssistantTranscriptItem(
         id: 'a_${nextItems.length}_${ts.microsecondsSinceEpoch}',
         timestamp: ts,
-        isStreaming: true,
+        isStreaming: markStreaming,
       );
       nextItems.add(transform(created));
     } else {

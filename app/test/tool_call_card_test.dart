@@ -181,4 +181,143 @@ void main() {
       );
     },
   );
+
+  group('Relative path titles, update_steps, paused status & non-text tool blocks', () {
+    test('formats relative File titles with StartLine/EndLine and update_steps checklists', () {
+      const relRead = AcpToolCall(
+        toolCallId: 'tc_rel_read',
+        name: 'read_file',
+        title: 'File agy-go/README.md',
+        kind: AcpToolKind.read,
+        status: AcpToolStatus.inProgress,
+        rawInput: {
+          'Path': 'agy-go/README.md',
+          'StartLine': 1,
+          'EndLine': 25,
+        },
+      );
+      expect(extractNativeToolLabel(relRead), isNull);
+      expect(formatToolSummary(relRead), 'agy-go/README.md:1-25');
+      expect(formatNativeToolLiveStatus(relRead), 'agy-go/README.md:1-25');
+
+      // Descriptive English prose starting with "File " is NOT stripped as a bare path.
+      const proseTool = AcpToolCall(
+        toolCallId: 'tc_prose',
+        title: 'File analysis complete',
+        kind: AcpToolKind.other,
+        status: AcpToolStatus.completed,
+      );
+      expect(extractNativeToolLabel(proseTool), 'File analysis complete');
+
+      const planCall = AcpToolCall(
+        toolCallId: 'tc_steps',
+        name: 'update_steps',
+        title: 'Run update_steps',
+        kind: AcpToolKind.other,
+        status: AcpToolStatus.completed,
+        rawInput: {
+          'steps': [
+            {'title': 'Read source files', 'status': 'done'},
+            {'title': 'Fix live UI sync', 'status': 'in_progress'},
+          ],
+        },
+      );
+      expect(extractNativeToolLabel(planCall), '计划 (1/2) · Fix live UI sync');
+      expect(formatToolSummary(planCall), contains('1/2'));
+      expect(formatToolSummary(planCall), contains('Fix live UI sync'));
+      final details = formatToolInputDetails(planCall);
+      expect(details, contains('✓ Read source files'));
+      expect(details, contains('▸ Fix live UI sync'));
+
+      const bareRunCall = AcpToolCall(
+        toolCallId: 'tc_bare_run',
+        name: 'read_file',
+        title: 'Run read_file',
+        kind: AcpToolKind.read,
+        status: AcpToolStatus.inProgress,
+      );
+      expect(extractNativeToolLabel(bareRunCall), isNull);
+    });
+
+    testWidgets('ToolCallCard shows amber 待确认 badge when paused and expands rawInput arguments', (
+      tester,
+    ) async {
+      const pausedExec = AcpToolCall(
+        toolCallId: 'tc_paused_1',
+        name: 'run_command',
+        title: 'run_command',
+        kind: AcpToolKind.execute,
+        status: AcpToolStatus.paused,
+        rawInput: {
+          'CommandLine': 'git status --short',
+          'Cwd': '/repo',
+        },
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildDarkTheme(accent: AppAccent.mist, glassBlur: false),
+          home: const Scaffold(
+            body: Padding(
+              padding: EdgeInsets.all(16),
+              child: ToolCallCard(
+                toolCall: pausedExec,
+                workspaceCwd: '/repo',
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('待确认'), findsOneWidget);
+      expect(find.text('git status --short'), findsOneWidget);
+
+      await tester.tap(find.text('git status --short'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining(r'$ git status --short'), findsOneWidget);
+    });
+
+    testWidgets('ToolCallCard renders AcpImageBlock and AcpResourceLinkBlock cleanly without toString leak', (
+      tester,
+    ) async {
+      const mediaTool = AcpToolCall(
+        toolCallId: 'tc_media_1',
+        title: 'Capture screen',
+        kind: AcpToolKind.other,
+        status: AcpToolStatus.completed,
+        content: [
+          AcpBlockToolContent(
+            AcpImageBlock(data: 'not-valid-base64', mimeType: 'image/png'),
+          ),
+          AcpBlockToolContent(
+            AcpResourceLinkBlock(
+              uri: 'file:///repo/docs/spec.md',
+              name: 'spec.md',
+              title: 'Architecture Spec',
+            ),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildLightTheme(accent: AppAccent.mist, glassBlur: false),
+          home: const Scaffold(
+            body: Padding(
+              padding: EdgeInsets.all(16),
+              child: ToolCallCard(toolCall: mediaTool),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Capture screen'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('[图片: image/png]'), findsOneWidget);
+      expect(find.textContaining('Architecture Spec'), findsOneWidget);
+      expect(find.textContaining('Instance of'), findsNothing);
+    });
+  });
 }

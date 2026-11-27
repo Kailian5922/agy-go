@@ -1,9 +1,13 @@
 import 'dart:math' as math;
 
+import 'package:acp_client/acp_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../../state/chat_state.dart';
 import '../../state/pet_state.dart';
+import '../../state/phone_state.dart';
+import '../chat/tool_format.dart';
 import '../common/brief_notice.dart';
 import '../common/settings_widgets.dart';
 import '../shell/page_frame.dart';
@@ -213,28 +217,119 @@ class _StarlingPetOverlayState extends ConsumerState<StarlingPetOverlay> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            if (_showLabel)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: GlassSurface(
-                  tier: GlassTier.chrome,
-                  stadium: true,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 5,
-                    ),
-                    child: Text(
-                      '星灵 · ${mood.label}',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
+            if (_showLabel) _PetStatusPill(mood: mood),
             StarlingAvatar(mood: mood, size: 54),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PetStatusPill extends ConsumerWidget {
+  const _PetStatusPill({required this.mood});
+
+  final PetMood mood;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final chat = ref.watch(
+      chatProvider.select(
+        (c) => (
+          isBusy: c.isBusy,
+          isStopping: c.isStopping,
+          livePhase: c.livePhase,
+          liveStatusLabel: c.liveStatusLabel,
+          activeRetry: c.activeRetry,
+          pendingPermissions: c.pendingPermissions,
+          backgroundRunningIds: c.backgroundRunningIds,
+          backgroundSummaries: c.backgroundSummaries,
+          sessionCwd: c.sessionCwd,
+          plan: c.transcript.plan,
+          lastItem: c.transcript.items.isNotEmpty
+              ? c.transcript.items.last
+              : null,
+        ),
+      ),
+    );
+    final phoneApprovals = ref.watch(
+      phoneControlProvider.select((p) => p.pendingApprovals),
+    );
+    final hasPendingApproval =
+        chat.pendingPermissions.isNotEmpty || phoneApprovals.isNotEmpty;
+
+    String detail;
+    if (chat.isBusy || hasPendingApproval) {
+      final assistant = chat.lastItem is AssistantTranscriptItem
+          ? chat.lastItem as AssistantTranscriptItem
+          : null;
+      final activeTools = assistant != null
+          ? assistant.toolCalls.where((t) => t.status.isActive).toList()
+          : const <AcpToolCall>[];
+      final pendingApprovalLabel = chat.pendingPermissions.isNotEmpty
+          ? formatNativeToolLiveStatus(
+              chat.pendingPermissions.first.request.toolCall,
+              workspaceCwd: chat.sessionCwd,
+            )
+          : (phoneApprovals.isNotEmpty ? phoneApprovals.first.summary : null);
+      detail = resolveNativeHeaderStatus(
+        phase: chat.livePhase,
+        activeToolStatus: activeTools.isNotEmpty
+            ? formatNativeToolLiveStatus(
+                activeTools.last,
+                workspaceCwd: chat.sessionCwd,
+              )
+            : null,
+        nativeStatusLabel: chat.liveStatusLabel,
+        activePlanLabel:
+            chat.plan.where((p) => p.isInProgress).firstOrNull?.content,
+        liveThoughtHeadline: chat.livePhase == TurnLivePhase.thinking
+            ? latestAssistantThoughtHeadline(assistant)
+            : null,
+        activeRetry: chat.activeRetry,
+        isStopping: chat.isStopping,
+        hasPendingApproval: hasPendingApproval,
+        pendingApprovalLabel: pendingApprovalLabel,
+        activeToolCount: activeTools.length,
+      );
+    } else if (chat.backgroundSummaries.values.any(
+      (s) => s.hasPendingPermission,
+    )) {
+      final bgPendingCount = chat.backgroundSummaries.values
+          .where((s) => s.hasPendingPermission)
+          .length;
+      detail = '后台待确认 ($bgPendingCount)';
+    } else if (chat.backgroundRunningIds.isNotEmpty) {
+      final first = chat.backgroundSummaries[chat.backgroundRunningIds.first];
+      if (chat.backgroundRunningIds.length == 1 &&
+          first?.activeToolLabel != null &&
+          first!.activeToolLabel!.trim().isNotEmpty) {
+        detail = '后台 · ${first.activeToolLabel!.trim()}';
+      } else {
+        detail = '后台运行 (${chat.backgroundRunningIds.length})';
+      }
+    } else {
+      detail = mood.label;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 220),
+        child: GlassSurface(
+          tier: GlassTier.chrome,
+          stadium: true,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            child: Text(
+              '星灵 · $detail',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
         ),
       ),
     );

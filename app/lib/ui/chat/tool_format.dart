@@ -241,6 +241,41 @@ String? _extractStringArg(Object? rawInput, List<String> keys) {
   return null;
 }
 
+String? _extractLineRangeFromRawInput(Object? rawInput) {
+  if (rawInput is! Map) return null;
+  int? readInt(List<String> keys) {
+    for (final key in keys) {
+      final v = rawInput[key];
+      if (v is int && v > 0) return v;
+      if (v is num && v.toInt() > 0) return v.toInt();
+      if (v is String) {
+        final parsed = int.tryParse(v.trim());
+        if (parsed != null && parsed > 0) return parsed;
+      }
+    }
+    return null;
+  }
+
+  final start = readInt(const ['StartLine', 'startLine', 'start_line', 'line']);
+  if (start == null) return null;
+  final end = readInt(const ['EndLine', 'endLine', 'end_line']);
+  if (end != null && end >= start) {
+    return end == start ? ':$start' : ':$start-$end';
+  }
+  return ':$start';
+}
+
+String? _formatUpdateStepsLabel(AcpToolCall tc) {
+  final steps = tc.extractedPlanEntries;
+  if (steps == null || steps.isEmpty) return null;
+  final done = steps.where((s) => s.isCompleted).length;
+  final active = steps.where((s) => s.isInProgress).firstOrNull;
+  if (active != null && active.content.isNotEmpty) {
+    return '计划 ($done/${steps.length}) · ${active.content}';
+  }
+  return '更新任务计划 ($done/${steps.length})';
+}
+
 /// Scrubs any embedded `../../../../../../storage/...` tokens inside arbitrary
 /// tool titles or shell commands so walls of `../` never pollute the UI.
 String scrubTraversalPaths(String text, {String? workspaceCwd}) {
@@ -267,6 +302,9 @@ String formatToolSummary(
 }) {
   String oneLine(String s) => s.trim().replaceAll(RegExp(r'\s+'), ' ');
 
+  final planSummary = _formatUpdateStepsLabel(tc);
+  if (planSummary != null) return planSummary;
+
   final isFileKind =
       tc.kind == AcpToolKind.read ||
       tc.kind == AcpToolKind.edit ||
@@ -288,7 +326,8 @@ String formatToolSummary(
     if (candidate != null && candidate.isNotEmpty) {
       final display = displayToolPath(candidate, workspaceCwd: workspaceCwd);
       final shown = compact ? compactSingleLinePath(display) : display;
-      final suffix = titleSplit.lineSuffix;
+      final suffix =
+          titleSplit.lineSuffix ?? _extractLineRangeFromRawInput(tc.rawInput);
       return suffix != null ? '$shown$suffix' : shown;
     }
   }
@@ -340,7 +379,11 @@ String formatToolSummary(
 
 final _kBareToolNameRe = RegExp(r'^[a-z0-9]+(?:_[a-z0-9]+)+$');
 final _kBarePathLikeRe = RegExp(
-  r'^(?:file\s+)?(?:file://|/|\.\./|\./|~/)',
+  r'^(?:(?:file|directory|dir|folder)\s+(?:(?:file://|/|\.\./|\./|~/)|[^\s]*[/\\.][^\s]*)$|(?:file|directory|dir|folder)\s+(?:file://|/|\.\./|\./|~/)|(?:file://|/|\.\./|\./|~/))',
+  caseSensitive: false,
+);
+final _kRunBareToolTitleRe = RegExp(
+  r'^run\s+[a-z0-9]+(?:_[a-z0-9]+)+$',
   caseSensitive: false,
 );
 final _kAgyTimestampHeaderRe = RegExp(
@@ -357,6 +400,9 @@ String? extractNativeToolLabel(
   AcpToolCall tc, {
   String? workspaceCwd,
 }) {
+  final planLabel = _formatUpdateStepsLabel(tc);
+  if (planLabel != null) return planLabel;
+
   String clean(String raw) {
     var out = scrubTraversalPaths(
       raw.trim().replaceAll(RegExp(r'\s+'), ' '),
@@ -380,6 +426,7 @@ String? extractNativeToolLabel(
       rawTitle.isEmpty ||
       (tc.name != null && rawTitle.toLowerCase() == tc.name!.trim().toLowerCase()) ||
       _kBareToolNameRe.hasMatch(rawTitle) ||
+      _kRunBareToolTitleRe.hasMatch(rawTitle) ||
       _kBarePathLikeRe.hasMatch(rawTitle);
   final descriptiveTitle = titleIsBare ? null : rawTitle;
 
@@ -410,6 +457,95 @@ String formatNativeToolLiveStatus(
   final native = extractNativeToolLabel(tc, workspaceCwd: workspaceCwd);
   if (native != null && native.isNotEmpty) return native;
   return formatToolSummary(tc, workspaceCwd: workspaceCwd);
+}
+
+/// Builds a concise, human-readable parameter preview from [tc.rawInput] so users
+/// can tap a running or completed tool row (command, search, subagent, MCP, etc.)
+/// to inspect what arguments the model passed even before tool output arrives.
+String? formatToolInputDetails(
+  AcpToolCall tc, {
+  String? workspaceCwd,
+}) {
+  final steps = tc.extractedPlanEntries;
+  if (steps != null && steps.isNotEmpty) {
+    return [
+      for (final s in steps)
+        '${s.isCompleted ? '✓' : s.isInProgress ? '▸' : s.isFailed ? '✕' : '○'} ${s.content}',
+    ].join('\n');
+  }
+
+  final raw = tc.rawInput;
+  if (raw == null) return null;
+  if (raw is String) {
+    final clean = scrubTraversalPaths(raw.trim(), workspaceCwd: workspaceCwd);
+    return clean.isEmpty ? null : clean;
+  }
+  if (raw is! Map || raw.isEmpty) return null;
+
+  const skippedKeys = <String>{
+    'toolAction',
+    'tool_action',
+    'toolSummary',
+    'tool_summary',
+    'Target',
+    'Replacement',
+    'TargetContent',
+    'ReplacementContent',
+    'ReplacementChunks',
+    'edits',
+    'Content',
+    'CodeContent',
+    'file_text',
+    'old_string',
+    'new_string',
+    'oldString',
+    'newString',
+  };
+
+  final lines = <String>[];
+  final cmd = _extractStringArg(raw, const ['CommandLine', 'command', 'cmd']);
+  if (cmd != null) {
+    lines.add('\$ ${scrubTraversalPaths(cmd, workspaceCwd: workspaceCwd)}');
+  }
+  for (final entry in raw.entries) {
+    final key = '${entry.key}';
+    if (skippedKeys.contains(key) ||
+        key == 'CommandLine' ||
+        key == 'command' ||
+        key == 'cmd') {
+      continue;
+    }
+    final val = entry.value;
+    if (val == null) continue;
+    String formatted;
+    if (val is String) {
+      final trimmed = val.trim();
+      if (trimmed.isEmpty) continue;
+      final isPathKey = key.toLowerCase().contains('path') ||
+          key.toLowerCase().contains('file') ||
+          key.toLowerCase().contains('dir') ||
+          key.toLowerCase() == 'cwd';
+      formatted = isPathKey
+          ? displayToolPath(trimmed, workspaceCwd: workspaceCwd)
+          : scrubTraversalPaths(trimmed, workspaceCwd: workspaceCwd);
+      if (formatted.length > 260) {
+        formatted = '${formatted.substring(0, 260)}…';
+      }
+    } else if (val is num || val is bool) {
+      formatted = '$val';
+    } else if (val is List) {
+      if (val.isEmpty) continue;
+      final preview = val.take(4).map((e) => '$e').join(', ');
+      formatted = val.length > 4
+          ? '[$preview, … 共 ${val.length} 项]'
+          : '[$preview]';
+    } else {
+      continue;
+    }
+    lines.add('$key: $formatted');
+    if (lines.length >= 6) break;
+  }
+  return lines.isEmpty ? null : lines.join('\n');
 }
 
 /// Strips the model-facing `Created At:` / `Completed At:` header lines that

@@ -6,6 +6,7 @@ import 'package:acp_client/acp_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart' show AppLifecycleState, WidgetsBinding;
 
+import '../ui/chat/tool_format.dart';
 import 'agy_config_state.dart';
 import 'connection_state.dart';
 import 'drawer_view_state.dart';
@@ -56,6 +57,71 @@ class ChatAttachment {
   }
 }
 
+/// Lightweight live summary of a parked background conversation so Header,
+/// Drawer, Live Activity, and Starling Pet reflect background tools, retries,
+/// and permission prompts without copying full transcripts on every token.
+class BackgroundSessionSummary {
+  const BackgroundSessionSummary({
+    required this.sessionId,
+    this.title,
+    this.isBusy = false,
+    this.livePhase = TurnLivePhase.waiting,
+    this.liveStatusLabel,
+    this.activeToolLabel,
+    this.activeToolCount = 0,
+    this.hasPendingPermission = false,
+    this.pendingPermissionLabel,
+    this.activeRetrySummary,
+    this.turnStartedAt,
+    this.error,
+  });
+
+  final String sessionId;
+  final String? title;
+  final bool isBusy;
+  final TurnLivePhase livePhase;
+  final String? liveStatusLabel;
+  final String? activeToolLabel;
+  final int activeToolCount;
+  final bool hasPendingPermission;
+  final String? pendingPermissionLabel;
+  final String? activeRetrySummary;
+  final DateTime? turnStartedAt;
+  final String? error;
+
+  @override
+  bool operator ==(Object other) =>
+      other is BackgroundSessionSummary &&
+      other.sessionId == sessionId &&
+      other.title == title &&
+      other.isBusy == isBusy &&
+      other.livePhase == livePhase &&
+      other.liveStatusLabel == liveStatusLabel &&
+      other.activeToolLabel == activeToolLabel &&
+      other.activeToolCount == activeToolCount &&
+      other.hasPendingPermission == hasPendingPermission &&
+      other.pendingPermissionLabel == pendingPermissionLabel &&
+      other.activeRetrySummary == activeRetrySummary &&
+      other.turnStartedAt == turnStartedAt &&
+      other.error == error;
+
+  @override
+  int get hashCode => Object.hash(
+    sessionId,
+    title,
+    isBusy,
+    livePhase,
+    liveStatusLabel,
+    activeToolLabel,
+    activeToolCount,
+    hasPendingPermission,
+    pendingPermissionLabel,
+    activeRetrySummary,
+    turnStartedAt,
+    error,
+  );
+}
+
 class ChatState {
   const ChatState({
     this.sessionId,
@@ -85,7 +151,9 @@ class ChatState {
     this.turnEvents = const [],
     this.turnLogs = const [],
     this.backgroundRunningIds = const {},
+    this.backgroundSummaries = const {},
     this.isSending = false,
+    this.isStopping = false,
     this.isLoadingSession = false,
     this.isPreparingModels = false,
     this.isUpdatingModel = false,
@@ -131,7 +199,11 @@ class ChatState {
   /// another conversation or workspace.
   final Set<String> backgroundRunningIds;
 
+  /// Lightweight live summaries for active or approval-blocked background sessions.
+  final Map<String, BackgroundSessionSummary> backgroundSummaries;
+
   final bool isSending;
+  final bool isStopping;
   final bool isLoadingSession;
   final bool isPreparingModels;
   final bool isUpdatingModel;
@@ -140,9 +212,19 @@ class ChatState {
   final String? error;
   final String? modelError;
 
-  bool get isBusy => isSending || transcript.isStreaming;
+  bool get isBusy => isSending || (!isLoadingSession && transcript.isStreaming);
 
   bool get hasAnyRunningSession => isBusy || backgroundRunningIds.isNotEmpty;
+
+  /// Parked background sessions currently blocked waiting for user approval.
+  Set<String> get backgroundPendingPermissionIds => {
+    for (final entry in backgroundSummaries.entries)
+      if (entry.value.hasPendingPermission) entry.key,
+  };
+
+  bool get hasAnyPendingPermission =>
+      pendingPermissions.isNotEmpty ||
+      backgroundSummaries.values.any((s) => s.hasPendingPermission);
 
   /// All session IDs currently running (foreground + parked background sessions).
   Set<String> get runningSessionIds => {
@@ -194,7 +276,9 @@ class ChatState {
     List<TurnActivityLogEntry>? turnEvents,
     List<String>? turnLogs,
     Set<String>? backgroundRunningIds,
+    Map<String, BackgroundSessionSummary>? backgroundSummaries,
     bool? isSending,
+    bool? isStopping,
     bool? isLoadingSession,
     bool? isPreparingModels,
     bool? isUpdatingModel,
@@ -249,7 +333,9 @@ class ChatState {
     turnEvents: turnEvents ?? this.turnEvents,
     turnLogs: turnLogs ?? this.turnLogs,
     backgroundRunningIds: backgroundRunningIds ?? this.backgroundRunningIds,
+    backgroundSummaries: backgroundSummaries ?? this.backgroundSummaries,
     isSending: isSending ?? this.isSending,
+    isStopping: isStopping ?? this.isStopping,
     isLoadingSession: isLoadingSession ?? this.isLoadingSession,
     isPreparingModels: isPreparingModels ?? this.isPreparingModels,
     isUpdatingModel: isUpdatingModel ?? this.isUpdatingModel,
@@ -276,6 +362,7 @@ class ChatController extends Notifier<ChatState> {
   StreamSubscription<PendingPermission>? _permSub;
   StreamSubscription<AcpRawNotification>? _otherNotifSub;
   StreamSubscription<String>? _stderrSub;
+  Timer? _speedDecayTimer;
   HostConnection? _activeConn;
 
   /// Tracks the session ID currently owned by this controller so self-originated
@@ -323,19 +410,107 @@ class ChatController extends Notifier<ChatState> {
   TurnSpeedTracker _speedTrackerOf(String sid) =>
       _speedTrackers.putIfAbsent(sid, TurnSpeedTracker.new);
 
+  void _stopSpeedDecayTimer() {
+    _speedDecayTimer?.cancel();
+    _speedDecayTimer = null;
+  }
+
+  void _ensureSpeedDecayTimer() {
+    if (_speedDecayTimer != null) return;
+    _speedDecayTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!ref.mounted) {
+        _stopSpeedDecayTimer();
+        return;
+      }
+      final sid = state.sessionId;
+      if (!state.isSending || sid == null || state.liveTokensPerSecond == null) {
+        _stopSpeedDecayTimer();
+        return;
+      }
+      final fresh = _speedTrackers[sid]?.liveTokensPerSecond(DateTime.now());
+      if (fresh == null) {
+        _stopSpeedDecayTimer();
+        state = state.copyWith(liveTokensPerSecond: () => null);
+      }
+    });
+  }
+
   static bool _sameStringSet(Set<String> a, Set<String> b) =>
       a.length == b.length && a.containsAll(b);
+
+  static bool _sameSummaryMap(
+    Map<String, BackgroundSessionSummary> a,
+    Map<String, BackgroundSessionSummary> b,
+  ) {
+    if (a.length != b.length) return false;
+    for (final entry in a.entries) {
+      if (b[entry.key] != entry.value) return false;
+    }
+    return true;
+  }
+
+  BackgroundSessionSummary _summarizeParked(String sid, ChatState snap) {
+    final lastItem = snap.transcript.items.isNotEmpty
+        ? snap.transcript.items.last
+        : null;
+    final assistant = lastItem is AssistantTranscriptItem ? lastItem : null;
+    final activeTools = assistant != null
+        ? assistant.toolCalls.where((t) => t.status.isActive).toList()
+        : const <AcpToolCall>[];
+    final activeToolLabel = activeTools.isNotEmpty
+        ? formatNativeToolLiveStatus(
+            activeTools.last,
+            workspaceCwd: snap.sessionCwd,
+          )
+        : null;
+    final pendingPerm = snap.pendingPermissions.firstOrNull;
+    final pendingPermLabel = pendingPerm != null
+        ? formatNativeToolLiveStatus(
+            pendingPerm.request.toolCall,
+            workspaceCwd: snap.sessionCwd,
+          )
+        : null;
+    return BackgroundSessionSummary(
+      sessionId: sid,
+      title: snap.transcript.title?.trim().isNotEmpty == true
+          ? snap.transcript.title!.trim()
+          : null,
+      isBusy: snap.isBusy,
+      livePhase: snap.livePhase,
+      liveStatusLabel: snap.liveStatusLabel,
+      activeToolLabel: activeToolLabel,
+      activeToolCount: activeTools.length,
+      hasPendingPermission: pendingPerm != null,
+      pendingPermissionLabel: pendingPermLabel,
+      activeRetrySummary: snap.activeRetry?.summary,
+      turnStartedAt: snap.turnStartedAt,
+      error: snap.error,
+    );
+  }
 
   Set<String> _computeBackgroundRunningIds() => {
     for (final entry in _parkedSessions.entries)
       if (entry.value.snapshot.isBusy) entry.key,
   };
 
+  Map<String, BackgroundSessionSummary> _computeBackgroundSummaries() => {
+    for (final entry in _parkedSessions.entries)
+      if (entry.value.snapshot.isBusy ||
+          entry.value.snapshot.pendingPermissions.isNotEmpty ||
+          entry.value.snapshot.error != null)
+        entry.key: _summarizeParked(entry.key, entry.value.snapshot),
+  };
+
   void _syncBackgroundRunningIds() {
     if (!ref.mounted) return;
-    final next = _computeBackgroundRunningIds();
-    if (!_sameStringSet(state.backgroundRunningIds, next)) {
-      state = state.copyWith(backgroundRunningIds: next);
+    final nextIds = _computeBackgroundRunningIds();
+    final nextSummaries = _computeBackgroundSummaries();
+    if (!_sameStringSet(state.backgroundRunningIds, nextIds) ||
+        !_sameSummaryMap(state.backgroundSummaries, nextSummaries)) {
+      state = state.copyWith(
+        backgroundRunningIds: nextIds,
+        backgroundSummaries: nextSummaries,
+      );
     }
   }
 
@@ -355,13 +530,10 @@ class ChatController extends Notifier<ChatState> {
     }
     final parked = _parkedSessions[sid];
     if (parked == null) return;
-    final wasBusy = parked.snapshot.isBusy;
     final next = transform(parked.snapshot);
     parked.snapshot = next;
     parked.lastTouched = DateTime.now();
-    if (wasBusy != next.isBusy) {
-      _syncBackgroundRunningIds();
-    }
+    _syncBackgroundRunningIds();
   }
 
   void _parkActiveSession() {
@@ -377,6 +549,7 @@ class ChatController extends Notifier<ChatState> {
       state.copyWith(
         clearDraftSession: true,
         backgroundRunningIds: const {},
+        backgroundSummaries: const {},
       ),
     );
     _evictIdleParkedSessions();
@@ -495,6 +668,7 @@ class ChatController extends Notifier<ChatState> {
     _permSub?.cancel();
     _otherNotifSub?.cancel();
     _stderrSub?.cancel();
+    _stopSpeedDecayTimer();
     _updateSub = null;
     _permSub = null;
     _otherNotifSub = null;
@@ -509,6 +683,7 @@ class ChatController extends Notifier<ChatState> {
     _loadGeneration++;
 
     ref.onDispose(() {
+      _stopSpeedDecayTimer();
       unawaited(_updateSub?.cancel());
       unawaited(_permSub?.cancel());
       unawaited(_otherNotifSub?.cancel());
@@ -544,6 +719,16 @@ class ChatController extends Notifier<ChatState> {
         if (state.sessionId == null && !state.isSending) {
           _discardDraftSession(c);
           unawaited(prepareDraftSession(forceRefresh: true));
+        }
+      },
+    );
+
+    ref.listen<int>(
+      phoneControlProvider.select((p) => p.pendingApprovals.length),
+      (prev, next) {
+        if (prev == null || prev == next) return;
+        if (state.isSending) {
+          state = state.copyWith(lastActivityAt: () => DateTime.now());
         }
       },
     );
@@ -591,7 +776,10 @@ class ChatController extends Notifier<ChatState> {
     // Fresh home screen: pre-warm a silent draft ACP session in the background so
     // live models & thinking effort options are selectable BEFORE message #1.
     Future.microtask(() {
-      if (ref.mounted && _activeConn == conn && state.sessionId == null) {
+      if (ref.mounted &&
+          _activeConn == conn &&
+          state.sessionId == null &&
+          !state.isSending) {
         unawaited(prepareDraftSession());
       }
     });
@@ -607,6 +795,7 @@ class ChatController extends Notifier<ChatState> {
 
     // Park the currently visible conversation so any running turn continues
     // uninterrupted in the background instead of being torn down.
+    _stopSpeedDecayTimer();
     _parkActiveSession();
     _pendingNewSessionKey = null;
 
@@ -620,6 +809,7 @@ class ChatController extends Notifier<ChatState> {
         ),
         isPreparingModels: _cachedConfigOptions.isEmpty,
         backgroundRunningIds: _computeBackgroundRunningIds(),
+        backgroundSummaries: _computeBackgroundSummaries(),
       );
       unawaited(prepareDraftSession());
       return;
@@ -639,7 +829,9 @@ class ChatController extends Notifier<ChatState> {
       state = parked.snapshot.copyWith(
         liveTokensPerSecond: () => liveTps,
         backgroundRunningIds: _computeBackgroundRunningIds(),
+        backgroundSummaries: _computeBackgroundSummaries(),
       );
+      if (liveTps != null) _ensureSpeedDecayTimer();
       return;
     }
 
@@ -663,6 +855,7 @@ class ChatController extends Notifier<ChatState> {
       sessionToolPermission: _sessionPermissions[next],
       allowAllForSession: _allowAllSessions.contains(next),
       backgroundRunningIds: _computeBackgroundRunningIds(),
+      backgroundSummaries: _computeBackgroundSummaries(),
       isLoadingSession: true,
     );
     unawaited(_loadExistingSession(conn, next, cwd, gen));
@@ -728,7 +921,7 @@ class ChatController extends Notifier<ChatState> {
   Future<String?> prepareDraftSession({bool forceRefresh = false}) async {
     final conn = _activeConn ?? ref.read(activeConnectionProvider).value;
     if (conn == null) return null;
-    if (state.sessionId != null) return state.sessionId;
+    if (state.sessionId != null || state.isSending) return state.sessionId;
 
     final String cwd = ref.read(effectiveWorkingDirProvider);
     final extraDirs = List<String>.from(state.additionalDirectories);
@@ -967,6 +1160,7 @@ class ChatController extends Notifier<ChatState> {
 
   void startNewChat() {
     final conn = _activeConn;
+    _stopSpeedDecayTimer();
     _parkActiveSession();
     _pendingNewSessionKey = null;
     _ownedSessionId = null;
@@ -982,6 +1176,7 @@ class ChatController extends Notifier<ChatState> {
       ),
       isPreparingModels: conn != null && _cachedConfigOptions.isEmpty,
       backgroundRunningIds: _computeBackgroundRunningIds(),
+      backgroundSummaries: _computeBackgroundSummaries(),
     );
     if (conn != null) {
       unawaited(prepareDraftSession());
@@ -1239,8 +1434,30 @@ class ChatController extends Notifier<ChatState> {
       TurnActivityLogEntry(timestamp: turnNow, label: '已发送请求，等待模型响应'),
     ];
 
+    final displayPrompt = [
+      if (stagedAttachments.isNotEmpty)
+        stagedAttachments
+            .map((a) => a.isImage ? '[图片: ${a.name}]' : '[附件: ${a.name}]')
+            .join(' '),
+      if (text.isNotEmpty) text,
+    ].join('\n');
+
+    final blocks = <AcpContentBlock>[
+      for (final a in stagedAttachments) a.toAcpBlock(),
+      if (text.isNotEmpty) AcpTextBlock(text),
+    ];
+
+    // On message #1, append the user's bubble & live assistant turn IMMEDIATELY
+    // before awaiting `session/new` / model setup RPCs so the UI leaves the empty
+    // welcome state on frame 0 instead of hiding the submitted prompt.
+    final initialTranscript = isFirstTurn
+        ? state.transcript.appendUserPrompt(displayPrompt, now: turnNow)
+        : state.transcript;
+
     state = state.copyWith(
+      transcript: initialTranscript,
       isSending: true,
+      isStopping: false,
       turnStartedAt: () => turnNow,
       lastActivityAt: () => turnNow,
       livePhase: TurnLivePhase.waiting,
@@ -1259,19 +1476,6 @@ class ChatController extends Notifier<ChatState> {
       clearQuotedText: true,
       authRequired: false,
     );
-
-    final displayPrompt = [
-      if (stagedAttachments.isNotEmpty)
-        stagedAttachments
-            .map((a) => a.isImage ? '[图片: ${a.name}]' : '[附件: ${a.name}]')
-            .join(' '),
-      if (text.isNotEmpty) text,
-    ].join('\n');
-
-    final blocks = <AcpContentBlock>[
-      for (final a in stagedAttachments) a.toAcpBlock(),
-      if (text.isNotEmpty) AcpTextBlock(text),
-    ];
 
     try {
       if (isFirstTurn) {
@@ -1377,13 +1581,16 @@ class ChatController extends Notifier<ChatState> {
           // Own & commit this session BEFORE calling registerCreatedSession so
           // `sessionsProvider.currentSessionId` changing NEVER triggers a reload!
           _ownedSessionId = sid;
+          final promotedTranscript = state.transcript.items.isEmpty
+              ? state.transcript
+                    .copyWith(modes: modes, configOptions: configs)
+                    .appendUserPrompt(displayPrompt, now: turnNow)
+              : state.transcript.copyWith(modes: modes, configOptions: configs);
           state = state.copyWith(
             sessionId: sid,
             sessionCwd: cwd,
             clearDraftSession: true,
-            transcript: state.transcript
-                .copyWith(modes: modes, configOptions: configs)
-                .appendUserPrompt(displayPrompt),
+            transcript: promotedTranscript,
           );
           ref
               .read(sessionsProvider.notifier)
@@ -1479,13 +1686,15 @@ class ChatController extends Notifier<ChatState> {
         if (_turnGenOf(pendingKey) != pendingGen) return;
         if (_pendingNewSessionKey == pendingKey && state.sessionId == null) {
           _pendingNewSessionKey = null;
+          _stopSpeedDecayTimer();
           state = state.copyWith(
             transcript: state.transcript.finishTurn(AcpStopReason.unknown),
             isSending: false,
+            isStopping: false,
             turnStartedAt: () => null,
             lastActivityAt: () => null,
             livePhase: TurnLivePhase.waiting,
-      liveStatusLabel: () => null,
+            liveStatusLabel: () => null,
             liveTokensPerSecond: () => null,
             activeRetry: () => null,
             authRequired: e.isAuthRequired,
@@ -1501,13 +1710,15 @@ class ChatController extends Notifier<ChatState> {
         if (_turnGenOf(pendingKey) != pendingGen) return;
         if (_pendingNewSessionKey == pendingKey && state.sessionId == null) {
           _pendingNewSessionKey = null;
+          _stopSpeedDecayTimer();
           state = state.copyWith(
             transcript: state.transcript.finishTurn(AcpStopReason.unknown),
             isSending: false,
+            isStopping: false,
             turnStartedAt: () => null,
             lastActivityAt: () => null,
             livePhase: TurnLivePhase.waiting,
-      liveStatusLabel: () => null,
+            liveStatusLabel: () => null,
             liveTokensPerSecond: () => null,
             activeRetry: () => null,
             error: e.toString(),
@@ -1536,6 +1747,7 @@ class ChatController extends Notifier<ChatState> {
 
       final metrics = _speedTrackers[sid]?.finalize(usage: result.usage);
       _speedTrackers.remove(sid);
+      if (state.sessionId == sid) _stopSpeedDecayTimer();
 
       _updateSessionState(
         sid,
@@ -1546,10 +1758,11 @@ class ChatController extends Notifier<ChatState> {
             metrics: metrics,
           ),
           isSending: false,
+          isStopping: false,
           turnStartedAt: () => null,
           lastActivityAt: () => null,
           livePhase: TurnLivePhase.waiting,
-      liveStatusLabel: () => null,
+          liveStatusLabel: () => null,
           liveTokensPerSecond: () => null,
           activeRetry: () => null,
         ),
@@ -1594,7 +1807,7 @@ class ChatController extends Notifier<ChatState> {
               turnStartedAt: () => nextNow,
               lastActivityAt: () => nextNow,
               livePhase: TurnLivePhase.waiting,
-      liveStatusLabel: () => null,
+              liveStatusLabel: () => null,
               turnChars: 0,
               thoughtChars: 0,
               answerChars: 0,
@@ -1625,15 +1838,17 @@ class ChatController extends Notifier<ChatState> {
         return;
       }
       _speedTrackers.remove(sid);
+      if (state.sessionId == sid) _stopSpeedDecayTimer();
       _updateSessionState(
         sid,
         (cur) => cur.copyWith(
           transcript: cur.transcript.finishTurn(AcpStopReason.unknown),
           isSending: false,
+          isStopping: false,
           turnStartedAt: () => null,
           lastActivityAt: () => null,
           livePhase: TurnLivePhase.waiting,
-      liveStatusLabel: () => null,
+          liveStatusLabel: () => null,
           liveTokensPerSecond: () => null,
           activeRetry: () => null,
           authRequired: e.isAuthRequired,
@@ -1647,15 +1862,17 @@ class ChatController extends Notifier<ChatState> {
         return;
       }
       _speedTrackers.remove(sid);
+      if (state.sessionId == sid) _stopSpeedDecayTimer();
       _updateSessionState(
         sid,
         (cur) => cur.copyWith(
           transcript: cur.transcript.finishTurn(AcpStopReason.unknown),
           isSending: false,
+          isStopping: false,
           turnStartedAt: () => null,
           lastActivityAt: () => null,
           livePhase: TurnLivePhase.waiting,
-      liveStatusLabel: () => null,
+          liveStatusLabel: () => null,
           liveTokensPerSecond: () => null,
           activeRetry: () => null,
           error: e.toString(),
@@ -1734,6 +1951,7 @@ class ChatController extends Notifier<ChatState> {
               sid,
               (cur) => cur.copyWith(
                 lastActivityAt: () => DateTime.now(),
+                liveStatusLabel: () => '正在结束上一轮，即将自动发送…',
                 turnEvents: _appendTurnEvent(
                   cur.turnEvents,
                   TurnActivityLogEntry(
@@ -1812,6 +2030,7 @@ class ChatController extends Notifier<ChatState> {
   /// streaming cursor/pending tool calls, and flushes ACP `session/cancel`,
   /// while leaving any parked background conversations completely untouched.
   Future<void> cancel() async {
+    _stopSpeedDecayTimer();
     final sid = state.sessionId;
     if (sid != null && sid.isNotEmpty) {
       _bumpTurnGen(sid);
@@ -1827,6 +2046,7 @@ class ChatController extends Notifier<ChatState> {
       transcript: state.transcript.finishTurn(AcpStopReason.cancelled),
       pendingPermissions: const [],
       isSending: false,
+      isStopping: false,
       turnStartedAt: () => null,
       lastActivityAt: () => null,
       livePhase: TurnLivePhase.waiting,
@@ -1867,15 +2087,65 @@ class ChatController extends Notifier<ChatState> {
     if (allowAllForChat) {
       allowAllForCurrentSession(true);
     }
+    final now = DateTime.now();
+    final selectedOpt = optionId == null
+        ? null
+        : pending.request.options
+              .where((o) => o.optionId == optionId)
+              .firstOrNull;
+    final approved = selectedOpt?.kind.isAllow ?? false;
+
     if (optionId == null) {
       pending.cancel();
     } else {
       pending.select(optionId);
     }
+
+    var nextTranscript = state.transcript.setToolCallStatus(
+      pending.request.toolCall.toolCallId,
+      approved ? AcpToolStatus.inProgress : AcpToolStatus.cancelled,
+    );
+    final remaining = <PendingPermission>[];
+    for (final other in state.pendingPermissions) {
+      if (other.id == pending.id) continue;
+      if (allowAllForChat) {
+        final allow = other.request.options
+            .where((o) => o.kind.isAllow)
+            .firstOrNull;
+        if (allow != null) {
+          other.select(allow.optionId);
+          nextTranscript = nextTranscript.setToolCallStatus(
+            other.request.toolCall.toolCallId,
+            AcpToolStatus.inProgress,
+          );
+          continue;
+        }
+      }
+      remaining.add(other);
+    }
+
+    final toolLabel = formatNativeToolLiveStatus(
+      pending.request.toolCall,
+      workspaceCwd: state.sessionCwd,
+    );
+    final nextEvents = state.isSending
+        ? _appendTurnEvent(
+            state.turnEvents,
+            TurnActivityLogEntry(
+              timestamp: now,
+              label: approved ? '已允许：$toolLabel' : '已拒绝：$toolLabel',
+            ),
+          )
+        : state.turnEvents;
+
     state = state.copyWith(
-      pendingPermissions: state.pendingPermissions
-          .where((p) => p.id != pending.id)
-          .toList(),
+      transcript: nextTranscript,
+      pendingPermissions: remaining,
+      lastActivityAt: state.isSending ? () => now : null,
+      livePhase: state.isSending && approved
+          ? TurnLivePhase.working
+          : state.livePhase,
+      turnEvents: nextEvents,
     );
   }
 
@@ -2066,7 +2336,11 @@ class ChatController extends Notifier<ChatState> {
         break;
     }
 
-    final nextTranscript = current.transcript.applyUpdate(update);
+    final nextTranscript = current.transcript.applyUpdate(
+      update,
+      now: now,
+      markStreaming: !current.isLoadingSession,
+    );
     if (update case SessionInfoUpdate(:final title?)) {
       ref.read(sessionsProvider.notifier).updateSessionTitle(notifSid, title);
     }
@@ -2080,6 +2354,7 @@ class ChatController extends Notifier<ChatState> {
       nextEstTokens = tracker.totalEstimatedTokens.round();
     }
 
+    var nextEvents = current.turnEvents;
     if (update is ToolCallCreatedUpdate || update is ToolCallPatchedUpdate) {
       final last = nextTranscript.items.isNotEmpty
           ? nextTranscript.items.last
@@ -2100,9 +2375,40 @@ class ChatController extends Notifier<ChatState> {
         statusChanged = true;
         nextLiveTps = null;
       }
+      if (current.isSending && update is ToolCallCreatedUpdate) {
+        final label = formatNativeToolLiveStatus(
+          update.toolCall,
+          workspaceCwd: current.sessionCwd,
+        );
+        if (label.isNotEmpty) {
+          nextEvents = _appendTurnEvent(
+            nextEvents,
+            TurnActivityLogEntry(timestamp: now, label: '调用工具：$label'),
+          );
+        }
+      } else if (current.isSending && update is ToolCallPatchedUpdate) {
+        final patchedStatus = AcpToolStatus.parseNullable(
+          update.patch['status'],
+        );
+        if (patchedStatus == AcpToolStatus.failed) {
+          final tc = last is AssistantTranscriptItem
+              ? last.toolCallById(update.toolCallId)
+              : null;
+          final label = tc != null
+              ? formatNativeToolLiveStatus(tc, workspaceCwd: current.sessionCwd)
+              : update.toolCallId;
+          nextEvents = _appendTurnEvent(
+            nextEvents,
+            TurnActivityLogEntry(
+              timestamp: now,
+              label: '工具执行失败：$label',
+              isWarning: true,
+            ),
+          );
+        }
+      }
     }
 
-    var nextEvents = current.turnEvents;
     if (current.isSending && recoveredFromRetry) {
       nextEvents = _appendTurnEvent(
         nextEvents,
@@ -2143,6 +2449,14 @@ class ChatController extends Notifier<ChatState> {
         turnEvents: nextEvents,
       ),
     );
+
+    if (state.sessionId == notifSid && current.isSending) {
+      if (nextLiveTps != null) {
+        _ensureSpeedDecayTimer();
+      } else {
+        _stopSpeedDecayTimer();
+      }
+    }
 
     if (current.isSending && retryUpdate != null) {
       _recordLiveRetry(retryUpdate, sessionId: notifSid);
@@ -2223,35 +2537,61 @@ class ChatController extends Notifier<ChatState> {
     final cleaned = cleanEngineLogLine(rawLine);
     if (cleaned.isEmpty) return;
 
-    final targetSid = _resolveRunningTargetSessionId();
+    // If a known running session ID appears inside the engine log line, target it directly.
+    String? matchedSid;
+    for (final sid in state.runningSessionIds) {
+      if (sid.length >= 6 && cleaned.contains(sid)) {
+        matchedSid = sid;
+        break;
+      }
+    }
+    final targetSid = _resolveRunningTargetSessionId(
+      explicitSessionId: matchedSid,
+    );
     final foregroundPending =
         targetSid == null && state.isSending && state.sessionId == null;
-    if (targetSid == null && !foregroundPending) return;
+    final broadcastBgIds =
+        (targetSid == null &&
+            !foregroundPending &&
+            state.backgroundRunningIds.isNotEmpty)
+        ? state.backgroundRunningIds.toList()
+        : const <String>[];
+    if (targetSid == null && !foregroundPending && broadcastBgIds.isEmpty) {
+      return;
+    }
 
     final lower = cleaned.toLowerCase();
     final isNoise =
         lower.startsWith('[bridge]') || lower.startsWith('[installer]');
     if (!isNoise) {
-      if (targetSid != null) {
-        _updateSessionState(targetSid, (cur) {
-          final nextLogs = [...cur.turnLogs, cleaned];
-          if (nextLogs.length > _maxTurnLogs) {
-            nextLogs.removeRange(0, nextLogs.length - _maxTurnLogs);
-          }
-          return cur.copyWith(turnLogs: nextLogs);
-        });
-      } else if (foregroundPending) {
-        final nextLogs = [...state.turnLogs, cleaned];
+      ChatState appendLog(ChatState cur) {
+        final nextLogs = [...cur.turnLogs, cleaned];
         if (nextLogs.length > _maxTurnLogs) {
           nextLogs.removeRange(0, nextLogs.length - _maxTurnLogs);
         }
-        state = state.copyWith(turnLogs: nextLogs);
+        return cur.copyWith(turnLogs: nextLogs);
+      }
+
+      if (targetSid != null) {
+        _updateSessionState(targetSid, appendLog);
+      } else if (foregroundPending) {
+        state = appendLog(state);
+      } else {
+        for (final bgSid in broadcastBgIds) {
+          _updateSessionState(bgSid, appendLog);
+        }
       }
     }
 
     final retry = parseRetryFromLogLine(rawLine);
     if (retry != null) {
-      _recordLiveRetry(retry, sessionId: targetSid);
+      if (broadcastBgIds.isNotEmpty) {
+        for (final bgSid in broadcastBgIds) {
+          _recordLiveRetry(retry, sessionId: bgSid);
+        }
+      } else {
+        _recordLiveRetry(retry, sessionId: targetSid);
+      }
       return;
     }
 
@@ -2280,6 +2620,10 @@ class ChatController extends Notifier<ChatState> {
         _updateSessionState(targetSid, applyTraj);
       } else if (foregroundPending) {
         state = applyTraj(state);
+      } else {
+        for (final bgSid in broadcastBgIds) {
+          _updateSessionState(bgSid, applyTraj);
+        }
       }
     }
   }
@@ -2343,10 +2687,18 @@ class ChatController extends Notifier<ChatState> {
   }
 
   void _onPermissionRequest(PendingPermission pending) {
-    if (!ref.mounted) return;
+    if (!ref.mounted) {
+      pending.cancel();
+      return;
+    }
     final reqSid = pending.request.sessionId;
     final target = _sessionStateOf(reqSid);
-    if (target == null) return;
+    if (target == null) {
+      // Fail closed immediately instead of leaving `agy acp` permanently deadlocked
+      // waiting on an orphaned permission Completer.
+      pending.cancel();
+      return;
+    }
 
     final settings = ref.read(settingsProvider);
     final perm =
@@ -2381,19 +2733,43 @@ class ChatController extends Notifier<ChatState> {
       }
     }
 
+    final now = DateTime.now();
+    final tc = pending.request.toolCall;
+    final toolLabel = formatNativeToolLiveStatus(
+      tc,
+      workspaceCwd: target.sessionCwd,
+    );
+
     _updateSessionState(
       reqSid,
       (cur) => cur.copyWith(
+        transcript: cur.transcript.setToolCallStatus(
+          tc.toolCallId,
+          AcpToolStatus.paused,
+          fallbackTool: tc,
+          now: now,
+        ),
         pendingPermissions: [...cur.pendingPermissions, pending],
+        lastActivityAt: cur.isSending ? () => now : null,
+        liveTokensPerSecond: () => null,
+        turnEvents: _appendTurnEvent(
+          cur.turnEvents,
+          TurnActivityLogEntry(
+            timestamp: now,
+            label: '等待确认：$toolLabel',
+            isWarning: true,
+          ),
+        ),
       ),
     );
+    if (state.sessionId == reqSid) _stopSpeedDecayTimer();
 
     if (_isAppBackgrounded && settings.notifyOnApproval) {
       unawaited(
         ref.read(systemToolsProvider.notifier).notifyTurnEvent(
           title: '等待你的审批确认',
-          body: pending.request.toolCall.title.isNotEmpty
-              ? pending.request.toolCall.title
+          body: toolLabel.isNotEmpty
+              ? toolLabel
               : 'Antigravity 请求执行一项工具操作',
           urgent: true,
         ),

@@ -577,8 +577,10 @@ final pendingSessionIdsProvider = Provider<Map<String, PendingKind>>((ref) {
     chatProvider.select(
       (c) => (
         sessionId: c.sessionId,
+        isBusy: c.isBusy,
         hasPerm: c.pendingPermissions.isNotEmpty,
-        runningIds: c.runningSessionIds,
+        bgRunningIds: c.backgroundRunningIds,
+        bgSummaries: c.backgroundSummaries,
       ),
     ),
   );
@@ -589,9 +591,17 @@ final pendingSessionIdsProvider = Provider<Map<String, PendingKind>>((ref) {
   if (chatPending.hasPerm && chatPending.sessionId != null) {
     out[chatPending.sessionId!] = PendingKind.approval;
   }
+  for (final entry in chatPending.bgSummaries.entries) {
+    if (entry.value.hasPendingPermission) {
+      out[entry.key] = PendingKind.approval;
+    }
+  }
   if (hasPhoneApproval) {
     final target =
-        chatPending.sessionId ?? chatPending.runningIds.firstOrNull;
+        chatPending.sessionId ??
+        (chatPending.bgRunningIds.isNotEmpty
+            ? chatPending.bgRunningIds.first
+            : null);
     if (target != null) {
       out[target] = PendingKind.approval;
     }

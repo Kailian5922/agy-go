@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../state/chat_state.dart';
+import '../../state/phone_state.dart';
 import '../../state/runtime_state.dart';
 import '../common/app_sheet.dart';
 import '../common/list_page_row.dart';
@@ -66,6 +67,8 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
       chatProvider.select(
         (c) => (
           isBusy: c.isBusy,
+          isStopping: c.isStopping,
+          pendingPermissions: c.pendingPermissions,
           startedAt: c.turnStartedAt,
           lastActivityAt: c.lastActivityAt,
           livePhase: c.livePhase,
@@ -83,9 +86,14 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
         ),
       ),
     );
+    final phoneApprovals = ref.watch(
+      phoneControlProvider.select((p) => p.pendingApprovals),
+    );
+    final hasPendingApproval =
+        chat.pendingPermissions.isNotEmpty || phoneApprovals.isNotEmpty;
 
-    final show = chat.isBusy || chat.plan.isNotEmpty;
-    _syncTicker(chat.isBusy && chat.startedAt != null);
+    final show = chat.isBusy || chat.plan.isNotEmpty || hasPendingApproval;
+    _syncTicker((chat.isBusy || hasPendingApproval) && chat.startedAt != null);
 
     if (!show) return const SizedBox.shrink();
 
@@ -100,13 +108,9 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
         ? lastAssistant.toolCalls.where((t) => t.status.isActive).toList()
         : const <AcpToolCall>[];
 
-    final donePlan = chat.plan
-        .where((p) => p.status.toLowerCase() == 'completed')
-        .length;
+    final donePlan = chat.plan.where((p) => p.isCompleted).length;
     final totalPlan = chat.plan.length;
-    final currentPlan = chat.plan
-        .where((p) => p.status.toLowerCase() == 'in_progress')
-        .firstOrNull;
+    final currentPlan = chat.plan.where((p) => p.isInProgress).firstOrNull;
 
     final activeToolLabel = activeTools.isNotEmpty
         ? formatNativeToolLiveStatus(
@@ -114,11 +118,17 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
             workspaceCwd: chat.sessionCwd,
           )
         : null;
+    final pendingApprovalLabel = chat.pendingPermissions.isNotEmpty
+        ? formatNativeToolLiveStatus(
+            chat.pendingPermissions.first.request.toolCall,
+            workspaceCwd: chat.sessionCwd,
+          )
+        : (phoneApprovals.isNotEmpty ? phoneApprovals.first.summary : null);
     final liveThoughtHeadline = chat.livePhase == TurnLivePhase.thinking
         ? latestAssistantThoughtHeadline(lastAssistant)
         : null;
 
-    final health = chat.isBusy
+    final health = (chat.isBusy || hasPendingApproval)
         ? deriveTurnHealth(
             startedAt: chat.startedAt,
             lastActivityAt: chat.lastActivityAt,
@@ -134,6 +144,11 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
             now: _now,
             liveTokensPerSecond: chat.liveTokensPerSecond,
             inline: widget.inline,
+            isStopping: chat.isStopping,
+            hasPendingApproval: hasPendingApproval,
+            pendingApprovalLabel: pendingApprovalLabel,
+            activeToolCount: activeTools.length,
+            includeSpeedInPill: false,
           )
         : null;
 
@@ -142,13 +157,16 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
         : '计划完成 $donePlan/$totalPlan';
     final isWarnTone =
         health != null &&
-        (health.tone == TurnHealthTone.retrying ||
+        (health.tone == TurnHealthTone.waitingApproval ||
+            health.tone == TurnHealthTone.retrying ||
             health.tone == TurnHealthTone.suspectedStall);
-    final dotTone = !chat.isBusy
+    final dotTone = (!chat.isBusy && !hasPendingApproval)
         ? StatusTone.ok
         : (isWarnTone ? StatusTone.warn : StatusTone.busy);
 
-    final elapsed = chat.isBusy && chat.startedAt != null
+    final speedLabel = health?.liveSpeedLabel;
+    final elapsed =
+        (chat.isBusy || hasPendingApproval) && chat.startedAt != null
         ? _formatElapsed(chat.startedAt!)
         : null;
 
@@ -186,6 +204,15 @@ class _ActivityStripState extends ConsumerState<ActivityStrip> {
                         ),
                       ),
                     ),
+                    if (speedLabel != null) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        speedLabel,
+                        style: AppType.monoLabel(
+                          color: scheme.primary,
+                        ).copyWith(fontSize: 10.5),
+                      ),
+                    ],
                     if (totalPlan > 0) ...[
                       const SizedBox(width: 6),
                       Text(
@@ -286,6 +313,8 @@ class _TurnAlertBannerState extends ConsumerState<TurnAlertBanner> {
       chatProvider.select(
         (c) => (
           isBusy: c.isBusy,
+          isStopping: c.isStopping,
+          pendingPermissions: c.pendingPermissions,
           startedAt: c.turnStartedAt,
           lastActivityAt: c.lastActivityAt,
           livePhase: c.livePhase,
@@ -295,12 +324,18 @@ class _TurnAlertBannerState extends ConsumerState<TurnAlertBanner> {
           answerChars: c.answerChars,
           liveTokensPerSecond: c.liveTokensPerSecond,
           sessionCwd: c.sessionCwd,
+          plan: c.transcript.plan,
           lastItem: c.transcript.items.isNotEmpty
               ? c.transcript.items.last
               : null,
         ),
       ),
     );
+    final phoneApprovals = ref.watch(
+      phoneControlProvider.select((p) => p.pendingApprovals),
+    );
+    final hasPendingApproval =
+        chat.pendingPermissions.isNotEmpty || phoneApprovals.isNotEmpty;
 
     _syncTicker(chat.isBusy && chat.startedAt != null);
     if (!chat.isBusy) return const SizedBox.shrink();
@@ -318,6 +353,12 @@ class _TurnAlertBannerState extends ConsumerState<TurnAlertBanner> {
             workspaceCwd: chat.sessionCwd,
           )
         : null;
+    final pendingApprovalLabel = chat.pendingPermissions.isNotEmpty
+        ? formatNativeToolLiveStatus(
+            chat.pendingPermissions.first.request.toolCall,
+            workspaceCwd: chat.sessionCwd,
+          )
+        : (phoneApprovals.isNotEmpty ? phoneApprovals.first.summary : null);
     final liveThoughtHeadline = chat.livePhase == TurnLivePhase.thinking
         ? latestAssistantThoughtHeadline(lastAssistant)
         : null;
@@ -333,9 +374,13 @@ class _TurnAlertBannerState extends ConsumerState<TurnAlertBanner> {
       activeToolLabel: activeToolLabel,
       liveStatusLabel: chat.liveStatusLabel,
       liveThoughtHeadline: liveThoughtHeadline,
-      activePlanLabel: null,
+      activePlanLabel: chat.plan.where((p) => p.isInProgress).firstOrNull?.content,
       now: _now,
       liveTokensPerSecond: chat.liveTokensPerSecond,
+      isStopping: chat.isStopping,
+      hasPendingApproval: hasPendingApproval,
+      pendingApprovalLabel: pendingApprovalLabel,
+      activeToolCount: activeTools.length,
     );
 
     if (!health.showAlertBanner) return const SizedBox.shrink();
@@ -476,15 +521,28 @@ class _PlanActivitySheetBodyState
   }
 
   (IconData, Color) _planIcon(
-    String status,
+    AcpPlanEntry entry,
     ColorScheme scheme,
     DshColors dsh,
-  ) => switch (status.toLowerCase()) {
-    'completed' => (AppIcons.success, dsh.success),
-    'in_progress' => (AppIcons.inProgress, scheme.primary),
-    'failed' => (AppIcons.stepFailed, dsh.danger),
-    'skipped' || 'cancelled' => (AppIcons.stepSkipped, dsh.textTertiary),
-    _ => (AppIcons.pending, dsh.textTertiary),
+  ) {
+    if (entry.isCompleted) return (AppIcons.success, dsh.success);
+    if (entry.isInProgress) return (AppIcons.inProgress, scheme.primary);
+    if (entry.isFailed) return (AppIcons.stepFailed, dsh.danger);
+    if (entry.isSkipped) return (AppIcons.stepSkipped, dsh.textTertiary);
+    return (AppIcons.pending, dsh.textTertiary);
+  }
+
+  (IconData, Color, String) _toolStatusMeta(
+    AcpToolStatus status,
+    ColorScheme scheme,
+    DshColors dsh,
+  ) => switch (status) {
+    AcpToolStatus.inProgress => (AppIcons.running, scheme.primary, '运行中'),
+    AcpToolStatus.paused => (AppIcons.approval, dsh.warning, '待确认'),
+    AcpToolStatus.pending => (AppIcons.waiting, dsh.warning, '等待中'),
+    AcpToolStatus.failed => (AppIcons.failed, dsh.danger, '失败'),
+    AcpToolStatus.cancelled => (AppIcons.stopped, dsh.textTertiary, '已取消'),
+    AcpToolStatus.completed => (AppIcons.done, dsh.success, '已完成'),
   };
 
   String _fmtClock(DateTime dt) {
@@ -497,6 +555,9 @@ class _PlanActivitySheetBodyState
   @override
   Widget build(BuildContext context) {
     final chat = ref.watch(chatProvider);
+    final phoneApprovals = ref.watch(
+      phoneControlProvider.select((p) => p.pendingApprovals),
+    );
     final runtimeLogs = ref.watch(localRuntimeProvider.select((s) => s.logs));
     final plan = chat.transcript.plan;
     final theme = Theme.of(context);
@@ -523,11 +584,19 @@ class _PlanActivitySheetBodyState
             workspaceCwd: chat.sessionCwd,
           )
         : null;
+    final hasPendingApproval =
+        chat.pendingPermissions.isNotEmpty || phoneApprovals.isNotEmpty;
+    final pendingApprovalLabel = chat.pendingPermissions.isNotEmpty
+        ? formatNativeToolLiveStatus(
+            chat.pendingPermissions.first.request.toolCall,
+            workspaceCwd: chat.sessionCwd,
+          )
+        : (phoneApprovals.isNotEmpty ? phoneApprovals.first.summary : null);
     final liveThoughtHeadline = chat.livePhase == TurnLivePhase.thinking
         ? latestAssistantThoughtHeadline(lastAssistant)
         : null;
 
-    final health = chat.isBusy
+    final health = (chat.isBusy || hasPendingApproval)
         ? deriveTurnHealth(
             startedAt: chat.turnStartedAt,
             lastActivityAt: chat.lastActivityAt,
@@ -539,13 +608,14 @@ class _PlanActivitySheetBodyState
             activeToolLabel: activeToolLabel,
             liveStatusLabel: chat.liveStatusLabel,
             liveThoughtHeadline: liveThoughtHeadline,
-            activePlanLabel: plan
-                .where((p) => p.status.toLowerCase() == 'in_progress')
-                .firstOrNull
-                ?.content,
+            activePlanLabel: plan.where((p) => p.isInProgress).firstOrNull?.content,
             now: _now,
             liveTokensPerSecond: chat.liveTokensPerSecond,
             inline: false,
+            isStopping: chat.isStopping,
+            hasPendingApproval: hasPendingApproval,
+            pendingApprovalLabel: pendingApprovalLabel,
+            activeToolCount: activeTools.length,
           )
         : null;
 
@@ -580,7 +650,7 @@ class _PlanActivitySheetBodyState
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             SheetHeader(
-              chat.isBusy ? '实时运行状态与进度' : '任务计划与进度',
+              (chat.isBusy || hasPendingApproval) ? '实时运行状态与进度' : '任务计划与进度',
               actions: [
                 if (chat.isBusy)
                   SheetIconButton(
@@ -593,18 +663,21 @@ class _PlanActivitySheetBodyState
                   ),
               ],
             ),
-            if (chat.isBusy && health != null)
+            if ((chat.isBusy || hasPendingApproval) && health != null)
               SheetGroup(
                 title: '实时状态（原生事件 / 重试 / 超时监测）',
                 children: [
                   ListPageRow(
-                    icon: health.tone == TurnHealthTone.retrying
+                    icon: health.tone == TurnHealthTone.waitingApproval
+                        ? AppIcons.approval
+                        : health.tone == TurnHealthTone.retrying
                         ? AppIcons.retry
                         : health.tone == TurnHealthTone.suspectedStall
                         ? AppIcons.warning
                         : AppIcons.running,
                     iconColor:
-                        health.tone == TurnHealthTone.retrying ||
+                        health.tone == TurnHealthTone.waitingApproval ||
+                            health.tone == TurnHealthTone.retrying ||
                             health.tone == TurnHealthTone.suspectedStall
                         ? dsh.warning
                         : scheme.primary,
@@ -668,7 +741,7 @@ class _PlanActivitySheetBodyState
               ),
             if (displayLogs.isNotEmpty)
               SheetGroup(
-                title: '最近引擎输出（stderr / 重试日志）',
+                title: '最近引擎输出（ACP / stderr / 重试日志）',
                 children: [
                   Padding(
                     padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
@@ -684,12 +757,12 @@ class _PlanActivitySheetBodyState
             if (plan.isNotEmpty)
               SheetGroup(
                 title:
-                    '计划清单（${plan.where((p) => p.status.toLowerCase() == 'completed').length}/${plan.length}）',
+                    '计划清单（${plan.where((p) => p.isCompleted).length}/${plan.length}）',
                 children: [
                   for (final entry in plan)
                     Builder(
                       builder: (ctx) {
-                        final (ic, col) = _planIcon(entry.status, scheme, dsh);
+                        final (ic, col) = _planIcon(entry, scheme, dsh);
                         return ListPageRow(
                           icon: ic,
                           iconColor: col,
@@ -707,32 +780,33 @@ class _PlanActivitySheetBodyState
                 title: '最近工具调用',
                 children: [
                   for (final tc in recentTools)
-                    ListPageRow(
-                      icon: tc.status == AcpToolStatus.inProgress
-                          ? AppIcons.running
-                          : tc.status == AcpToolStatus.failed
-                          ? AppIcons.error
-                          : AppIcons.done,
-                      iconColor: tc.status == AcpToolStatus.inProgress
-                          ? scheme.primary
-                          : tc.status == AcpToolStatus.failed
-                          ? dsh.danger
-                          : dsh.success,
-                      title: formatNativeToolLiveStatus(
-                        tc,
-                        workspaceCwd: chat.sessionCwd,
-                      ),
-                      subtitle: tc.locations.isNotEmpty
-                          ? displayToolPath(
-                              tc.locations.first.path,
-                              workspaceCwd: chat.sessionCwd,
-                            )
-                          : formatToolSummary(
-                              tc,
-                              workspaceCwd: chat.sessionCwd,
-                            ),
-                      meta: tc.status.name,
-                      chevron: false,
+                    Builder(
+                      builder: (ctx) {
+                        final (ic, col, statusText) = _toolStatusMeta(
+                          tc.status,
+                          scheme,
+                          dsh,
+                        );
+                        return ListPageRow(
+                          icon: ic,
+                          iconColor: col,
+                          title: formatNativeToolLiveStatus(
+                            tc,
+                            workspaceCwd: chat.sessionCwd,
+                          ),
+                          subtitle: tc.locations.isNotEmpty
+                              ? displayToolPath(
+                                  tc.locations.first.path,
+                                  workspaceCwd: chat.sessionCwd,
+                                )
+                              : formatToolSummary(
+                                  tc,
+                                  workspaceCwd: chat.sessionCwd,
+                                ),
+                          meta: statusText,
+                          chevron: false,
+                        );
+                      },
                     ),
                 ],
               ),

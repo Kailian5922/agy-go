@@ -177,23 +177,34 @@ class PetController extends Notifier<PetSettingsState> {
       }
     }
 
+    final phone = ref.read(phoneControlProvider);
+    final hasPendingApproval =
+        chat.pendingPermissions.isNotEmpty || phone.pendingApprovals.isNotEmpty;
     String? statusText;
-    if (chat.isBusy) {
+    if (chat.isBusy || hasPendingApproval) {
       final lastItem = chat.transcript.items.isNotEmpty
           ? chat.transcript.items.last
           : null;
       final assistant = lastItem is AssistantTranscriptItem ? lastItem : null;
-      final activeTool = assistant?.toolCalls
-          .where((t) => t.status.isActive)
-          .lastOrNull;
+      final activeTools = assistant != null
+          ? assistant.toolCalls.where((t) => t.status.isActive).toList()
+          : const <AcpToolCall>[];
       final activePlan = chat.transcript.plan
-          .where((p) => p.status.toLowerCase() == 'in_progress')
+          .where((p) => p.isInProgress)
           .firstOrNull;
+      final pendingApprovalLabel = chat.pendingPermissions.isNotEmpty
+          ? formatNativeToolLiveStatus(
+              chat.pendingPermissions.first.request.toolCall,
+              workspaceCwd: chat.sessionCwd,
+            )
+          : (phone.pendingApprovals.isNotEmpty
+                ? phone.pendingApprovals.first.summary
+                : null);
       final nativeStatus = resolveNativeHeaderStatus(
         phase: chat.livePhase,
-        activeToolStatus: activeTool != null
+        activeToolStatus: activeTools.isNotEmpty
             ? formatNativeToolLiveStatus(
-                activeTool,
+                activeTools.last,
                 workspaceCwd: chat.sessionCwd,
               )
             : null,
@@ -203,10 +214,27 @@ class PetController extends Notifier<PetSettingsState> {
             ? latestAssistantThoughtHeadline(assistant)
             : null,
         activeRetry: chat.activeRetry,
+        isStopping: chat.isStopping,
+        hasPendingApproval: hasPendingApproval,
+        pendingApprovalLabel: pendingApprovalLabel,
+        activeToolCount: activeTools.length,
       );
-      statusText = '$nativeStatus（可点「新对话」并发提问或点停止）';
+      statusText = hasPendingApproval
+          ? '$nativeStatus（请返回 AGY Go 确认）'
+          : '$nativeStatus（可点「新对话」并发提问或点停止）';
+    } else if (chat.backgroundPendingPermissionIds.isNotEmpty) {
+      statusText =
+          '后台有 ${chat.backgroundPendingPermissionIds.length} 个对话等你确认';
     } else if (chat.backgroundRunningIds.isNotEmpty) {
-      statusText = '后台 ${chat.backgroundRunningIds.length} 个对话运行中';
+      final firstSummary =
+          chat.backgroundSummaries[chat.backgroundRunningIds.first];
+      if (chat.backgroundRunningIds.length == 1 &&
+          firstSummary?.activeToolLabel != null &&
+          firstSummary!.activeToolLabel!.trim().isNotEmpty) {
+        statusText = '后台运行中 · ${firstSummary.activeToolLabel!.trim()}';
+      } else {
+        statusText = '后台 ${chat.backgroundRunningIds.length} 个对话运行中';
+      }
     }
 
     return {
@@ -476,21 +504,39 @@ final petSettingsProvider = NotifierProvider<PetController, PetSettingsState>(
 final petMoodProvider = Provider<PetMood>((ref) {
   final chat = ref.watch(chatProvider);
   final phone = ref.watch(phoneControlProvider);
-  final runtime = ref.watch(localRuntimeProvider);
+  final runtimeRunning = ref.watch(
+    localRuntimeProvider.select((r) => r.status.isRunning),
+  );
+  final connected = ref.watch(
+    activeConnectionProvider.select((a) => a.value != null),
+  );
 
   final PetMood mood;
-  if (chat.pendingPermissions.isNotEmpty || phone.pendingApprovals.isNotEmpty) {
+  if (chat.hasAnyPendingPermission || phone.pendingApprovals.isNotEmpty) {
     mood = PetMood.waitingApproval;
-  } else if (chat.isBusy || chat.hasAnyRunningSession) {
+  } else if (chat.isBusy) {
     final last =
         chat.transcript.items.isNotEmpty ? chat.transcript.items.last : null;
     final hasRunningTool = last is AssistantTranscriptItem &&
         last.toolCalls.any((t) => t.status.isActive);
-    mood = hasRunningTool ? PetMood.working : PetMood.thinking;
-  } else if (!runtime.status.isRunning && chat.transcript.items.isEmpty) {
+    mood = (hasRunningTool || chat.livePhase == TurnLivePhase.working)
+        ? PetMood.working
+        : PetMood.thinking;
+  } else if (chat.backgroundRunningIds.isNotEmpty) {
+    final anyBgWorking = chat.backgroundSummaries.values.any(
+      (s) =>
+          s.isBusy &&
+          (s.activeToolCount > 0 || s.livePhase == TurnLivePhase.working),
+    );
+    mood = anyBgWorking ? PetMood.working : PetMood.thinking;
+  } else if (!runtimeRunning && !connected && chat.transcript.items.isEmpty) {
     mood = PetMood.sleeping;
-  } else if (chat.transcript.items.isNotEmpty) {
-    mood = PetMood.happy;
+  } else if (chat.transcript.items.isNotEmpty && chat.error == null) {
+    final last = chat.transcript.items.last;
+    final cancelled =
+        last is AssistantTranscriptItem &&
+        last.stopReason == AcpStopReason.cancelled;
+    mood = cancelled ? PetMood.idle : PetMood.happy;
   } else {
     mood = PetMood.idle;
   }

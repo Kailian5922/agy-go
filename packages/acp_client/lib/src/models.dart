@@ -503,6 +503,26 @@ sealed class AcpContentBlock {
           mimeType: _asNullableString(json['mimeType']),
           title: _asNullableString(json['title']),
         );
+      case 'resource':
+        final res = _asMap(json['resource']);
+        final text = _asNullableString(res['text']);
+        if (text != null) return AcpTextBlock(text);
+        final uri = _asString(res['uri'], _asString(json['uri']));
+        final mimeType =
+            _asNullableString(res['mimeType']) ??
+            _asNullableString(json['mimeType']);
+        if (uri.isNotEmpty) {
+          final slash = uri.lastIndexOf('/');
+          final name = slash >= 0 && slash + 1 < uri.length
+              ? uri.substring(slash + 1)
+              : uri;
+          return AcpResourceLinkBlock(
+            uri: uri,
+            name: name,
+            mimeType: mimeType,
+          );
+        }
+        return const AcpTextBlock('');
       default:
         return AcpTextBlock(_asString(json['text'], json.toString()));
     }
@@ -827,7 +847,7 @@ class AcpToolCall {
           .map((m) => AcpToolLocation.fromJson(Map<String, Object?>.from(m)))
           .toList(),
       content: parsedContent,
-      rawInput: json['rawInput'],
+      rawInput: json['rawInput'] ?? json['args'],
       rawOutput: json['rawOutput'],
       meta: rawMeta is Map ? Map<String, Object?>.from(rawMeta) : null,
     );
@@ -1103,10 +1123,101 @@ class AcpToolCall {
           ? patchLocations
           : locations,
       content: mergedContent,
-      rawInput: patch['rawInput'] ?? rawInput,
+      rawInput: patch['rawInput'] ?? patch['args'] ?? rawInput,
       rawOutput: patch['rawOutput'] ?? rawOutput,
       meta: mergedMeta,
     );
+  }
+
+  /// Merges a re-emitted `tool_call` frame without wiping already-accumulated
+  /// diffs, content blocks, locations, arguments, outputs, or metadata.
+  AcpToolCall mergeWith(AcpToolCall incoming) {
+    List<AcpToolContent> mergedContent;
+    if (incoming.content.isEmpty) {
+      mergedContent = content;
+    } else {
+      final incomingHasDiff = incoming.content.any(
+        (c) => c is AcpDiffToolContent,
+      );
+      final existingDiffs = [
+        for (final c in content)
+          if (c is AcpDiffToolContent) c,
+      ];
+      if (!incomingHasDiff && existingDiffs.isNotEmpty) {
+        mergedContent = [...existingDiffs, ...incoming.content];
+      } else {
+        mergedContent = incoming.content;
+      }
+    }
+    final nextTitle = incoming.title.trim().isNotEmpty ? incoming.title : title;
+    final nextName = (incoming.name?.trim().isNotEmpty ?? false)
+        ? incoming.name
+        : name;
+    final nextKind = incoming.kind != AcpToolKind.other
+        ? incoming.kind
+        : (kind != AcpToolKind.other
+              ? kind
+              : AcpToolKind.infer(name: nextName, title: nextTitle));
+    final mergedMeta = incoming.meta == null
+        ? meta
+        : <String, Object?>{...?meta, ...incoming.meta!};
+    return AcpToolCall(
+      toolCallId: toolCallId,
+      title: nextTitle,
+      name: nextName,
+      kind: nextKind,
+      status: incoming.status,
+      locations: incoming.locations.isNotEmpty ? incoming.locations : locations,
+      content: mergedContent,
+      rawInput: incoming.rawInput ?? rawInput,
+      rawOutput: incoming.rawOutput ?? rawOutput,
+      meta: mergedMeta,
+    );
+  }
+
+  /// Returns a copy with [status] updated while preserving all other fields.
+  AcpToolCall withStatus(AcpToolStatus nextStatus) => nextStatus == status
+      ? this
+      : AcpToolCall(
+          toolCallId: toolCallId,
+          title: title,
+          name: name,
+          kind: kind,
+          status: nextStatus,
+          locations: locations,
+          content: content,
+          rawInput: rawInput,
+          rawOutput: rawOutput,
+          meta: meta,
+        );
+
+  /// Extracts live checklist steps when `agy acp` emits the built-in
+  /// `update_steps` tool call (instead of a separate `plan` session update).
+  List<AcpPlanEntry>? get extractedPlanEntries {
+    final toolName = name?.trim().toLowerCase();
+    if (toolName != 'update_steps') return null;
+    if (rawInput is! Map) return null;
+    final rawSteps = (rawInput! as Map)['steps'];
+    if (rawSteps is! List) return null;
+    final entries = <AcpPlanEntry>[];
+    for (final raw in rawSteps) {
+      if (raw is! Map) continue;
+      final map = Map<String, Object?>.from(raw);
+      final text =
+          (_asNullableString(map['title']) ??
+                  _asNullableString(map['content']) ??
+                  '')
+              .trim();
+      if (text.isEmpty) continue;
+      entries.add(
+        AcpPlanEntry(
+          content: text,
+          status: AcpPlanEntry.normalizeStatus(_asString(map['status'], 'pending')),
+          priority: _asNullableString(map['priority']),
+        ),
+      );
+    }
+    return entries;
   }
 }
 
@@ -1202,14 +1313,30 @@ class AcpPlanEntry {
   });
 
   factory AcpPlanEntry.fromJson(Map<String, Object?> json) => AcpPlanEntry(
-    content: _asString(json['content']),
-    status: _asString(json['status'], 'pending'),
+    content: _asNullableString(json['content']) ?? _asString(json['title']),
+    status: normalizeStatus(_asString(json['status'], 'pending')),
     priority: _asNullableString(json['priority']),
   );
+
+  static String normalizeStatus(String raw) => switch (raw.trim().toLowerCase()) {
+    'done' || 'complete' || 'completed' || 'finished' => 'completed',
+    'in_progress' || 'inprogress' || 'running' || 'active' => 'in_progress',
+    'failed' || 'fail' || 'error' => 'failed',
+    'skipped' => 'skipped',
+    'cancelled' || 'canceled' => 'cancelled',
+    _ => 'pending',
+  };
 
   final String content;
   final String status;
   final String? priority;
+
+  bool get isCompleted => normalizeStatus(status) == 'completed';
+  bool get isInProgress => normalizeStatus(status) == 'in_progress';
+  bool get isFailed => normalizeStatus(status) == 'failed';
+  bool get isSkipped =>
+      normalizeStatus(status) == 'skipped' ||
+      normalizeStatus(status) == 'cancelled';
 }
 
 class AcpSlashCommand {
