@@ -753,8 +753,6 @@ final workspaceCountsProvider = Provider<Map<String, int>>((ref) {
     if (deleted.contains(s.sessionId) || archived.contains(s.sessionId)) {
       continue;
     }
-    final cwd = sessionsState.effectiveCwdOf(s);
-    if (cwd.isNotEmpty && wsState.isPathRemoved(cwd)) continue;
     final owner = _owningWorkspace(s, sessionsState, wsState);
     if (owner != null) {
       counts[owner.id] = (counts[owner.id] ?? 0) + 1;
@@ -766,7 +764,6 @@ final workspaceCountsProvider = Provider<Map<String, int>>((ref) {
 /// Total non-archived, non-deleted conversations on the active host.
 final visibleSessionTotalProvider = Provider<int>((ref) {
   final sessionsState = ref.watch(sessionsProvider);
-  final wsState = ref.watch(workspacesProvider);
   final archived = sessionsState.archivedIds.toSet();
   final deleted = sessionsState.deletedIds.toSet();
   var count = 0;
@@ -774,8 +771,6 @@ final visibleSessionTotalProvider = Provider<int>((ref) {
     if (deleted.contains(s.sessionId) || archived.contains(s.sessionId)) {
       continue;
     }
-    final cwd = sessionsState.effectiveCwdOf(s);
-    if (cwd.isNotEmpty && wsState.isPathRemoved(cwd)) continue;
     count++;
   }
   return count;
@@ -810,9 +805,6 @@ final drawerScopeProvider = Provider<DrawerScope>((ref) {
     if (deleted.contains(s.sessionId) || archived.contains(s.sessionId)) {
       continue;
     }
-    final cwd = sessionsState.effectiveCwdOf(s);
-    if (cwd.isNotEmpty && wsState.isPathRemoved(cwd)) continue;
-
     if (selected != null) {
       final owner = _owningWorkspace(s, sessionsState, wsState);
       if (owner?.id != selected.id) continue;

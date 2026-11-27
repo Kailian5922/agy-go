@@ -10,7 +10,6 @@ import '../../state/connection_state.dart';
 import '../../state/drawer_view_state.dart';
 import '../../state/hosts_state.dart';
 import '../../state/runtime_state.dart';
-import '../../state/sessions_state.dart';
 import '../../state/settings_state.dart';
 import '../../state/workspace_state.dart';
 import '../../state/workspaces_state.dart';
@@ -953,17 +952,18 @@ class _WorkspaceActionsBody extends ConsumerWidget {
                 ListPageRow(
                   icon: AppIcons.remove,
                   title: '移出工作区列表',
-                  subtitle: '不会删除手机或服务器上的原文件',
+                  subtitle: '保留原有对话，不会删除手机或服务器上的原文件',
                   danger: true,
                   chevron: false,
                   onTap: () async {
                     final wsCtrl = ref.read(workspacesProvider.notifier);
-                    final sessCtrl = ref.read(sessionsProvider.notifier);
                     final ok = await showAppDialog<bool>(
                       context: context,
                       builder: (d) => AlertDialog(
                         title: Text('移出「${w.displayTitle}」？'),
-                        content: const Text('仅从工作区列表移出，不会删除手机或服务器上的原文件。'),
+                        content: const Text(
+                          '仅从工作区列表移出，原有对话保留在「全部对话」中，不会删除手机或服务器上的文件。',
+                        ),
                         actions: [
                           TextButton(
                             onPressed: () => Navigator.pop(d, false),
@@ -983,7 +983,6 @@ class _WorkspaceActionsBody extends ConsumerWidget {
                     if (ok != true) return;
                     onClose();
                     await wsCtrl.remove(w.id);
-                    await sessCtrl.removeWorkspaceSessions(w.path);
                   },
                 ),
               ],

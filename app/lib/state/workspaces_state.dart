@@ -106,11 +106,7 @@ class WorkspacesState {
   bool isPathRemoved(String rawPath) {
     final norm = normalizeWorkspacePath(rawPath);
     if (norm.isEmpty) return false;
-    for (final removed in removedPaths) {
-      if (norm == removed) return true;
-      if (removed != '/' && norm.startsWith('$removed/')) return true;
-    }
-    return false;
+    return removedPaths.contains(norm);
   }
 
   WorkspaceItem? byId(String? id) {
@@ -641,16 +637,24 @@ String decodeWorkspacePath(String raw) {
 }
 
 /// Canonicalizes workspace/session paths (decodes percent-encoding & `file://`,
-/// trims trailing `/`, and unifies Android `/sdcard` with `/storage/emulated/0`)
-/// so sessions reliably match their workspace.
+/// trims trailing `/`, and unifies Android `/sdcard`, `/storage/self/primary`,
+/// and `/data/data` symlink aliases) so sessions reliably match their workspace.
 String normalizeWorkspacePath(String raw) {
   var p = decodeWorkspacePath(raw);
   while (p.length > 1 && p.endsWith('/')) {
     p = p.substring(0, p.length - 1);
   }
-  if (p == '/sdcard') return '/storage/emulated/0';
+  if (p == '/sdcard' || p == '/storage/self/primary') {
+    return '/storage/emulated/0';
+  }
   if (p.startsWith('/sdcard/')) {
     return '/storage/emulated/0/${p.substring('/sdcard/'.length)}';
+  }
+  if (p.startsWith('/storage/self/primary/')) {
+    return '/storage/emulated/0/${p.substring('/storage/self/primary/'.length)}';
+  }
+  if (p.startsWith('/data/data/')) {
+    return '/data/user/0/${p.substring('/data/data/'.length)}';
   }
   return p;
 }

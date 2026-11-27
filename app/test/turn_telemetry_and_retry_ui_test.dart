@@ -1252,5 +1252,118 @@ void main() {
       expect(find.text('本轮思考'), findsOneWidget);
       expect(find.text('缓存命中'), findsOneWidget);
     });
+
+    test('SessionsController awaits persisted metadata, drops stale concurrent refreshes, and follows nextCursor pagination', () async {
+      // Seed persisted metadata on disk before container boots.
+      SharedPreferences.setMockInitialValues({
+        'agy.sessions.meta.local.local':
+            '{"pinned":["s-page2"],"archived":[],"deleted":[],"titles":{"s-page2":"我的置顶会话"},"sessionWorkspaces":{"s-page2":"/tmp/ws-alpha"},"sessionCreatedAt":{}}',
+      });
+
+      final (clientTransport, agentTransport) = MemoryAcpTransport.pair();
+      final client = AcpClient(clientTransport);
+      final agent = AcpJsonRpcPeer(agentTransport);
+      addTearDown(() async {
+        await client.close();
+        await agent.close();
+      });
+
+      final firstCallGate = Completer<void>();
+      var globalListCalls = 0;
+
+      agent.onRequest('initialize', (_) async => {
+        'protocolVersion': 1,
+        'agentInfo': {'name': 'antigravity-cli', 'version': '1.6.0'},
+        'agentCapabilities': {
+          'loadSession': true,
+          'sessionCapabilities': {'list': <String, Object?>{}},
+        },
+      });
+      agent.onRequest('session/list', (params) async {
+        final cwd = params['cwd'] as String?;
+        final cursor = params['cursor'] as String?;
+        if (cwd == null) {
+          globalListCalls++;
+          if (globalListCalls == 1) {
+            // Simulate a slow stale initial refresh that finishes AFTER the second refresh!
+            await firstCallGate.future;
+            return {
+              'sessions': [
+                {'sessionId': 's-stale-only', 'cwd': '/tmp/default', 'title': '旧快照'},
+              ],
+            };
+          }
+          if (cursor == 'page-2') {
+            return {
+              'sessions': [
+                {
+                  'sessionId': 's-page2',
+                  'cwd': '', // empty cwd -> must recover from persisted sessionWorkspaces!
+                  'title': 'Raw Title',
+                  'updatedAt': '2026-11-26T21:00:00Z',
+                },
+              ],
+            };
+          }
+          return {
+            'sessions': [
+              {
+                'sessionId': 's-page1',
+                'cwd': '/tmp/ws-alpha',
+                'title': '工作区会话 1',
+                'updatedAt': '2026-11-26T22:00:00Z',
+              },
+            ],
+            'nextCursor': 'page-2',
+          };
+        }
+        return {'sessions': const <Object?>[]};
+      });
+
+      final init = await client.initialize();
+      final conn = HostConnection(
+        host: const HostRef.local(),
+        label: '本机',
+        client: client,
+        initResult: init,
+        defaultCwd: '/tmp/default',
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          activeConnectionProvider.overrideWith(() => _StubConnection(conn)),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      // Subscribe so Riverpod reacts when activeConnectionProvider resolves,
+      // launching slow refresh #1 automatically.
+      final sub = container.listen(sessionsProvider, (_, _) {});
+      addTearDown(sub.close);
+      await container.read(activeConnectionProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      // Trigger refresh #2 (faster, paginated) while refresh #1 is still hanging.
+      final refresh2 = container.read(sessionsProvider.notifier).refresh();
+      await refresh2;
+
+      // Now let stale refresh #1 finish — it MUST be discarded by _refreshSeq!
+      firstCallGate.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+
+      final st = container.read(sessionsProvider);
+      expect(st.error, isNull);
+      expect(st.sessions.map((s) => s.sessionId), ['s-page1', 's-page2']);
+      // Persisted metadata (pinnedIds, customTitles, sessionWorkspaces) survived without wipe!
+      expect(st.isPinned('s-page2'), isTrue);
+      expect(
+        st.displayTitle(st.sessions.firstWhere((s) => s.sessionId == 's-page2')),
+        '我的置顶会话',
+      );
+      expect(
+        st.effectiveCwdOf(st.sessions.firstWhere((s) => s.sessionId == 's-page2')),
+        '/tmp/ws-alpha',
+      );
+    });
   });
 }

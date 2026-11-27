@@ -464,6 +464,71 @@ void main() {
       },
     );
 
+    test(
+      'removing parent workspace never hides child workspace sessions and normalizes Android symlink aliases',
+      () async {
+        // Android symlink normalization (/storage/self/primary & /data/data).
+        expect(
+          normalizeWorkspacePath('/storage/self/primary/Download/冬日狂想曲 [v.2.15]'),
+          '/storage/emulated/0/Download/冬日狂想曲 [v.2.15]',
+        );
+        expect(
+          normalizeWorkspacePath('/data/data/io.github.kailian5922.agy_go/files/home/workspace'),
+          '/data/user/0/io.github.kailian5922.agy_go/files/home/workspace',
+        );
+
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+        container.read(workspacesProvider);
+        container.read(sessionsProvider);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+
+        final wsCtrl = container.read(workspacesProvider.notifier);
+        final storageWs = await wsCtrl.add('/storage/emulated/0', title: '手机存储');
+        final gameWs = await wsCtrl.add(
+          '/storage/emulated/0/Download/冬日狂想曲 [v.2.15]',
+          title: '冬日狂想曲 [v.2.15]',
+        );
+
+        final sessCtrl = container.read(sessionsProvider.notifier);
+        sessCtrl.registerCreatedSession(
+          AcpSessionInfo(
+            sessionId: 's_game_1',
+            cwd: '/storage/self/primary/Download/冬日狂想曲 [v.2.15]',
+            title: 'Numeric Input',
+            updatedAt: DateTime(2026, 11, 26, 21, 0),
+          ),
+        );
+
+        // Removing parent workspace `手机存储` (/storage/emulated/0) MUST NOT hide or delete
+        // sessions under child workspace `/storage/emulated/0/Download/冬日狂想曲 [v.2.15]`!
+        await wsCtrl.remove(storageWs.id);
+        await sessCtrl.removeWorkspaceSessions(storageWs.path);
+
+        expect(container.read(workspacesProvider).isPathRemoved('/storage/emulated/0'), isTrue);
+        expect(
+          container.read(workspacesProvider).isPathRemoved(gameWs.path),
+          isFalse,
+        );
+
+        await wsCtrl.select(gameWs.id);
+        expect(
+          container.read(drawerScopeProvider).sessions.map((s) => s.sessionId),
+          ['s_game_1'],
+        );
+        expect(container.read(workspaceCountsProvider)[gameWs.id], 1);
+        expect(container.read(visibleSessionTotalProvider), 1);
+
+        // Even removing `冬日狂想曲` from workspace bookmarks keeps its conversation visible in `全部对话`!
+        await wsCtrl.remove(gameWs.id);
+        await wsCtrl.select(null);
+        expect(
+          container.read(drawerScopeProvider).sessions.map((s) => s.sessionId),
+          ['s_game_1'],
+        );
+      },
+    );
+
     testWidgets(
       'keepScreenOnWhileRunning persists, renders in SettingsScreen & KeepAliveScreen, and dispatches native channel',
       (tester) async {

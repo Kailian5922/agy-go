@@ -100,18 +100,33 @@ class SessionsState {
 }
 
 class SessionsController extends Notifier<SessionsState> {
+  static const _maxListPages = 10;
+
   String _prefsKey = '';
-  int _metaVersion = 0;
+  int _metaGen = 0;
+  int _refreshSeq = 0;
+  Future<void> _metaReady = Future.value();
+  final Map<String, SessionsState> _hostCache = {};
+  final Set<String> _createdInMemory = {};
 
   @override
   SessionsState build() {
     final host = ref.watch(hostsProvider.select((h) => h.active));
-    _prefsKey = 'agy.sessions.meta.${host.kind.name}.${host.id}';
-    _metaVersion++;
-    unawaited(_loadMeta(_prefsKey, _metaVersion));
+    final key = 'agy.sessions.meta.${host.kind.name}.${host.id}';
+    if (_prefsKey != key) {
+      _createdInMemory.clear();
+    }
+    _prefsKey = key;
+    final metaGen = ++_metaGen;
+    _refreshSeq++;
+    _metaReady = _loadMeta(key, metaGen);
 
-    ref.listen<String>(
-      workspacesProvider.select((w) => w.workspaces.map((e) => e.path).join('|')),
+    // Re-query sessions whenever workspaces finish loading or change paths so
+    // non-default workspace sessions are always discovered reliably.
+    ref.listen<(bool, String)>(
+      workspacesProvider.select(
+        (w) => (w.loaded, w.workspaces.map((e) => e.path).join('|')),
+      ),
       (prev, next) {
         if (prev == null || prev == next) return;
         final conn = ref.read(activeConnectionProvider).value;
@@ -119,17 +134,29 @@ class SessionsController extends Notifier<SessionsState> {
       },
     );
 
+    final cached = _hostCache[key];
     final conn = ref.watch(activeConnectionProvider.select((a) => a.value));
     if (conn == null || !conn.initResult.capabilities.canListSessions) {
-      return const SessionsState();
+      return cached != null
+          ? cached.copyWith(loading: false)
+          : const SessionsState();
     }
     Future<void>.microtask(() {
       if (ref.mounted) unawaited(_refreshFor(conn));
     });
-    return const SessionsState(loading: true);
+    return cached != null
+        ? cached.copyWith(loading: true, clearError: true)
+        : const SessionsState(loading: true);
   }
 
-  Future<void> _loadMeta(String key, int expectedVersion) async {
+  void _setState(SessionsState next) {
+    state = next;
+    if (_prefsKey.isNotEmpty) {
+      _hostCache[_prefsKey] = next;
+    }
+  }
+
+  Future<void> _loadMeta(String key, int expectedGen) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(key);
@@ -137,13 +164,13 @@ class SessionsController extends Notifier<SessionsState> {
           raw.isEmpty ||
           !ref.mounted ||
           _prefsKey != key ||
-          _metaVersion != expectedVersion) {
+          _metaGen != expectedGen) {
         return;
       }
       final map = jsonDecode(raw) as Map<String, Object?>;
       final deleted =
           (map['deleted'] as List?)?.whereType<String>().toList() ?? const [];
-      final deletedSet = deleted.toSet();
+      final deletedSet = {...deleted, ...state.deletedIds};
       final filteredSessions = deletedSet.isEmpty
           ? state.sessions
           : state.sessions
@@ -152,39 +179,61 @@ class SessionsController extends Notifier<SessionsState> {
       final clearCurrent =
           state.currentSessionId != null &&
           deletedSet.contains(state.currentSessionId);
-      state = state.copyWith(
-        sessions: filteredSessions,
-        clearCurrent: clearCurrent,
-        pinnedIds:
-            (map['pinned'] as List?)?.whereType<String>().toList() ?? const [],
-        archivedIds:
-            (map['archived'] as List?)?.whereType<String>().toList() ?? const [],
-        deletedIds: deleted,
-        customTitles: {
-          if (map['titles'] is Map)
-            for (final e in (map['titles'] as Map).entries)
-              if (e.key is String && e.value is String)
-                e.key as String: e.value as String,
-        },
-        sessionWorkspaces: {
-          if (map['sessionWorkspaces'] is Map)
-            for (final e in (map['sessionWorkspaces'] as Map).entries)
-              if (e.key is String && e.value is String)
-                e.key as String: normalizeWorkspacePath(e.value as String),
-        },
-        sessionCreatedAt: {
-          if (map['sessionCreatedAt'] is Map)
-            for (final e in (map['sessionCreatedAt'] as Map).entries)
-              if (e.key is String && e.value is String)
-                e.key as String: ?DateTime.tryParse(e.value as String),
-        },
+
+      // Merge disk metadata with any mutations that happened before hydration
+      // completed so neither disk data nor in-memory actions are lost.
+      final diskWorkspaces = <String, String>{
+        if (map['sessionWorkspaces'] is Map)
+          for (final e in (map['sessionWorkspaces'] as Map).entries)
+            if (e.key is String && e.value is String)
+              e.key as String: normalizeWorkspacePath(e.value as String),
+      };
+      final diskCreatedAt = <String, DateTime>{
+        if (map['sessionCreatedAt'] is Map)
+          for (final e in (map['sessionCreatedAt'] as Map).entries)
+            if (e.key is String && e.value is String)
+              e.key as String: ?DateTime.tryParse(e.value as String),
+      };
+      final diskTitles = <String, String>{
+        if (map['titles'] is Map)
+          for (final e in (map['titles'] as Map).entries)
+            if (e.key is String && e.value is String)
+              e.key as String: e.value as String,
+      };
+      final diskPinned =
+          (map['pinned'] as List?)?.whereType<String>().toList() ?? const [];
+      final diskArchived =
+          (map['archived'] as List?)?.whereType<String>().toList() ?? const [];
+
+      _setState(
+        state.copyWith(
+          sessions: filteredSessions,
+          clearCurrent: clearCurrent,
+          pinnedIds: [
+            ...state.pinnedIds,
+            for (final id in diskPinned)
+              if (!state.pinnedIds.contains(id) && !deletedSet.contains(id)) id,
+          ],
+          archivedIds: [
+            ...state.archivedIds,
+            for (final id in diskArchived)
+              if (!state.archivedIds.contains(id) && !deletedSet.contains(id))
+                id,
+          ],
+          deletedIds: deletedSet.toList(),
+          customTitles: {...diskTitles, ...state.customTitles},
+          sessionWorkspaces: {...diskWorkspaces, ...state.sessionWorkspaces},
+          sessionCreatedAt: {...diskCreatedAt, ...state.sessionCreatedAt},
+        ),
       );
     } catch (_) {}
   }
 
   Future<void> _saveMeta() async {
-    _metaVersion++;
     final key = _prefsKey;
+    final gen = _metaGen;
+    await _metaReady;
+    if (!ref.mounted || _prefsKey != key || _metaGen != gen) return;
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
@@ -210,13 +259,35 @@ class SessionsController extends Notifier<SessionsState> {
     await _refreshFor(conn);
   }
 
+  Future<List<AcpSessionInfo>> _listAllPages(
+    HostConnection conn, {
+    String? cwd,
+  }) async {
+    final collected = <AcpSessionInfo>[];
+    String? cursor;
+    for (var page = 0; page < _maxListPages; page++) {
+      final res = await conn.client.listSessions(cwd: cwd, cursor: cursor);
+      collected.addAll(res.sessions);
+      final next = res.nextCursor?.trim();
+      if (next == null || next.isEmpty || next == cursor) break;
+      cursor = next;
+    }
+    return collected;
+  }
+
   Future<void> _refreshFor(HostConnection conn) async {
+    final seq = ++_refreshSeq;
+    final key = _prefsKey;
+    // Wait for persisted sessionWorkspaces/deletedIds/pinnedIds before merging
+    // or writing back to SharedPreferences (prevents wiping metadata on startup).
+    await _metaReady;
+    if (!ref.mounted || seq != _refreshSeq || _prefsKey != key) return;
+
     if (!conn.initResult.capabilities.canListSessions) {
-      if (!ref.mounted) return;
-      state = state.copyWith(loading: false, clearError: true);
+      _setState(state.copyWith(loading: false, clearError: true));
       return;
     }
-    state = state.copyWith(loading: true, clearError: true);
+    _setState(state.copyWith(loading: true, clearError: true));
     try {
       final byId = <String, AcpSessionInfo>{};
       final deletedSet = state.deletedIds.toSet();
@@ -251,38 +322,50 @@ class SessionsController extends Notifier<SessionsState> {
         }
       }
 
-      // 1. Global session listing.
-      final globalPage = await conn.client.listSessions();
-      if (!ref.mounted) return;
-      ingest(globalPage.sessions);
+      // 1. Global session listing (following pagination cursors).
+      final globalSessions = await _listAllPages(conn);
+      if (!ref.mounted || seq != _refreshSeq || _prefsKey != key) return;
+      ingest(globalSessions);
 
-      // 2. Per-workspace session listing for every registered workspace directory,
-      // ensuring sessions scoped to non-default workspaces are always discovered.
+      // 2. Per-workspace session listing for every registered workspace AND any
+      // persisted session workspace paths, ensuring sessions scoped to
+      // non-default workspaces are always discovered.
       final wsPaths = <String>{};
       for (final ws in ref.read(workspacesProvider).workspaces) {
         final norm = normalizeWorkspacePath(ws.path);
         if (norm.isNotEmpty) wsPaths.add(norm);
       }
+      for (final savedPath in state.sessionWorkspaces.values) {
+        final norm = normalizeWorkspacePath(savedPath);
+        if (norm.isNotEmpty) wsPaths.add(norm);
+      }
       for (final path in wsPaths) {
-        if (!ref.mounted) return;
+        if (!ref.mounted || seq != _refreshSeq || _prefsKey != key) return;
         try {
-          final wsPage = await conn.client.listSessions(cwd: path);
-          ingest(wsPage.sessions, fallbackCwd: path);
+          final wsSessions = await _listAllPages(conn, cwd: path);
+          if (!ref.mounted || seq != _refreshSeq || _prefsKey != key) return;
+          ingest(wsSessions, fallbackCwd: path);
         } catch (_) {
           // Ignore individual unreachable directories; keep other workspaces intact.
         }
       }
 
-      // Re-check latest deletedIds in case _loadMeta or deleteSession ran mid-refresh.
+      // Re-check latest deletedIds in case deleteSession ran mid-refresh.
       final latestDeleted = state.deletedIds.toSet();
       byId.removeWhere((id, _) => latestDeleted.contains(id));
 
-      // Preserve the active just-created session if not yet flushed on disk.
-      final active = state.currentSession;
-      if (active != null &&
-          !latestDeleted.contains(active.sessionId) &&
-          !byId.containsKey(active.sessionId)) {
-        byId[active.sessionId] = active;
+      // Preserve the active session and any session created in this runtime
+      // session if `agy acp` has not flushed it onto disk yet.
+      final keepIds = <String>{
+        if (state.currentSessionId != null) state.currentSessionId!,
+        ..._createdInMemory,
+      };
+      for (final s in state.sessions) {
+        if (keepIds.contains(s.sessionId) &&
+            !latestDeleted.contains(s.sessionId) &&
+            !byId.containsKey(s.sessionId)) {
+          byId[s.sessionId] = s;
+        }
       }
 
       final merged = byId.values.toList()
@@ -313,37 +396,42 @@ class SessionsController extends Notifier<SessionsState> {
         }
       }
 
-      if (!ref.mounted) return;
-      state = state.copyWith(
-        sessions: merged,
-        sessionWorkspaces: nextWorkspaces,
-        sessionCreatedAt: nextCreatedAt,
-        loading: false,
+      if (!ref.mounted || seq != _refreshSeq || _prefsKey != key) return;
+      _setState(
+        state.copyWith(
+          sessions: merged,
+          sessionWorkspaces: nextWorkspaces,
+          sessionCreatedAt: nextCreatedAt,
+          loading: false,
+        ),
       );
       if (metaChanged) {
         unawaited(_saveMeta());
       }
     } catch (e) {
-      if (!ref.mounted) return;
-      state = state.copyWith(loading: false, error: e.toString());
+      if (!ref.mounted || seq != _refreshSeq || _prefsKey != key) return;
+      _setState(state.copyWith(loading: false, error: e.toString()));
     }
   }
 
   void selectSession(String? sessionId) {
-    state = state.copyWith(
-      currentSessionId: sessionId,
-      clearCurrent: sessionId == null,
+    _setState(
+      state.copyWith(
+        currentSessionId: sessionId,
+        clearCurrent: sessionId == null,
+      ),
     );
   }
 
   Future<void> batchArchive(Set<String> ids, bool archived) async {
     if (ids.isEmpty) return;
+    await _metaReady;
     final remaining = state.archivedIds.where((id) => !ids.contains(id)).toList();
     final next = archived ? [...ids, ...remaining] : remaining;
     final clearCur = archived &&
         state.currentSessionId != null &&
         ids.contains(state.currentSessionId);
-    state = state.copyWith(archivedIds: next, clearCurrent: clearCur);
+    _setState(state.copyWith(archivedIds: next, clearCurrent: clearCur));
     await _saveMeta();
   }
 
@@ -353,17 +441,26 @@ class SessionsController extends Notifier<SessionsState> {
     }
   }
 
-  /// Removes/hides all sessions scoped to [workspacePath] when that workspace is removed.
+  /// Removes sessions whose owning workspace matches [workspacePath] without
+  /// touching conversations owned by more specific registered child workspaces.
   Future<void> removeWorkspaceSessions(String workspacePath) async {
     final normWs = normalizeWorkspacePath(workspacePath);
     if (normWs.isEmpty) return;
+    final workspaces = ref.read(workspacesProvider).workspaces;
     final ids = <String>{};
     for (final s in state.sessions) {
       final cwd = state.effectiveCwdOf(s);
       final inside =
           cwd == normWs ||
           (normWs == '/' ? cwd.startsWith('/') : cwd.startsWith('$normWs/'));
-      if (inside) ids.add(s.sessionId);
+      if (!inside) continue;
+      // If a more specific registered child workspace still owns this session,
+      // never delete it when removing an ancestor directory.
+      final owner = matchWorkspaceForCwd(cwd, workspaces);
+      if (owner != null && normalizeWorkspacePath(owner.path) != normWs) {
+        continue;
+      }
+      ids.add(s.sessionId);
     }
     if (ids.isNotEmpty) {
       await batchDelete(ids);
@@ -371,6 +468,7 @@ class SessionsController extends Notifier<SessionsState> {
   }
 
   void registerCreatedSession(AcpSessionInfo info, {bool select = true}) {
+    _createdInMemory.add(info.sessionId);
     final normCwd = info.cwd.trim().isEmpty
         ? ''
         : normalizeWorkspacePath(info.cwd);
@@ -391,12 +489,14 @@ class SessionsController extends Notifier<SessionsState> {
     final nextCreatedAt = Map<String, DateTime>.from(state.sessionCreatedAt)
       ..putIfAbsent(info.sessionId, DateTime.now);
 
-    state = state.copyWith(
-      sessions: next,
-      currentSessionId: select ? info.sessionId : state.currentSessionId,
-      deletedIds: state.deletedIds.where((id) => id != info.sessionId).toList(),
-      sessionWorkspaces: nextWorkspaces,
-      sessionCreatedAt: nextCreatedAt,
+    _setState(
+      state.copyWith(
+        sessions: next,
+        currentSessionId: select ? info.sessionId : state.currentSessionId,
+        deletedIds: state.deletedIds.where((id) => id != info.sessionId).toList(),
+        sessionWorkspaces: nextWorkspaces,
+        sessionCreatedAt: nextCreatedAt,
+      ),
     );
     unawaited(_saveMeta());
   }
@@ -414,52 +514,60 @@ class SessionsController extends Notifier<SessionsState> {
         else
           s,
     ];
-    state = state.copyWith(sessions: next);
+    _setState(state.copyWith(sessions: next));
   }
 
   Future<void> renameSession(String sessionId, String title) async {
     final clean = title.trim();
     if (clean.isEmpty) return;
+    await _metaReady;
     final nextTitles = Map<String, String>.from(state.customTitles)
       ..[sessionId] = clean;
-    state = state.copyWith(customTitles: nextTitles);
+    _setState(state.copyWith(customTitles: nextTitles));
     updateSessionTitle(sessionId, clean);
     await _saveMeta();
   }
 
   Future<void> togglePin(String sessionId) async {
+    await _metaReady;
     final pinned = state.isPinned(sessionId);
     final next = [
       if (!pinned) sessionId,
       for (final id in state.pinnedIds)
         if (id != sessionId) id,
     ];
-    state = state.copyWith(pinnedIds: next);
+    _setState(state.copyWith(pinnedIds: next));
     await _saveMeta();
   }
 
   Future<void> batchSetPinned(Set<String> ids, bool pinned) async {
     if (ids.isEmpty) return;
+    await _metaReady;
     final remaining = state.pinnedIds.where((id) => !ids.contains(id)).toList();
     final next = pinned ? [...ids, ...remaining] : remaining;
-    state = state.copyWith(pinnedIds: next);
+    _setState(state.copyWith(pinnedIds: next));
     await _saveMeta();
   }
 
   Future<void> setArchived(String sessionId, bool archived) async {
+    await _metaReady;
     final next = [
       if (archived) sessionId,
       for (final id in state.archivedIds)
         if (id != sessionId) id,
     ];
-    state = state.copyWith(
-      archivedIds: next,
-      clearCurrent: archived && state.currentSessionId == sessionId,
+    _setState(
+      state.copyWith(
+        archivedIds: next,
+        clearCurrent: archived && state.currentSessionId == sessionId,
+      ),
     );
     await _saveMeta();
   }
 
   Future<void> deleteSession(String sessionId) async {
+    await _metaReady;
+    _createdInMemory.remove(sessionId);
     final conn = ref.read(activeConnectionProvider).value;
     if (conn != null && conn.initResult.capabilities.canDeleteSession) {
       await conn.client.deleteSession(sessionId);
@@ -478,16 +586,18 @@ class SessionsController extends Notifier<SessionsState> {
       ...state.deletedIds,
       if (!state.deletedIds.contains(sessionId)) sessionId,
     ];
-    state = state.copyWith(
-      sessions: next,
-      currentSessionId: nextCurrent,
-      clearCurrent: nextCurrent == null,
-      pinnedIds: state.pinnedIds.where((id) => id != sessionId).toList(),
-      archivedIds: state.archivedIds.where((id) => id != sessionId).toList(),
-      deletedIds: nextDeleted,
-      customTitles: nextTitles,
-      sessionWorkspaces: nextWorkspaces,
-      sessionCreatedAt: nextCreatedAt,
+    _setState(
+      state.copyWith(
+        sessions: next,
+        currentSessionId: nextCurrent,
+        clearCurrent: nextCurrent == null,
+        pinnedIds: state.pinnedIds.where((id) => id != sessionId).toList(),
+        archivedIds: state.archivedIds.where((id) => id != sessionId).toList(),
+        deletedIds: nextDeleted,
+        customTitles: nextTitles,
+        sessionWorkspaces: nextWorkspaces,
+        sessionCreatedAt: nextCreatedAt,
+      ),
     );
     await _saveMeta();
   }
